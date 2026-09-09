@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/asset.schema.json",
+  "title": "asset",
+  "description": "Origin: v2 §15.5. The entity spine (U17). asset_key is stable within a tenant and survives IP change (NAT/DHCP). Keys are always (tenant_id, asset_key) — tenant isolation is a partition invariant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "asset_key", "first_seen", "last_seen"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "asset_key": { "type": "string", "minLength": 1 },
+    "first_seen": { "type": "string", "format": "date-time" },
+    "last_seen": { "type": "string", "format": "date-time" },
+    "ip_set": { "type": "array", "items": { "type": "string" } },
+    "mac_set": { "type": "array", "items": { "type": "string" } },
+    "hostname_set": { "type": "array", "items": { "type": "string" } },
+    "role_if_known": { "type": "string" },
+    "evidence_sources": { "type": "array", "items": { "type": "string" } },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

@@ -1,0 +1,78 @@
+# Cernity Helm values. The detector tier scales horizontally; point it at your
+# bus / state / storage (bring your own clusters, or in-cluster services).
+
+image:
+  registry: docker.io
+  repository: cernity          # images are cernity/<service>
+  tag: latest
+  pullPolicy: Always
+
+# ---- external backends -------------------------------------------------------
+# Cernity does not manage these; run them as clusters (Redpanda/Kafka, Redis
+# Cluster, ClickHouse) and point here. Values are the in-cluster addresses.
+bus:
+  bootstrap: "redpanda:9092"          # Kafka/Redpanda bootstrap servers
+
+state:
+  redisUrl: "redis://redis:6379/0"    # shared window state (Redis / Redis Cluster)
+
+clickhouse:
+  enabled: false                      # enable to run normalizer + persist findings
+  host: "clickhouse"
+  user: "ndr"
+  password: ""                        # or set existingSecret
+  existingSecret: ""                  # secret with key CLICKHOUSE_PASSWORD
+
+# ---- global detector settings ------------------------------------------------
+tenant: "default"
+windowSecs: 600
+evalSecs: 30
+logLevel: "INFO"
+
+resources:
+  requests: { cpu: "250m", memory: "256Mi" }
+  limits:   { cpu: "1",    memory: "512Mi" }
+
+# ---- detector workers --------------------------------------------------------
+# Each entry becomes a Deployment; hpa.enabled adds a HorizontalPodAutoscaler.
+# CPU-based HPA is the built-in default. For scaling on Kafka consumer-group lag
+# (the ideal signal), install KEDA and use a ScaledObject — see NOTES.
+detectors:
+  - name: ids-alerts
+    replicas: 1
+    hpa: { enabled: false, min: 1, max: 4, cpu: 70 }
+  - name: behavioral-detectors
+    replicas: 3
+    hpa: { enabled: true, min: 3, max: 32, cpu: 70 }
+  - name: dns-detector
+    replicas: 2
+    hpa: { enabled: true, min: 2, max: 16, cpu: 70 }
+  - name: http-detector
+    replicas: 2
+    hpa: { enabled: true, min: 2, max: 16, cpu: 70 }
+  - name: protocol-detectors
+    replicas: 2
+    hpa: { enabled: true, min: 2, max: 16, cpu: 70 }
+  - name: east-west-detectors
+    replicas: 1
+    hpa: { enabled: true, min: 1, max: 8, cpu: 70 }
+  - name: anomaly-detector
+    replicas: 1
+    hpa: { enabled: false, min: 1, max: 8, cpu: 70 }
+  - name: coverage-detector
+    replicas: 1
+    hpa: { enabled: false, min: 1, max: 4, cpu: 70 }
+  - name: threat-intel
+    replicas: 1
+    hpa: { enabled: false, min: 1, max: 4, cpu: 70 }
+
+# ---- finding pipeline --------------------------------------------------------
+findingService:
+  replicas: 2
+
+findingsForwarder:
+  replicas: 2
+  sink: "file"                        # file | (opensearch/splunk/webhook adapters)
+
+normalizer:                           # requires clickhouse.enabled
+  replicas: 2

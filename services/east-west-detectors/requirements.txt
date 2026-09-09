@@ -1,0 +1,6 @@
+kafka-python-ng
+lz4
+python-snappy
+zstandard
+prometheus_client==0.26.0
+redis==8.1.0

@@ -13,7 +13,7 @@ from forwarder import handle_batch
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(),
                     format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("findings-forwarder")
+log = ndr_runtime.setup_logging("findings-forwarder")
 
 FINAL_TOPIC = "ndr.finding.final.v1"
 HEARTBEAT_SECS = int(os.environ.get("LOG_HEARTBEAT_SECS", "60"))

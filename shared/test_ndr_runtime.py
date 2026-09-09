@@ -62,6 +62,18 @@ def test_assigned_partitions_empty_before_rebalance():
     assert rt.assigned_partitions(_FakeConsumer([])) == set()
 
 
+def test_metrics_attribute_resolves_lazily():
+    # Services that run their own metrics server reach it as ndr_runtime.metrics;
+    # the lazy PEP 562 __getattr__ must resolve it (regression: it once raised
+    # AttributeError after metrics became a lazy import, crash-looping 4 detectors).
+    assert rt.metrics.__name__ == "metrics"
+    try:
+        rt.definitely_not_an_attribute
+        assert False, "unknown attribute should raise"
+    except AttributeError:
+        pass
+
+
 if __name__ == "__main__":
     for _n, _f in sorted(globals().items()):
         if _n.startswith("test_") and callable(_f):

@@ -16,8 +16,7 @@ import clickhouse_connect
 
 import models
 
-log = logging.getLogger("normalizer")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("normalizer")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 CH_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")

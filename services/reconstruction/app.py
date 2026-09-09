@@ -10,6 +10,7 @@ Assembly logic is covered by test_reconstruct.py; this is the I/O shell.
 import json
 import logging
 import os
+import ndr_runtime
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,8 +21,7 @@ import clickhouse_connect
 
 import reconstruct as rc
 
-log = logging.getLogger("reconstruction")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("reconstruction")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 CH_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")

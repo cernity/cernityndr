@@ -24,8 +24,7 @@ import ndr_runtime
 import store as store_mod
 import ew
 
-log = logging.getLogger("east-west-detectors")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("east-west-detectors")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")

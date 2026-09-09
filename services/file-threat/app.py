@@ -14,8 +14,7 @@ import urllib.request
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U6 rollout)
 import filematch
 
-log = logging.getLogger("file-threat")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("file-threat")
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")
 WINDOW = float(os.environ.get("WINDOW_SECS", "600"))

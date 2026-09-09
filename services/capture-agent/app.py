@@ -11,6 +11,7 @@ directives arrive over the same authenticated Kafka bus as everything else.
 import json
 import logging
 import os
+import ndr_runtime
 import signal
 import threading
 import time
@@ -21,8 +22,7 @@ from kafka import KafkaConsumer, KafkaProducer
 import agent
 import suricata_socket as ss
 
-log = logging.getLogger("capture-agent")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("capture-agent")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 SENSOR_ID = os.environ.get("SENSOR_ID", "sensor-1")

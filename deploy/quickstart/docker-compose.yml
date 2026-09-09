@@ -1,0 +1,25 @@
+# Quickstart: the central core plus a one-shot feeder that replays a beacon
+# capture so you see a finding end to end without a live sensor.
+#   docker compose -f deploy/quickstart/docker-compose.yml up --build
+# Read the finding:
+#   docker compose -f deploy/central/docker-compose.yml exec findings-forwarder cat /out/findings.jsonl
+include:
+  - ../central/docker-compose.yml
+
+services:
+  eve-feeder:
+    image: python:3.12-slim
+    container_name: cernity-eve-feeder
+    volumes:
+      - ../../tools/eve-feeder:/feeder:ro
+    working_dir: /feeder
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+    command:
+      - sh
+      - -c
+      - "pip install --no-cache-dir kafka-python-ng >/dev/null 2>&1 && sleep 8 && python feeder.py fixtures/beacon-eve.jsonl"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"

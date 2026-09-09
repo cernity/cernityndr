@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/network_flow.schema.json",
+  "title": "network_flow",
+  "description": "Origin: v2 §15.2. Normalized Suricata flow record for the analytics plane (ClickHouse).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "sensor_id", "event_time", "community_id", "src_ip", "dst_ip", "transport"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "sensor_id": { "type": "string", "minLength": 1 },
+    "event_time": { "type": "string", "format": "date-time" },
+    "flow_id": { "type": ["integer", "string"] },
+    "community_id": { "type": "string", "minLength": 1 },
+
+    "src_ip": { "type": "string" },
+    "src_port": { "type": "integer" },
+    "dst_ip": { "type": "string" },
+    "dst_port": { "type": "integer" },
+    "transport": { "type": "string" },
+
+    "app_proto": { "type": "string" },
+    "app_proto_orig": { "type": "string" },
+    "app_proto_expected": { "type": "string" },
+    "app_proto_ts": { "type": "string" },
+    "app_proto_tc": { "type": "string" },
+
+    "ndpi_protocol": { "type": "string" },
+    "ndpi_application": { "type": "string" },
+    "ndpi_risk_set": { "type": "array", "items": { "type": "string" } },
+
+    "flow_start": { "type": "string", "format": "date-time" },
+    "flow_end": { "type": "string", "format": "date-time" },
+    "duration": { "type": "number" },
+    "pkts_to_server": { "type": "integer" },
+    "pkts_to_client": { "type": "integer" },
+    "bytes_to_server": { "type": "integer" },
+    "bytes_to_client": { "type": "integer" },
+    "state": { "type": "string" },
+    "reason": { "type": "string" },
+    "alerted": { "type": "boolean" }
+  }
+}

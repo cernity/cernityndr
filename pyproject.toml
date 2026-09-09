@@ -1,0 +1,18 @@
+[project]
+name = "cernity-ndr"
+version = "0.0.1"
+description = "Central NDR analytics for Suricata sensors"
+requires-python = ">=3.12"
+license = { text = "LicenseRef-PolyForm-Perimeter-1.0.1" }
+dependencies = ["kafka-python>=2.0", "jsonschema>=4.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cernity_shared", "cernity_contracts"]
+
+[tool.setuptools.package-dir]
+cernity_shared = "shared"
+cernity_contracts = "contracts"

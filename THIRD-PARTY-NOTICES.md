@@ -36,6 +36,10 @@ project, as licenses change by version.
 |---|---|---|
 | Suricata | edge IDS / telemetry source (not shipped; operator-provided or reference image) | GPL-2.0 |
 | Zeek | central on-demand deep analysis (optional overlay) | BSD-3-Clause |
+| JA4 (TLS client fingerprint), `FoxIO-LLC/ja4` Zeek package | base client-fingerprint rarity; bundled in the `cernity/zeek-central` image | BSD-3-Clause (base JA4 is open source, no patent claims) |
+| JA4+ suite (JA4S / JA4H / JA4X / JA4SSH …), `FoxIO-LLC/ja4` Zeek package | on-demand forensic fingerprints via `zeek-central` enrichment; bundled in the image | **FoxIO License 1.1** (patent-pending; free for internal & academic use, **not** for monetization) — see note below |
+| JA3, `salesforce/ja3` Zeek package | legacy TLS fingerprint + abuse.ch SSLBL matching; bundled in the image | BSD-3-Clause |
+| nDPI (ntop) | optional Suricata plugin; `flow_risk` verdict feeds `behavioral-detectors` (operator-built into Suricata, not shipped) | LGPL-3.0 (library) / GPL-3.0 (some tools) — verify by component |
 | Fluent Bit | sensor-side log shipper | Apache-2.0 |
 | Redpanda | message bus | Redpanda Community License / BSL (source-available) |
 | Redis | detector window state | RSALv2 / SSPL (recent versions) — verify by version |
@@ -54,6 +58,22 @@ redistributed here, and their own licenses govern their own works:
   the reference method for beaconing, long-connection, and DNS-tunnel scoring.
 - **abuse.ch** feeds (Feodo Tracker, SSLBL, JA3) — used under abuse.ch's own terms;
   operators are responsible for complying with the feed terms.
+
+## Note on JA4+ (FoxIO License 1.1)
+
+FoxIO splits its fingerprinting suite: the base **JA4** (TLS client) method is
+BSD-3-Clause and free for any use, but the rest of the suite — **JA4+** (JA4S, JA4H,
+JA4X, JA4SSH, and the others) — is licensed under the **FoxIO License 1.1**. That
+license permits internal, academic, and non-commercial use, but **prohibits
+monetization**: selling JA4+ fingerprinting as part of a commercial product or service
+requires a separate OEM license from FoxIO (john@foxio.io).
+
+Cernity's own code does **not** implement the JA4+ methods — `zeek-central` merely reads
+the fingerprint values emitted by the bundled FoxIO Zeek package. The `cernity/zeek-central`
+image, however, does bundle that package. If you redistribute Cernity images commercially,
+or offer JA4+ output as part of a paid product, review the FoxIO License 1.1 and contact
+FoxIO. Running Cernity for your own organization's security is squarely within the
+permitted non-commercial/internal use.
 
 ## Note for redistributors
 

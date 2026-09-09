@@ -105,7 +105,7 @@ Three deployment paths, same architecture:
 | Path | For | Where |
 |---|---|---|
 | **Single host** (Compose) | evaluation, small single sites | `deploy/central`, `deploy/quickstart` |
-| **Manual multi-server** (Compose, no orchestration) | your own hardware, static scaling | [`deploy/scale/`](deploy/scale/README.md) |
+| **Manual multi-server** (Compose, no orchestration) | your own hardware, static scaling | [`deploy/scale/`](deploy/scale/README.md) · [placement guide](docs/placement.md) |
 | **Kubernetes** (Helm) | dynamic scaling / large fleets | `deploy/helm/cernity` |
 
 The detectors are stateless consumer-group workers sharing state in Redis, so all
@@ -146,5 +146,7 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 - [Configuring Suricata for Cernity](docs/suricata-config.md)
 - [Deploying the sensor bundle](docs/deploy-sensor.md)
 - [SIEM integrations](docs/siem-integrations.md) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)
+- [Logging & health](docs/logging.md) — JSON/text logs, levels, heartbeat, metrics/health endpoints
+- [Finding enrichment](docs/enrichment.md) — GeoIP/ASN, community ID, reverse DNS, domain age/NRD, fingerprint naming, reputation (sign-ups + keys)
 - [Development guide](docs/development.md) — build, test, and extend Cernity
 - [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)

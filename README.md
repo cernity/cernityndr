@@ -59,7 +59,9 @@ flowchart LR
   optional `cernity-capture-agent` for on-demand packet forensics. No detection
   runs on the sensor — it only produces and forwards logs.
 - **Central:** a set of small single-job services on a message bus, backed by
-  Redpanda, Redis, ClickHouse, and object storage.
+  Redpanda, Redis, ClickHouse, and object storage. Cernity speaks the **Kafka API** —
+  Redpanda is the bundled reference, but any Kafka-API broker (Apache Kafka, Confluent,
+  MSK, Aiven, WarpStream) works: just point `REDPANDA_BOOTSTRAP` at it.
 - **Output:** Cernity emits findings only. It does **not** ship a SIEM — it forwards
   findings to yours. OpenSearch is the documented reference; any SIEM is a config
   or adapter swap.
@@ -136,6 +138,7 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
+- [**How Cernity works**](docs/how-it-works.md) — the whole system in plain language, every piece explained
 - [Configuring Suricata for Cernity](docs/suricata-config.md)
 - [Deploying the sensor bundle](docs/deploy-sensor.md)
 - [SIEM integrations](docs/siem-integrations.md) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)

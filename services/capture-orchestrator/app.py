@@ -13,13 +13,13 @@ is covered by test_gates.py.
 import json
 import logging
 import os
+import ndr_runtime
 import signal
 
 from kafka import KafkaConsumer, KafkaProducer
 import gates
 
-log = logging.getLogger("capture-orchestrator")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("capture-orchestrator")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 REQUEST_TOPIC = "ndr.capture.request.v1"

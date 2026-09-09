@@ -14,8 +14,7 @@ import time
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U6 rollout)
 import promote_notice
 
-log = logging.getLogger("zeek-notice")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("zeek-notice")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")

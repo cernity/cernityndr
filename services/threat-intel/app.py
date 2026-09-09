@@ -15,8 +15,7 @@ import urllib.request
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U5/U6)
 import ti
 
-log = logging.getLogger("threat-intel")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("threat-intel")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")

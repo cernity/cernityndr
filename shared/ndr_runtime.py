@@ -14,12 +14,25 @@ default. The kafka import is lazy so the config helpers and `assigned_partitions
 unit-testable without a broker (test_ndr_runtime.py).
 """
 import json
+import logging
 import os
+import sys
+import threading
+import time
+from datetime import datetime, timezone
 
-import metrics  # lives beside this file in _shared/ and is COPYed into every
-                # image; available as ndr_runtime.metrics, though behavioral-
-                # detectors imports it directly. Imported here so the runtime can
-                # wire health/readiness uniformly later.
+# `metrics` (which needs prometheus_client) is imported lazily so that setup_logging —
+# the piece every service uses — has zero heavy deps and works even in the light,
+# self-contained service images. Services that manage their own metrics server reach it
+# as `ndr_runtime.metrics`; PEP 562 module __getattr__ resolves that on first access
+# (still lazy — prometheus_client is only imported when a service actually touches it).
+
+
+def __getattr__(name):
+    if name == "metrics":
+        import metrics                              # lazy: only imported when a service uses it
+        return metrics
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _int(name, default):
@@ -94,6 +107,82 @@ def start_health(port=None, ready=("consumer",)):
     components ready (plan 003 observability). A stateless consumer uses the
     default ('consumer',); a service with external state declares that component
     not-ready first and flips it when reachable."""
+    import metrics  # lazy: only services that expose /metrics need prometheus_client
     metrics.start(port if port is not None else int(os.environ.get("NDR_METRICS_PORT", "9108")))
     for c in ready:
         metrics.set_ready(c)
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# One shared setup so every service logs identically. LOG_FORMAT=json (default)
+# emits one JSON object per line with standard fields (ts, level, svc, tenant,
+# event); LOG_FORMAT=text is human-readable for `docker logs` / the quickstart.
+# LOG_LEVEL sets the threshold (INFO default). setup_logging also starts a
+# low-frequency liveness heartbeat so a deployer can see the service is alive.
+
+class _JsonFormatter(logging.Formatter):
+    def __init__(self, service):
+        super().__init__()
+        self.service = service
+
+    def format(self, record):
+        d = {"ts": datetime.now(timezone.utc).isoformat(),
+             "level": record.levelname,
+             "svc": self.service,
+             "tenant": os.environ.get("NDR_TENANT", "default"),
+             "msg": record.getMessage()}
+        ev = getattr(record, "cernity_event", None)
+        if ev:
+            d["event"] = ev
+        for k, v in getattr(record, "cernity_fields", {}).items():
+            d[k] = v
+        if record.exc_info:
+            d["exc"] = self.formatException(record.exc_info)
+        return json.dumps(d, default=str)
+
+
+def setup_logging(service):
+    """Configure root logging for a service and return its logger. Reads
+    LOG_LEVEL (INFO) and LOG_FORMAT (json|text, json default). Also starts a
+    daemon liveness heartbeat every HEARTBEAT_SECS (default 300s)."""
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    fmt = os.environ.get("LOG_FORMAT", "json").lower()
+    handler = logging.StreamHandler(sys.stdout)
+    if fmt == "text":
+        handler.setFormatter(logging.Formatter(
+            f"%(asctime)s %(levelname)s [{service}] %(message)s"))
+    else:
+        handler.setFormatter(_JsonFormatter(service))
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level)
+    log = logging.getLogger(service)
+    _start_heartbeat(log)
+    return log
+
+
+def log_event(logger, event, level=logging.INFO, **fields):
+    """Emit a structured event: clean JSON fields in json mode, `event k=v k=v`
+    inline in text mode."""
+    msg = event
+    if fields:
+        msg = event + " " + " ".join(f"{k}={v}" for k, v in fields.items())
+    logger.log(level, msg, extra={"cernity_event": event, "cernity_fields": fields})
+
+
+_HEARTBEAT_STARTED = False
+
+
+def _start_heartbeat(logger):
+    global _HEARTBEAT_STARTED
+    if _HEARTBEAT_STARTED:
+        return
+    _HEARTBEAT_STARTED = True
+    secs = _int("HEARTBEAT_SECS", 300)
+
+    def beat():
+        while True:
+            time.sleep(secs)
+            log_event(logger, "heartbeat", uptime_s=secs)
+
+    threading.Thread(target=beat, name="cernity-heartbeat", daemon=True).start()

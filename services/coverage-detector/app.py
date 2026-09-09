@@ -12,8 +12,7 @@ import ndr_runtime                      # shared tuned consumer/producer (plan 0
 
 import coverage as cov
 
-log = logging.getLogger("coverage-detector")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("coverage-detector")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")

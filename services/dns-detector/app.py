@@ -22,8 +22,7 @@ import ndr_runtime                      # shared tuned consumer/producer + metri
 import store as store_mod
 import dns_detect as dd
 
-log = logging.getLogger("dns-detector")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("dns-detector")
 
 TENANT = os.environ.get("NDR_TENANT", "default")
 DGA_THRESHOLD = float(os.environ.get("DGA_THRESHOLD", "0.72"))

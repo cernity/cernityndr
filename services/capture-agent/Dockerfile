@@ -5,6 +5,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends tcpdump && rm -rf /var/lib/apt/lists/*
 COPY services/capture-agent/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+COPY shared/ndr_runtime.py ./
 COPY services/capture-agent/suricata_socket.py services/capture-agent/agent.py services/capture-agent/app.py services/capture-agent/test_agent.py ./
 RUN python test_agent.py
 # Note: no USER nobody and CMD (not ENTRYPOINT) are deliberate here — this agent

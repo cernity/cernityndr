@@ -19,8 +19,7 @@ import ndr_runtime                      # shared tuned consumer/producer + metri
 import store as store_mod
 import http_detect as hd
 
-log = logging.getLogger("http-detector")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("http-detector")
 
 TENANT = os.environ.get("NDR_TENANT", "default")
 GROUP_ID = os.environ.get("NDR_GROUP_ID", "ndr-http-detector")

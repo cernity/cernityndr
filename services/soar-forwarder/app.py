@@ -17,8 +17,7 @@ import urllib.request
 
 import playbook
 
-log = logging.getLogger("soar-forwarder")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("soar-forwarder")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 NTFY_URL = os.environ.get("NTFY_URL", "")

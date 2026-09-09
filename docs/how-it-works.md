@@ -129,9 +129,11 @@ and publishes candidates when something looks wrong.
 
 ### Findings lifecycle
 - **finding-service** — the brain of the output. De-duplicates candidates (the same
-  beacon seen repeatedly becomes one finding), tags MITRE techniques, decides whether
-  packets are needed, and emits the **final** finding. Optionally records findings in
-  ClickHouse.
+  beacon seen repeatedly becomes one finding), tags MITRE techniques, **enriches** the
+  finding (GeoIP/ASN and community-ID always; optionally reverse-DNS, domain age /
+  newly-registered-domain, fingerprint naming, and IP reputation — see
+  `docs/enrichment.md`), decides whether packets are needed, and emits the **final**
+  finding. Optionally records findings in ClickHouse.
 - **findings-forwarder** — the exit. Delivers final findings to your SIEM through a
   pluggable adapter (Devo, Splunk, Elasticsearch/OpenSearch, syslog/CEF, webhook, or a
   file), or several at once. See `docs/siem-integrations.md`.
@@ -172,6 +174,13 @@ for the one connection involved:
 - **flink** — the same scan-detection and session-stitching logic expressed as Flink
   SQL, for teams that prefer a streaming-SQL engine. The Python detectors cover the
   core without it.
+
+### ntop integration (optional)
+- **nDPI** — build Suricata with ntop's nDPI plugin and its flow-risk verdict
+  (`ndpi.flow_risk`: malicious JA3/JA4, DGA, cleartext creds, bad TLS…) flows into the
+  behavioral detector automatically. The single highest-value edge add-on; see
+  `docs/suricata-config.md`.
+- **PF_RING (ZC)** — ntop's kernel-bypass capture for line-rate (10 Gbps+) sensors.
 
 ---
 

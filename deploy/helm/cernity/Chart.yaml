@@ -1,0 +1,9 @@
+apiVersion: v2
+name: cernity
+description: Central NDR analytics for Suricata sensors — detector tier + finding pipeline, horizontally scalable on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "latest"
+home: https://github.com/cernity/cernityndr
+sources:
+  - https://github.com/cernity/cernityndr

@@ -21,7 +21,8 @@ run_dir() {
   local dir="$1"
   [ -d "$dir" ] || return 0
   echo "== $dir =="
-  ( cd "$dir" && for t in test_*.py; do [ -e "$t" ] && "$PYBIN" "$t"; done )
+  # nullglob: a dir with no test files (e.g. flink) is a clean no-op, not an error.
+  ( cd "$dir"; shopt -s nullglob; for t in test_*.py; do "$PYBIN" "$t" || exit 1; done; exit 0 )
 }
 
 run_dir "$ROOT/shared"

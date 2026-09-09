@@ -1,0 +1,20 @@
+Cernity
+Copyright 2026 The Cernity Project
+
+This NOTICE covers the original work of the Cernity Project, which is licensed
+under the PolyForm Perimeter License 1.0.1. See the LICENSE file for the full
+terms.
+
+Required Notice: Copyright 2026 The Cernity Project (https://github.com/cernity/cernityndr)
+
+"Cernity" is a trademark of the Cernity Project. See TRADEMARK.md.
+
+---
+
+SCOPE: The Cernity license covers only Cernity's own original code. Cernity runs
+alongside, depends on, and bundles independent third-party software (for example
+Suricata, Zeek, Fluent Bit, Redpanda, Redis, ClickHouse, MinIO, OpenSearch, and
+Python libraries), each governed by its own license and NOT by the Cernity
+license. It also reimplements published techniques (RITA; abuse.ch feeds) that are
+modeled, not redistributed. See THIRD-PARTY-NOTICES.md for the full list and the
+obligations that apply when you run or redistribute Cernity.

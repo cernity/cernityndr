@@ -2,6 +2,10 @@
 
 **Central network detection and response (NDR) analytics for Suricata sensors.**
 
+[![ci](https://github.com/cernity/cernityndr/actions/workflows/ci.yml/badge.svg)](https://github.com/cernity/cernityndr/actions/workflows/ci.yml)
+[![license: PolyForm Perimeter 1.0.1](https://img.shields.io/badge/license-PolyForm%20Perimeter%201.0.1-blue)](LICENSE)
+[![images: Docker Hub](https://img.shields.io/badge/images-cernity%20on%20Docker%20Hub-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/u/cernity)
+
 Cernity is the middle tier of a tiered NDR architecture. Suricata inspects packets
 at the edge and emits telemetry; Cernity does the heavy, stateful analysis
 centrally — behavioral detection (beaconing, exfiltration, DNS tunneling, long
@@ -142,3 +146,5 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 - [Configuring Suricata for Cernity](docs/suricata-config.md)
 - [Deploying the sensor bundle](docs/deploy-sensor.md)
 - [SIEM integrations](docs/siem-integrations.md) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)
+- [Development guide](docs/development.md) — build, test, and extend Cernity
+- [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)

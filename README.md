@@ -138,4 +138,4 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [Configuring Suricata for Cernity](docs/suricata-config.md)
 - [Deploying the sensor bundle](docs/deploy-sensor.md)
-- OpenSearch reference integration — _coming_
+- [SIEM integrations](docs/siem-integrations.md) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)

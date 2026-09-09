@@ -13,7 +13,15 @@ jobs:
     strategy:
       matrix:
         service:
+          - ids-alerts
           - behavioral-detectors
+          - dns-detector
+          - http-detector
+          - protocol-detectors
+          - east-west-detectors
+          - anomaly-detector
+          - coverage-detector
+          - threat-intel
           - finding-service
           - findings-forwarder
     steps:

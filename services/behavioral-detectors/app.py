@@ -28,8 +28,7 @@ import store as store_mod
 import metrics
 import config_source
 
-log = logging.getLogger("behavioral-detectors")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("behavioral-detectors")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")
@@ -77,6 +76,18 @@ def _tenant_of(e) -> str:
     return TENANT
 
 
+def _ndpi_risks(n):
+    """Normalize the nDPI risk set to a list of risk strings. Suricata's nDPI
+    plugin emits it as `flow_risk` (older/custom builds use `risk`); accept both.
+    A dict may be {id: name} or {name: true}, so fold in keys and values."""
+    rk = n.get("risk") or n.get("flow_risk")
+    if isinstance(rk, dict):
+        return [str(k) for k in rk.keys()] + [str(v) for v in rk.values()]
+    if isinstance(rk, list):
+        return rk
+    return [rk] if rk else []
+
+
 def _event_epoch(e) -> float:
     ts = e.get("timestamp") or (e.get("flow") or {}).get("start")
     if ts:
@@ -99,6 +110,21 @@ def _key_parts(key: str):
 def _pair(entity: str):
     a, _, b = entity.partition("|")
     return a, b
+
+
+def _timing_evidence(ts):
+    """Transparency: surface the beacon's own timing math (mean interval + jitter +
+    connection count) as evidence entities, so an analyst sees *why* it scored, not
+    just that it did. Cheap to compute from the window timestamps already in hand."""
+    ts = sorted(float(t) for t in ts)
+    if len(ts) < 2:
+        return [{"type": "connections", "value": len(ts)}]
+    gaps = [b - a for a, b in zip(ts, ts[1:])]
+    mean = sum(gaps) / len(gaps)
+    jitter = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5
+    return [{"type": "interval_s", "value": round(mean, 1)},
+            {"type": "jitter_s", "value": round(jitter, 1)},
+            {"type": "connections", "value": len(ts)}]
 
 
 def _candidate(detector_id, category, severity, confidence, entities, tenant):
@@ -250,7 +276,8 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
         if is_b:
             sev = det.gated_severity(7, breed, risks, env_assets=env)
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
-                              {"type": "ip", "role": "dst", "value": dst}])
+                              {"type": "ip", "role": "dst", "value": dst}]
+                             + _timing_evidence(ts))
             c = _candidate("beacon", "c2", sev, score, ent, ten)
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("BEACON %s->%s sev=%s score=%s", src, dst, sev, score)
@@ -384,8 +411,7 @@ def _handle(e, producer, now, part=0, cfg=None):
         ten = _tenant_of(e)
         evt = _event_epoch(e)
         n = e.get("ndpi") or {}
-        rk = n.get("risk")
-        risks = rk if isinstance(rk, list) else (list(rk) if isinstance(rk, dict) else ([rk] if rk else []))
+        risks = _ndpi_risks(n)
         breed = n.get("breed") or ""
         f = e.get("flow", {}) or {}
         b2s = int(f.get("bytes_toserver", 0) or 0)

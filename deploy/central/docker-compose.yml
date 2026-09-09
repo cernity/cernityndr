@@ -10,6 +10,16 @@ x-logging: &cernity-logging
     max-size: "10m"
     max-file: "3"
 
+# Common environment shared by the detector services.
+x-detector-env: &detector-env
+  REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+  NDR_STATE_BACKEND: ${NDR_STATE_BACKEND:-memory}
+  NDR_TENANT: ${NDR_TENANT:-default}
+  NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
+  WINDOW_SECS: ${WINDOW_SECS:-600}
+  EVAL_SECS: ${EVAL_SECS:-30}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
 services:
   redpanda:
     image: redpandadata/redpanda:latest
@@ -33,31 +43,90 @@ services:
     logging: *cernity-logging
     restart: unless-stopped
 
+  ids-alerts:
+    image: cernity/ids-alerts:latest
+    build: {context: ../.., dockerfile: services/ids-alerts/Dockerfile}
+    container_name: cernity-ids-alerts
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
   behavioral-detectors:
     image: cernity/behavioral-detectors:latest
-    build:
-      context: ../..
-      dockerfile: services/behavioral-detectors/Dockerfile
+    build: {context: ../.., dockerfile: services/behavioral-detectors/Dockerfile}
     container_name: cernity-behavioral-detectors
-    environment:
-      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
-      NDR_STATE_BACKEND: ${NDR_STATE_BACKEND:-memory}
-      NDR_TENANT: ${NDR_TENANT:-default}
-      NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
-      WINDOW_SECS: ${WINDOW_SECS:-600}
-      EVAL_SECS: ${EVAL_SECS:-30}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      redpanda:
-        condition: service_healthy
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  dns-detector:
+    image: cernity/dns-detector:latest
+    build: {context: ../.., dockerfile: services/dns-detector/Dockerfile}
+    container_name: cernity-dns-detector
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  http-detector:
+    image: cernity/http-detector:latest
+    build: {context: ../.., dockerfile: services/http-detector/Dockerfile}
+    container_name: cernity-http-detector
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  protocol-detectors:
+    image: cernity/protocol-detectors:latest
+    build: {context: ../.., dockerfile: services/protocol-detectors/Dockerfile}
+    container_name: cernity-protocol-detectors
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  east-west-detectors:
+    image: cernity/east-west-detectors:latest
+    build: {context: ../.., dockerfile: services/east-west-detectors/Dockerfile}
+    container_name: cernity-east-west-detectors
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  anomaly-detector:
+    image: cernity/anomaly-detector:latest
+    build: {context: ../.., dockerfile: services/anomaly-detector/Dockerfile}
+    container_name: cernity-anomaly-detector
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  coverage-detector:
+    image: cernity/coverage-detector:latest
+    build: {context: ../.., dockerfile: services/coverage-detector/Dockerfile}
+    container_name: cernity-coverage-detector
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  threat-intel:
+    image: cernity/threat-intel:latest
+    build: {context: ../.., dockerfile: services/threat-intel/Dockerfile}
+    container_name: cernity-threat-intel
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
     restart: unless-stopped
 
   finding-service:
     image: cernity/finding-service:latest
-    build:
-      context: ../..
-      dockerfile: services/finding-service/Dockerfile
+    build: {context: ../.., dockerfile: services/finding-service/Dockerfile}
     container_name: cernity-finding-service
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
@@ -65,17 +134,13 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      redpanda:
-        condition: service_healthy
+    depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
     restart: unless-stopped
 
   findings-forwarder:
     image: cernity/findings-forwarder:latest
-    build:
-      context: ../..
-      dockerfile: services/findings-forwarder/Dockerfile
+    build: {context: ../.., dockerfile: services/findings-forwarder/Dockerfile}
     container_name: cernity-findings-forwarder
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
@@ -84,9 +149,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - cernity-out:/out
-    depends_on:
-      redpanda:
-        condition: service_healthy
+    depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
     restart: unless-stopped
 

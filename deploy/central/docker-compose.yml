@@ -1,0 +1,94 @@
+# Cernity central core. All tunables come from the repo-root .env file
+# (copy cernity.env.example -> .env); the defaults below apply if a value is unset.
+# Run from the repo root so Compose auto-loads .env:
+#   docker compose -f deploy/central/docker-compose.yml up --build
+
+# Cap every container's logs so they can never fill the disk (rotated, ~30 MB max).
+x-logging: &cernity-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: cernity-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  behavioral-detectors:
+    image: cernity/behavioral-detectors:latest
+    build:
+      context: ../..
+      dockerfile: services/behavioral-detectors/Dockerfile
+    container_name: cernity-behavioral-detectors
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      NDR_STATE_BACKEND: ${NDR_STATE_BACKEND:-memory}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
+      WINDOW_SECS: ${WINDOW_SECS:-600}
+      EVAL_SECS: ${EVAL_SECS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  finding-service:
+    image: cernity/finding-service:latest
+    build:
+      context: ../..
+      dockerfile: services/finding-service/Dockerfile
+    container_name: cernity-finding-service
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  findings-forwarder:
+    image: cernity/findings-forwarder:latest
+    build:
+      context: ../..
+      dockerfile: services/findings-forwarder/Dockerfile
+    container_name: cernity-findings-forwarder
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CERNITY_SINK: ${CERNITY_SINK:-file}
+      CERNITY_SINK_FILE: ${CERNITY_SINK_FILE:-/out/findings.jsonl}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - cernity-out:/out
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    logging: *cernity-logging
+    restart: unless-stopped
+
+volumes:
+  cernity-out: {}

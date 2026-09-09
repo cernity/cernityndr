@@ -9,7 +9,6 @@ import subprocess
 import time
 
 QUICK = ["docker", "compose", "-f", "deploy/quickstart/docker-compose.yml"]
-CENTRAL = ["docker", "compose", "-f", "deploy/central/docker-compose.yml"]
 
 
 def _run(*args):
@@ -17,8 +16,11 @@ def _run(*args):
 
 
 def _sink():
+    # Read by container name (project-independent): the quickstart and central
+    # compose files are separate Compose projects, so `compose exec` scoped to the
+    # central project would not see the quickstart project's container.
     out = subprocess.run(
-        CENTRAL + ["exec", "-T", "findings-forwarder", "cat", "/out/findings.jsonl"],
+        ["docker", "exec", "cernity-findings-forwarder", "cat", "/out/findings.jsonl"],
         capture_output=True, text=True).stdout.strip()
     return [json.loads(l) for l in out.splitlines() if l.strip()] if out else []
 

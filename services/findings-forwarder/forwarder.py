@@ -1,7 +1,12 @@
-"""Pure forward logic: hand each finding to the sink adapter. Kept separate from
-the I/O shell so it is testable without a broker."""
+"""Pure forward logic: hand findings to the sink adapter. Uses the adapter's
+emit_batch when available (efficient bulk delivery), else per-finding emit."""
 
 
 def handle_batch(findings, adapter):
-    for f in findings:
-        adapter.emit(f)
+    if not findings:
+        return
+    if hasattr(adapter, "emit_batch"):
+        adapter.emit_batch(findings)
+    else:
+        for f in findings:
+            adapter.emit(f)

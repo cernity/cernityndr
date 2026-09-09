@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/envelope.schema.json",
+  "title": "NDR common envelope",
+  "description": "Origin: v2 §15.1. Every event on the transport carries this wrapper. Tenant/sensor identity is injected or verified at the trusted ingress boundary (normalizer, U6), never trusted from the edge blindly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tenant_id", "sensor_id", "event_time", "source_product", "event_type"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "sensor_id": { "type": "string", "minLength": 1 },
+    "received_at": { "type": "string", "format": "date-time" },
+    "event_time": { "type": "string", "format": "date-time" },
+    "source_product": { "type": "string", "enum": ["suricata", "zeek", "ndr"] },
+    "source_version": { "type": "string" },
+    "event_type": { "type": "string" },
+    "flow_id": { "type": ["integer", "string"] },
+    "community_id": { "type": "string" },
+    "schema_meta": {
+      "type": "object",
+      "description": "Mixed-fleet identity (v6 §21): pinned per event so the normalizer keys by declared schema, never by sniffing structure.",
+      "properties": {
+        "suricata_version": { "type": "string" },
+        "dns_version": { "type": "integer" },
+        "ndpi_schema_fingerprint": { "type": "string" }
+      }
+    },
+    "payload": { "type": "object" }
+  }
+}

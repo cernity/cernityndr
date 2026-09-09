@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install kafka-python-ng jsonschema prometheus_client lz4 redis
+      - name: Run unit test gate
+        run: ./run-tests.sh
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: End-to-end walking skeleton (Docker)
+        run: python tests/test_e2e_skeleton.py

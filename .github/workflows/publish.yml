@@ -1,11 +1,13 @@
 name: publish
 
-# Build and push service images to Docker Hub on pushes to main (and tags).
+# Build and push service images to Docker Hub. Runs on version tags (a release)
+# or manually from the Actions tab — not on every push, so it never fails noisily
+# before the Docker Hub secrets are set.
 # Requires two repository secrets: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   images:

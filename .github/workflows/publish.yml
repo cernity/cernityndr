@@ -29,6 +29,15 @@ jobs:
           - normalizer
           - asset-service
           - correlation-service
+          - capture-agent
+          - capture-orchestrator
+          - zeek-central
+          - zeek-notice
+          - reconstruction
+          - file-threat
+          - file-yara
+          - soar-forwarder
+          - flink
     steps:
       - uses: actions/checkout@v4
 

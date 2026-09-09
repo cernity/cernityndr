@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-finding-service
+  labels:
+    {{- include "cernity.labels" . | nindent 4 }}
+    app.kubernetes.io/component: finding-service
+spec:
+  replicas: {{ .Values.findingService.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: finding-service
+  template:
+    metadata:
+      labels:
+        {{- include "cernity.labels" . | nindent 8 }}
+        app.kubernetes.io/component: finding-service
+    spec:
+      containers:
+        - name: finding-service
+          image: {{ include "cernity.image" (dict "Values" .Values "name" "finding-service") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-cernity-env
+          {{- if .Values.clickhouse.enabled }}
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              {{- if .Values.clickhouse.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.existingSecret }}
+                  key: CLICKHOUSE_PASSWORD
+              {{- else }}
+              value: {{ .Values.clickhouse.password | quote }}
+              {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-findings-forwarder
+  labels:
+    {{- include "cernity.labels" . | nindent 4 }}
+    app.kubernetes.io/component: findings-forwarder
+spec:
+  replicas: {{ .Values.findingsForwarder.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: findings-forwarder
+  template:
+    metadata:
+      labels:
+        {{- include "cernity.labels" . | nindent 8 }}
+        app.kubernetes.io/component: findings-forwarder
+    spec:
+      containers:
+        - name: findings-forwarder
+          image: {{ include "cernity.image" (dict "Values" .Values "name" "findings-forwarder") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-cernity-env
+          env:
+            - name: CERNITY_SINK
+              value: {{ .Values.findingsForwarder.sink | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- if .Values.clickhouse.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-normalizer
+  labels:
+    {{- include "cernity.labels" . | nindent 4 }}
+    app.kubernetes.io/component: normalizer
+spec:
+  replicas: {{ .Values.normalizer.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: normalizer
+  template:
+    metadata:
+      labels:
+        {{- include "cernity.labels" . | nindent 8 }}
+        app.kubernetes.io/component: normalizer
+    spec:
+      containers:
+        - name: normalizer
+          image: {{ include "cernity.image" (dict "Values" .Values "name" "normalizer") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-cernity-env
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              {{- if .Values.clickhouse.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.existingSecret }}
+                  key: CLICKHOUSE_PASSWORD
+              {{- else }}
+              value: {{ .Values.clickhouse.password | quote }}
+              {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

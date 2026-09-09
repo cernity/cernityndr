@@ -92,6 +92,22 @@ All settings live in `.env` (copy from `cernity.env.example`) — bus address,
 tenant, state backend, findings sink, ClickHouse, and log level. Pointing a real
 Suricata sensor at Cernity is documented in `docs/` as later phases land.
 
+## Deploying at scale
+
+Three deployment paths, same architecture:
+
+| Path | For | Where |
+|---|---|---|
+| **Single host** (Compose) | evaluation, small single sites | `deploy/central`, `deploy/quickstart` |
+| **Manual multi-server** (Compose, no orchestration) | your own hardware, static scaling | [`deploy/scale/`](deploy/scale/README.md) |
+| **Kubernetes** (Helm) | dynamic scaling / large fleets | `deploy/helm/cernity` |
+
+The detectors are stateless consumer-group workers sharing state in Redis, so all
+three scale the same way: **more replicas across more hosts, bounded by topic
+partitions**. For ~1,000 sensors / ~10 Gbps of edge inspection, cluster the bus,
+state, and storage, partition the high-volume topics heavily, and scale each
+detector to its load — see `deploy/scale/README.md` for the sizing guide.
+
 ## License — source-available, not open source
 
 Cernity is licensed under the **[PolyForm Perimeter License 1.0.1](LICENSE)**.

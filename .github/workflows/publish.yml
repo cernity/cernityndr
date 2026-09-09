@@ -1,8 +1,8 @@
 name: publish
 
-# Build and push service images to Docker Hub. Runs on version tags (a release)
-# or manually from the Actions tab — not on every push, so it never fails noisily
-# before the Docker Hub secrets are set.
+# Build and push multi-arch service images to Docker Hub. Runs on version tags
+# (a release) or manually from the Actions tab — not on every push, so it never
+# fails noisily before the Docker Hub secrets are set.
 # Requires two repository secrets: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
 on:
   push:
@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -38,10 +41,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push ${{ matrix.service }}
+      - name: Build and push ${{ matrix.service }} (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: cernity/${{ matrix.service }}:latest

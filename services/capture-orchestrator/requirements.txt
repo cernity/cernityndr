@@ -1,0 +1,4 @@
+kafka-python-ng
+lz4
+python-snappy
+zstandard

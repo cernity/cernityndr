@@ -22,14 +22,37 @@ sensor keeps inspecting packets at line rate instead of competing for resources.
 
 ## How it fits together
 
-```text
-                SENSOR (per Suricata box)          CENTRAL (Cernity)                 YOUR SIEM
-                ------------------------            ------------------                ---------
-  packets ─▶ Suricata ─▶ eve-*.json ─▶ Fluent Bit ─▶ bus (Redpanda) ─▶ normalizer ─▶ detectors ─▶ finding-service
-                              │                                                                        │
-                     (optional) cernity-capture-agent ◀── on-demand packet capture ──┐                │
-                              │                                                        │                ▼
-                              └──▶ bounded PCAP ─▶ object store ─▶ central Zeek (enrichment) ─▶ findings-forwarder ─▶ OpenSearch / Splunk / webhook / syslog
+```mermaid
+flowchart LR
+    subgraph sensor["Sensor · per Suricata box"]
+        suri["Suricata"] --> eve["eve-*.json"]
+        eve --> fb["Fluent Bit<br/>shipper"]
+        agent["cernity-capture-agent<br/>(optional)"]
+    end
+
+    subgraph central["Central · Cernity"]
+        bus(["Redpanda bus"])
+        det["detectors<br/>behavioral · dns · http · protocol<br/>east-west · anomaly · coverage · threat-intel"]
+        find["finding-service"]
+        fwd["findings-forwarder"]
+        norm["normalizer"]
+        ch[("ClickHouse<br/>(optional)")]
+        zeek["central Zeek<br/>(optional enrichment)"]
+    end
+
+    subgraph siem["Your SIEM"]
+        out["OpenSearch · Splunk<br/>webhook · syslog"]
+    end
+
+    fb -- "packets" --> bus
+    bus --> norm --> ch
+    bus --> det --> find --> fwd --> out
+    find -. "packets needed" .-> agent
+    agent -. "bounded PCAP" .-> zeek
+    zeek -. "enrichment" .-> find
+
+    classDef opt stroke-dasharray:4 3;
+    class agent,ch,zeek opt;
 ```
 
 - **On the sensor:** stock Suricata + a light log shipper (Fluent Bit), plus an

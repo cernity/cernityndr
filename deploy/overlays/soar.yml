@@ -1,0 +1,20 @@
+# SOAR overlay: run automated response playbooks on final findings. Optionally
+# POSTs to a real SOAR (TheHive / Shuffle / n8n) and/or notifies via ntfy.
+#
+#   docker compose -f deploy/central/docker-compose.yml \
+#                  -f deploy/overlays/soar.yml up --build
+services:
+  soar-forwarder:
+    image: cernity/soar-forwarder:latest
+    build: {context: ../.., dockerfile: services/soar-forwarder/Dockerfile}
+    container_name: cernity-soar-forwarder
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      SOAR_WEBHOOK_URL: ${SOAR_WEBHOOK_URL:-}
+      NTFY_URL: ${NTFY_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped

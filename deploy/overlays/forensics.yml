@@ -1,0 +1,122 @@
+# Packet-forensics + file-inspection overlay: on-demand PCAP capture, central Zeek
+# enrichment, and carved-file hash/YARA scanning. Adds MinIO (object store) for
+# PCAPs and carved files.
+#
+#   docker compose -f deploy/central/docker-compose.yml \
+#                  -f deploy/overlays/forensics.yml up --build
+#
+# The sensor-side cernity-capture-agent (deploy/sensor, capture profile) actuates
+# the actual PCAP; this overlay is the central half of that loop.
+# Set MINIO_ROOT_USER / MINIO_ROOT_PASSWORD in .env for anything real.
+
+x-logging: &cernity-logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+x-minio-creds: &minio-creds
+  MINIO_ENDPOINT: http://minio:9000
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-cernity}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-cernitydemo}
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: cernity-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cernity}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cernitydemo}
+    volumes: [cernity-minio:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: cernity-minio-init
+    depends_on: {minio: {condition: service_healthy}}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until mc alias set ndr http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do sleep 2; done
+        mc mb -p ndr/ndr-raw ndr/ndr-pcap ndr/ndr-files
+        mc ilm rule add ndr/ndr-raw --expire-days 14 || true
+        mc ilm rule add ndr/ndr-pcap --expire-days 7 || true
+        mc ilm rule add ndr/ndr-files --expire-days 7 || true
+        mc ls ndr
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cernity}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cernitydemo}
+    restart: "no"
+
+  capture-orchestrator:
+    image: cernity/capture-orchestrator:latest
+    build: {context: ../.., dockerfile: services/capture-orchestrator/Dockerfile}
+    container_name: cernity-capture-orchestrator
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  zeek-central:
+    image: cernity/zeek-central:latest
+    build: {context: ../.., dockerfile: services/zeek-central/Dockerfile}
+    container_name: cernity-zeek-central
+    environment:
+      <<: *minio-creds
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  zeek-notice:
+    image: cernity/zeek-notice:latest
+    build: {context: ../.., dockerfile: services/zeek-notice/Dockerfile}
+    container_name: cernity-zeek-notice
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  file-threat:
+    image: cernity/file-threat:latest
+    build: {context: ../.., dockerfile: services/file-threat/Dockerfile}
+    container_name: cernity-file-threat
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  file-yara:
+    image: cernity/file-yara:latest
+    build: {context: ../.., dockerfile: services/file-yara/Dockerfile}
+    container_name: cernity-file-yara
+    environment:
+      <<: *minio-creds
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+volumes:
+  cernity-minio: {}

@@ -1,0 +1,43 @@
+# Flink overlay: advanced streaming detectors (scan detection + session
+# stitching) as Flink SQL. Optional — the Python detectors cover the core; Flink
+# adds scan/session jobs over the same flow topic.
+#
+#   docker compose -f deploy/central/docker-compose.yml \
+#                  -f deploy/overlays/flink.yml up --build
+#
+# Submit the SQL jobs after the cluster is up:
+#   docker exec cernity-flink-jobmanager ./bin/sql-client.sh -f /opt/sql/scan.sql
+#   docker exec cernity-flink-jobmanager ./bin/sql-client.sh -f /opt/sql/session.sql
+
+x-logging: &cernity-logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+services:
+  flink-jobmanager:
+    image: cernity/flink:latest
+    build: {context: ../../services/flink, dockerfile: Dockerfile}
+    container_name: cernity-flink-jobmanager
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+    volumes:
+      - ../../services/flink/sql:/opt/sql:ro
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  flink-taskmanager:
+    image: cernity/flink:latest
+    build: {context: ../../services/flink, dockerfile: Dockerfile}
+    container_name: cernity-flink-taskmanager
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2560m
+    depends_on: [flink-jobmanager]
+    logging: *cernity-logging
+    restart: unless-stopped

@@ -96,5 +96,22 @@ services:
       redpanda: {condition: service_healthy}
       clickhouse: {condition: service_healthy}
 
+  reconstruction:
+    image: cernity/reconstruction:latest
+    build: {context: ../.., dockerfile: services/reconstruction/Dockerfile}
+    container_name: cernity-reconstruction
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
 volumes:
   cernity-clickhouse: {}

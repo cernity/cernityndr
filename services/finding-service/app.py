@@ -23,7 +23,9 @@ CH_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
 CH_USER = os.environ.get("CLICKHOUSE_USER", "ndr")
 CH_PASS = os.environ.get("CLICKHOUSE_PASSWORD")
 # ClickHouse persistence is optional: findings still flow to the bus without it.
-CH_ENABLED = CH_PASS is not None
+# Treat an empty value as unset (compose passes an empty string when it is left
+# blank), so persistence is off unless a real password is provided.
+CH_ENABLED = bool(CH_PASS)
 
 CANDIDATE_TOPIC = "ndr.finding.candidate.v1"
 FINAL_TOPIC = "ndr.finding.final.v1"

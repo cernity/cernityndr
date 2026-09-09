@@ -50,9 +50,24 @@ sensor keeps inspecting packets at line rate instead of competing for resources.
 
 ## Quickstart
 
-_Coming as the extraction lands. The plan: one `docker compose up` brings up the
-central stack with a replay feeder so you can see findings end to end without a live
-sensor, then a documented Suricata config snippet points a real sensor at it._
+See a finding end to end with no live sensor — it replays a recorded C2 beacon
+through the whole pipeline:
+
+    cp cernity.env.example .env          # optional: every setting has a default
+    docker compose -f deploy/quickstart/docker-compose.yml up --build
+
+Within about a minute a beacon finding is written to the `cernity-out` volume. Read it:
+
+    docker compose -f deploy/central/docker-compose.yml exec findings-forwarder \
+      cat /out/findings.jsonl
+
+Run just the central core (point your own Suricata sensor at it):
+
+    docker compose -f deploy/central/docker-compose.yml up --build
+
+All settings live in `.env` (copy from `cernity.env.example`) — bus address,
+tenant, state backend, findings sink, ClickHouse, and log level. Pointing a real
+Suricata sensor at Cernity is documented in `docs/` as later phases land.
 
 ## License — source-available, not open source
 

@@ -21,8 +21,7 @@ import ndr_runtime                      # shared tuned consumer/producer + metri
 import store as store_mod
 import proto
 
-log = logging.getLogger("protocol-detectors")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("protocol-detectors")
 
 TENANT = os.environ.get("NDR_TENANT", "default")
 APPROVED_RESOLVERS = set(x for x in os.environ.get("APPROVED_RESOLVERS", "").split(",") if x)
@@ -36,7 +35,6 @@ ICMP_WINDOW = float(os.environ.get("ICMP_WINDOW_SECS", "600"))
 CAND = "ndr.finding.candidate.v1"
 
 _store = store_mod.make_store(STATE_BACKEND, REDIS_URL)
-_JA4KEY = f"ja4seen:{TENANT}"
 _running = True
 
 
@@ -49,13 +47,16 @@ def _stable(s):
     return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16)
 
 
-def _ja4_rare(ja4):
-    """Fleet-wide JA4 rarity via a shared Redis set (mirrors proto.is_rare_ja4:
-    warmed up + not previously seen). Adds the JA4 to the global seen-set."""
-    if not ja4:
+def _fp_rare(fp, kind):
+    """Fleet-wide TLS-client-fingerprint rarity via a shared Redis set (mirrors
+    proto.is_rare_ja4: warmed up + not previously seen). `kind` is 'ja4' or 'ja3'
+    so the two fingerprint types get separate seen-sets and never mix. Adds the
+    fingerprint to the seen-set."""
+    if not fp:
         return False
-    rare = _store.set_len(_JA4KEY) >= JA4_WARMUP and not _store.set_contains(_JA4KEY, ja4)
-    _store.set_add(_JA4KEY, ja4, JA4_TTL)
+    key = f"fpseen:{TENANT}:{kind}"
+    rare = _store.set_len(key) >= JA4_WARMUP and not _store.set_contains(key, fp)
+    _store.set_add(key, fp, JA4_TTL)
     return rare
 
 
@@ -72,17 +73,30 @@ def _emit(producer, detector, category, sev, conf, entities):
     log.info("%s %s", detector.upper(), entities[:120])
 
 
+def _cid(e):
+    """Suricata's community-id flow hash (if `community-id: yes` is set) as an entity,
+    so per-flow findings carry the standard cross-tool pivot key. Empty list if absent."""
+    c = e.get("community_id")
+    return [{"type": "community_id", "value": c}] if c else []
+
+
 def _handle(e, producer):
     et = e.get("event_type")
     src, dst, dport = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
     if et in ("tls", "quic"):
         obj = e.get(et, {}) or {}
-        sni, ja4 = obj.get("sni"), obj.get("ja4")
-        transport = [{"type": "ja4", "value": ja4}] if et == "tls" else [{"type": "ja4", "value": ja4, "transport": "quic"}]
-        if _ja4_rare(ja4):
+        sni = obj.get("sni")
+        # Prefer JA4 (newer, more robust); fall back to JA3 so rarity still works
+        # if the sensor only emits ja3-fingerprints.
+        ja4, ja3 = obj.get("ja4"), obj.get("ja3")
+        fp, kind = (ja4, "ja4") if ja4 else (ja3, "ja3")
+        transport = [{"type": kind, "value": fp}]
+        if et != "tls":
+            transport[0]["transport"] = "quic"
+        if _fp_rare(fp, kind):
             _emit(producer, "ja4_rarity", "c2", 5, 0.5,
                   json.dumps(transport + [{"type": "ip", "role": "src", "value": src},
-                                          {"type": "sni", "value": sni}]))
+                                          {"type": "sni", "value": sni}] + _cid(e)))
         ch, c = proto.cloud_staging_hit(sni)
         if ch:
             _emit(producer, "cloud_staging", "exfil", 5, 0.5,
@@ -100,7 +114,7 @@ def _handle(e, producer):
             if an:
                 _emit(producer, "tls_cert_anomaly", "c2", 5, 0.5,
                       json.dumps([{"type": "ip", "role": "dst", "value": dst},
-                                  {"type": "sni", "value": sni}, {"type": "why", "value": why}]))
+                                  {"type": "sni", "value": sni}, {"type": "why", "value": why}] + _cid(e)))
     elif et == "http":
         h = e.get("http", {}) or {}
         su, w = proto.suspicious_ua(h.get("http_user_agent"))

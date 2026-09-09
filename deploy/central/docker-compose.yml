@@ -19,6 +19,8 @@ x-detector-env: &detector-env
   WINDOW_SECS: ${WINDOW_SECS:-600}
   EVAL_SECS: ${EVAL_SECS:-30}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  HEARTBEAT_SECS: ${HEARTBEAT_SECS:-300}
 
 services:
   redpanda:

@@ -6,13 +6,22 @@
 # same Kafka consumer group and split the topic partitions between them, so the
 # parallelism ceiling is the partition count (see deploy/scale/README.md).
 #
-#   # point at your shared infra hosts in .env, then:
-#   docker compose -f deploy/scale/workers.yml up -d
-#   # scale a detector to more replicas (add hosts or replicas as sensors grow):
+# You decide what runs on each host. Every service is tagged with a role profile
+# (ingest | detection | findings) AND can be named individually — so put exactly
+# the pieces you want on each server. Point .env at your shared infra first.
+#
+#   # a whole role on this host:
+#   docker compose -f deploy/scale/workers.yml --profile detection up -d
+#   # OR pick individual services (naming overrides the profile gate):
+#   docker compose -f deploy/scale/workers.yml up -d behavioral-detectors dns-detector
+#   # everything on one host (small site): pass all profiles:
+#   docker compose -f deploy/scale/workers.yml --profile ingest --profile detection --profile findings up -d
+#   # scale a placed service to more replicas:
 #   docker compose -f deploy/scale/workers.yml up -d --scale behavioral-detectors=8
 #
-# No container_name is set anywhere here — that is what lets a service run as N
-# replicas. State is Redis-backed so replicas share windows.
+# No container_name is set — that is what lets a service run as N replicas.
+# State is Redis-backed so replicas (on one host or many) share windows.
+# See deploy/scale/README.md and docs/placement.md.
 
 x-logging: &lg
   driver: json-file
@@ -31,6 +40,7 @@ x-worker-env: &wenv
 services:
   ids-alerts:
     image: cernity/ids-alerts:latest
+    profiles: [ingest]
     environment: *wenv
     deploy:
       replicas: ${IDS_ALERTS_REPLICAS:-1}
@@ -39,6 +49,7 @@ services:
 
   behavioral-detectors:
     image: cernity/behavioral-detectors:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${BEHAVIORAL_REPLICAS:-2}
@@ -47,6 +58,7 @@ services:
 
   dns-detector:
     image: cernity/dns-detector:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${DNS_REPLICAS:-1}
@@ -55,6 +67,7 @@ services:
 
   http-detector:
     image: cernity/http-detector:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${HTTP_REPLICAS:-1}
@@ -63,6 +76,7 @@ services:
 
   protocol-detectors:
     image: cernity/protocol-detectors:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${PROTOCOL_REPLICAS:-1}
@@ -71,6 +85,7 @@ services:
 
   east-west-detectors:
     image: cernity/east-west-detectors:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${EAST_WEST_REPLICAS:-1}
@@ -79,6 +94,7 @@ services:
 
   anomaly-detector:
     image: cernity/anomaly-detector:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${ANOMALY_REPLICAS:-1}
@@ -87,6 +103,7 @@ services:
 
   coverage-detector:
     image: cernity/coverage-detector:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${COVERAGE_REPLICAS:-1}
@@ -95,6 +112,7 @@ services:
 
   threat-intel:
     image: cernity/threat-intel:latest
+    profiles: [detection]
     environment: *wenv
     deploy:
       replicas: ${THREAT_INTEL_REPLICAS:-1}
@@ -103,6 +121,7 @@ services:
 
   finding-service:
     image: cernity/finding-service:latest
+    profiles: [findings]
     environment:
       <<: *wenv
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
@@ -115,6 +134,7 @@ services:
 
   findings-forwarder:
     image: cernity/findings-forwarder:latest
+    profiles: [findings]
     environment:
       <<: *wenv
       CERNITY_SINK: ${CERNITY_SINK:-file}

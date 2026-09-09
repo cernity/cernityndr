@@ -97,6 +97,6 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
-- Architecture overview — _coming_
-- Suricata configuration guide — _coming_
+- [Configuring Suricata for Cernity](docs/suricata-config.md)
+- [Deploying the sensor bundle](docs/deploy-sensor.md)
 - OpenSearch reference integration — _coming_

@@ -1,0 +1,92 @@
+# Cernity infra tier — bus, state, storage — for manual multi-server scale-out.
+#
+# Run this on your dedicated infra host(s). Worker hosts reach these over the
+# network, so ports are published and Redpanda advertises a reachable address.
+# For large fleets, replace any of these with a real cluster (Redpanda cluster,
+# Redis Cluster, ClickHouse cluster) and just point the workers' .env at it —
+# the workers do not care whether it is one node or a cluster.
+#
+#   # on the infra host, set BUS_ADVERTISE_ADDR to this host's IP/DNS in .env:
+#   BUS_ADVERTISE_ADDR=10.0.0.10 CLICKHOUSE_PASSWORD=... MINIO_ROOT_PASSWORD=... \
+#   docker compose -f deploy/scale/infra.yml up -d
+
+x-logging: &lg
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: cernity-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=${REDPANDA_SMP:-2}
+      - --memory=${REDPANDA_MEMORY:-4G}
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+      # EXTERNAL is what worker hosts connect to — must be THIS host's reachable addr.
+      - --advertise-kafka-addr=INTERNAL://redpanda:9092,EXTERNAL://${BUS_ADVERTISE_ADDR:?set to this host IP/DNS}:19092
+    ports:
+      - "19092:19092"   # workers connect here: REDPANDA_BOOTSTRAP=<infra-host>:19092
+    volumes: [cernity-redpanda:/var/lib/redpanda/data]
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *lg
+    restart: unless-stopped
+
+  redis:
+    image: redis:latest
+    container_name: cernity-redis
+    command: ["redis-server", "--save", "", "--maxmemory-policy", "noeviction"]
+    ports: ["6379:6379"]     # workers: NDR_REDIS_URL=redis://<infra-host>:6379/0
+    volumes: [cernity-redis:/data]
+    logging: *lg
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: cernity-clickhouse
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ndr
+    ports: ["8123:8123", "9000:9000"]
+    volumes:
+      - ../clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - cernity-clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *lg
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: cernity-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cernity}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    ports: ["9002:9000", "9001:9001"]   # workers: MINIO_ENDPOINT=http://<infra-host>:9002
+    volumes: [cernity-minio:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *lg
+    restart: unless-stopped
+
+volumes:
+  cernity-redpanda: {}
+  cernity-redis: {}
+  cernity-clickhouse: {}
+  cernity-minio: {}

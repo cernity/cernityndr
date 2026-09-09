@@ -4,3 +4,4 @@ python-snappy
 zstandard
 boto3
 yara-python
+pefile

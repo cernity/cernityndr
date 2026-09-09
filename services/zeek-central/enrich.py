@@ -61,20 +61,28 @@ def summarize_conn_log(text: str) -> dict:
 
 def summarize_ssl(text: str) -> dict:
     rows = parse_zeek_tsv(text)
-    ja3, sni, details, bad = set(), set(), [], 0
+    ja3, ja4, ja4s_set, sni, details, bad = set(), set(), set(), set(), [], 0
     for r in rows:
         vs = _v(r.get("validation_status"))
         if vs and vs.lower() != "ok":
             bad += 1
         j, s = _v(r.get("ja3")), _v(r.get("server_name"))
+        # JA4+ (client + server TLS fingerprints) from the FoxIO ja4 Zeek package.
+        j4, j4s = _v(r.get("ja4")), _v(r.get("ja4s"))
         if j:
             ja3.add(j)
+        if j4:
+            ja4.add(j4)
+        if j4s:
+            ja4s_set.add(j4s)
         if s:
             sni.add(s)
         details.append({"server_name": s, "ja3": j, "ja3s": _v(r.get("ja3s")),
+                        "ja4": j4, "ja4s": j4s,
                         "version": _v(r.get("version")), "validation_status": vs,
                         "subject": _v(r.get("subject")), "issuer": _v(r.get("issuer"))})
     return {"tls_connections": len(rows), "unique_ja3": sorted(ja3),
+            "unique_ja4": sorted(ja4), "unique_ja4s": sorted(ja4s_set),
             "server_names": sorted(sni), "validation_failures": bad, "details": details[:50]}
 
 
@@ -88,10 +96,38 @@ def summarize_x509(text: str) -> dict:
         if ss:
             selfsigned += 1
         details.append({"subject": subj, "issuer": iss, "self_signed": ss,
+                        "ja4x": _v(r.get("ja4x")),   # cert fingerprint (JA4+)
                         "not_valid_before": _v(r.get("certificate.not_valid_before")),
                         "not_valid_after": _v(r.get("certificate.not_valid_after")),
                         "san": _v(r.get("san.dns"))})
     return {"certificates": len(rows), "self_signed": selfsigned, "details": details[:50]}
+
+
+def summarize_http(text: str) -> dict:
+    """HTTP requests + JA4H (HTTP client fingerprint, JA4+)."""
+    rows = parse_zeek_tsv(text)
+    ja4h, details = set(), []
+    for r in rows:
+        h = _v(r.get("ja4h"))
+        if h:
+            ja4h.add(h)
+        details.append({"host": _v(r.get("host")), "uri": _v(r.get("uri")),
+                        "method": _v(r.get("method")), "user_agent": _v(r.get("user_agent")),
+                        "status_code": _v(r.get("status_code")), "ja4h": h})
+    return {"http_requests": len(rows), "unique_ja4h": sorted(ja4h), "details": details[:50]}
+
+
+def summarize_ssh(text: str) -> dict:
+    """SSH sessions + JA4SSH (SSH fingerprint, JA4+)."""
+    rows = parse_zeek_tsv(text)
+    ja4ssh, details = set(), []
+    for r in rows:
+        s = _v(r.get("ja4ssh"))
+        if s:
+            ja4ssh.add(s)
+        details.append({"client": _v(r.get("client")), "server": _v(r.get("server")),
+                        "auth_success": _v(r.get("auth_success")), "ja4ssh": s})
+    return {"ssh_sessions": len(rows), "unique_ja4ssh": sorted(ja4ssh), "details": details[:50]}
 
 
 def summarize_files(text: str) -> dict:
@@ -138,6 +174,8 @@ _LOGS = [
     ("conn", "conn.log", summarize_conn_log),
     ("ssl", "ssl.log", summarize_ssl),
     ("x509", "x509.log", summarize_x509),
+    ("http", "http.log", summarize_http),
+    ("ssh", "ssh.log", summarize_ssh),
     ("files", "files.log", summarize_files),
     ("smb_files", "smb_files.log", summarize_smb),
     ("smb_mapping", "smb_mapping.log", summarize_smb),
@@ -152,6 +190,15 @@ def extract_iocs(summary: dict) -> dict:
         iocs["file_hashes"] = summary["files"]["hashes"]
     if summary.get("ssl", {}).get("unique_ja3"):
         iocs["ja3"] = summary["ssl"]["unique_ja3"]
+    # JA4+ fingerprints (client/server TLS, HTTP, SSH) as pivotable IOCs.
+    if summary.get("ssl", {}).get("unique_ja4"):
+        iocs["ja4"] = summary["ssl"]["unique_ja4"]
+    if summary.get("ssl", {}).get("unique_ja4s"):
+        iocs["ja4s"] = summary["ssl"]["unique_ja4s"]
+    if summary.get("http", {}).get("unique_ja4h"):
+        iocs["ja4h"] = summary["http"]["unique_ja4h"]
+    if summary.get("ssh", {}).get("unique_ja4ssh"):
+        iocs["ja4ssh"] = summary["ssh"]["unique_ja4ssh"]
     if summary.get("x509", {}).get("self_signed"):
         iocs["self_signed_certs"] = summary["x509"]["self_signed"]
     if summary.get("kerberos", {}).get("kerberoast_suspected"):
@@ -189,7 +236,7 @@ def _main():  # pragma: no cover (I/O shell)
                              group_id="ndr-zeek-central", auto_offset_reset="earliest",
                              enable_auto_commit=True,
                              value_deserializer=lambda b: json.loads(b.decode()))
-    log.info("zeek-central up (deep: conn/ssl/x509/files/smb/kerberos + JA3)")
+    log.info("zeek-central up (deep: conn/ssl/x509/http/ssh/files/smb/kerberos + JA3 + JA4+)")
     running = True
 
     def stop(*_):

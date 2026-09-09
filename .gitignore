@@ -25,3 +25,13 @@ htmlcov/
 *.pcap
 *.log
 data/
+
+# Internal planning and process docs — kept out of the product repo.
+# Only user-facing documentation belongs in git (deployment, Suricata config,
+# SIEM integration, operator architecture). Design notes, implementation plans,
+# brainstorms, and specs live in the private planning repo, not here.
+docs/design/
+docs/plans/
+docs/brainstorms/
+docs/specs/
+docs/internal/

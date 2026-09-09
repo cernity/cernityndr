@@ -7,6 +7,7 @@ is the one packet-only capability worth having regardless of the bake-off.
 import json
 import logging
 import os
+import ndr_runtime
 import re
 import signal
 import tempfile
@@ -16,11 +17,11 @@ import time
 from kafka import KafkaConsumer, KafkaProducer
 import boto3
 
+import fileforensics
 import scan as sc
 import rules_refresh as rr
 
-log = logging.getLogger("file-yara")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("file-yara")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
@@ -97,6 +98,7 @@ def main():
                 matched = sc.scan_bytes(_compiled[0], data)
                 finding = sc.finding_from_matches(ev, matched, TENANT)
                 if finding:
+                    finding["file_forensics"] = fileforensics.forensics(data)  # entropy + PE imphash
                     producer.send(OUT_TOPIC, finding)
                     log.info("FILE_YARA %s rules=%s", ev.get("sha256", "")[:12], matched)
         producer.flush()

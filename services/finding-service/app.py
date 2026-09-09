@@ -13,10 +13,11 @@ from datetime import datetime, timezone
 
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U6 rollout)
 
+import geoenrich
+import intel
 import state_machine as sm
 
-log = logging.getLogger("finding-service")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = ndr_runtime.setup_logging("finding-service")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 CH_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
@@ -73,8 +74,11 @@ def main():
         ch = clickhouse_connect.get_client(host=CH_HOST, username=CH_USER, password=CH_PASS)
     producer = ndr_runtime.make_producer()
     consumer = ndr_runtime.make_consumer(CANDIDATE_TOPIC, group_id="ndr-finding-service", auto_offset_reset="earliest")
+    geo = geoenrich.open_readers()      # offline GeoIP/ASN; {} (no-op) if DBs unmounted
     ndr_runtime.start_health()          # /healthz /readyz /metrics (plan 003 obs)
-    log.info("finding-service up: %s -> ClickHouse %s", CANDIDATE_TOPIC, CH_HOST if CH_ENABLED else "(disabled)")
+    log.info("finding-service up: %s -> ClickHouse %s (geoip=%s)",
+             CANDIDATE_TOPIC, CH_HOST if CH_ENABLED else "(disabled)",
+             "+".join(sorted(geo)) or "off")
 
     while _running:
         batch = consumer.poll(timeout_ms=1000, max_records=200)
@@ -84,6 +88,8 @@ def main():
                 if CH_ENABLED:
                     ch.insert("ndr.finding", [_row(finding)], column_names=COLS)
                 if route == "final":
+                    geoenrich.enrich_finding(finding, geo)   # Tier-1: geo/asn + community-id
+                    intel.enrich(finding)                    # Tier-2: rDNS/RDAP/fingerprint/reputation (opt-in)
                     producer.send(FINAL_TOPIC, finding)
                     log.info("FINAL %s (%s)", finding["finding_id"], finding["category"])
                 else:

@@ -1,0 +1,38 @@
+# Cernity sensor-side bundle: the Fluent Bit shipper that tails Suricata's EVE
+# logs and ships them to the central bus. Runs ON the sensor (the box already
+# running Suricata). Point it at your Suricata log directory and the bus.
+#
+#   REDPANDA_BOOTSTRAP=<central-bus-host>:9092 \
+#   SURICATA_LOG_DIR=/var/log/suricata \
+#   docker compose -f deploy/sensor/docker-compose.yml up -d
+#
+# Configure Suricata's EVE output first — see docs/suricata-config.md.
+
+x-logging: &cernity-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  fluent-bit:
+    image: fluent/fluent-bit:latest
+    container_name: cernity-fluent-bit
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      SURICATA_EVE_ALERTS: ${SURICATA_EVE_ALERTS:-/var/log/suricata/eve-alerts.json}
+      SURICATA_EVE_NSM: ${SURICATA_EVE_NSM:-/var/log/suricata/eve-nsm.json}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # the shipper config
+      - ../fluent-bit:/fluent-bit/etc:ro
+      # your Suricata log directory (read-only)
+      - ${SURICATA_LOG_DIR:-/var/log/suricata}:/var/log/suricata:ro
+      # shipper offset state, so a restart resumes where it left off
+      - cernity-fluentbit-state:/var/lib/cernity
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+    logging: *cernity-logging
+    restart: unless-stopped
+
+volumes:
+  cernity-fluentbit-state: {}

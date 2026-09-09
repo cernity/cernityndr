@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/tls_observation.schema.json",
+  "title": "tls_observation",
+  "description": "Origin: v2 §15.3. JA3/JA4 carry identity across flows and sensors (soft link for session/entity stitching).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "sensor_id", "event_time", "community_id", "src_ip", "dst_ip"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "sensor_id": { "type": "string", "minLength": 1 },
+    "event_time": { "type": "string", "format": "date-time" },
+    "community_id": { "type": "string", "minLength": 1 },
+    "src_ip": { "type": "string" },
+    "dst_ip": { "type": "string" },
+    "dst_port": { "type": "integer" },
+    "sni": { "type": "string" },
+    "tls_version": { "type": "string" },
+    "ja3": { "type": "string" },
+    "ja3s": { "type": "string" },
+    "ja4": { "type": "string" },
+    "client_alpns": { "type": "array", "items": { "type": "string" } },
+    "server_alpns": { "type": "array", "items": { "type": "string" } },
+    "cert_fingerprint": { "type": "string" },
+    "cert_subject": { "type": "string" },
+    "cert_issuer": { "type": "string" },
+    "cert_san": { "type": "array", "items": { "type": "string" } },
+    "cert_not_before": { "type": "string", "format": "date-time" },
+    "cert_not_after": { "type": "string", "format": "date-time" },
+    "ndpi_application": { "type": "string" }
+  }
+}

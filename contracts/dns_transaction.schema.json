@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/dns_transaction.schema.json",
+  "title": "dns_transaction",
+  "description": "Origin: v2 §15.4 (v3 model) + v6 §15. dns_version is REQUIRED and pinned so the normalizer keys by declared schema — never sniffs structure. A record without an explicit dns_version is rejected, not silently accepted as a legacy default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "sensor_id", "event_time", "dns_version", "client_ip", "query_name", "query_type"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "sensor_id": { "type": "string", "minLength": 1 },
+    "event_time": { "type": "string", "format": "date-time" },
+    "dns_version": { "type": "integer", "enum": [3] },
+    "community_id": { "type": "string" },
+    "client_ip": { "type": "string" },
+    "resolver_ip": { "type": "string" },
+    "query_name": { "type": "string" },
+    "query_type": { "type": "string" },
+    "rcode": { "type": "string" },
+    "answers": { "type": "array", "items": { "type": "object" } },
+    "authority": { "type": "array", "items": { "type": "object" } },
+    "additional": { "type": "array", "items": { "type": "object" } },
+    "ttl": { "type": "array", "items": { "type": "integer" } }
+  }
+}

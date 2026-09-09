@@ -1,0 +1,22 @@
+Cernity detector tier installed as release {{ .Release.Name }}.
+
+Detectors and the finding pipeline are running against:
+  bus:   {{ .Values.bus.bootstrap }}
+  state: {{ .Values.state.redisUrl }}
+{{- if .Values.clickhouse.enabled }}
+  clickhouse: {{ .Values.clickhouse.host }}
+{{- end }}
+
+Scaling:
+  - Each detector is a Deployment; those with hpa.enabled also get a CPU HPA.
+  - The real scaling signal is Kafka consumer-group LAG, not CPU. For lag-based
+    autoscaling, install KEDA and add a kafka ScaledObject per detector Deployment
+    targeting its consumer group (ndr-<detector>). CPU HPA is the built-in default.
+  - Parallelism ceiling = topic partitions. Give the high-volume topics
+    (suricata.flow.v1, dns, tls, http) enough partitions for your peak replica count.
+
+Bring your own clustered bus/state/storage (Redpanda, Redis Cluster, ClickHouse);
+this chart runs the stateless Cernity tier on top of them.
+
+Check status:
+  kubectl get deploy,hpa -l app.kubernetes.io/instance={{ .Release.Name }}

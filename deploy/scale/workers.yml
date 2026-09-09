@@ -1,0 +1,129 @@
+# Cernity stateless worker tier — for manual multi-server scale-out (no Kubernetes).
+#
+# Run this on each worker host. Every service here is a stateless consumer-group
+# worker: it holds no local state (windows live in shared Redis), so you scale by
+# running more replicas — on one host or many. All replicas of a service join the
+# same Kafka consumer group and split the topic partitions between them, so the
+# parallelism ceiling is the partition count (see deploy/scale/README.md).
+#
+#   # point at your shared infra hosts in .env, then:
+#   docker compose -f deploy/scale/workers.yml up -d
+#   # scale a detector to more replicas (add hosts or replicas as sensors grow):
+#   docker compose -f deploy/scale/workers.yml up -d --scale behavioral-detectors=8
+#
+# No container_name is set anywhere here — that is what lets a service run as N
+# replicas. State is Redis-backed so replicas share windows.
+
+x-logging: &lg
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+# Shared environment: point these at your infra hosts in .env.
+x-worker-env: &wenv
+  REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:?set to your broker(s), e.g. bus1:9092}
+  NDR_STATE_BACKEND: redis
+  NDR_REDIS_URL: ${NDR_REDIS_URL:?set to your Redis, e.g. redis://state-host:6379/0}
+  NDR_TENANT: ${NDR_TENANT:-default}
+  WINDOW_SECS: ${WINDOW_SECS:-600}
+  EVAL_SECS: ${EVAL_SECS:-30}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  ids-alerts:
+    image: cernity/ids-alerts:latest
+    environment: *wenv
+    deploy:
+      replicas: ${IDS_ALERTS_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  behavioral-detectors:
+    image: cernity/behavioral-detectors:latest
+    environment: *wenv
+    deploy:
+      replicas: ${BEHAVIORAL_REPLICAS:-2}
+    logging: *lg
+    restart: unless-stopped
+
+  dns-detector:
+    image: cernity/dns-detector:latest
+    environment: *wenv
+    deploy:
+      replicas: ${DNS_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  http-detector:
+    image: cernity/http-detector:latest
+    environment: *wenv
+    deploy:
+      replicas: ${HTTP_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  protocol-detectors:
+    image: cernity/protocol-detectors:latest
+    environment: *wenv
+    deploy:
+      replicas: ${PROTOCOL_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  east-west-detectors:
+    image: cernity/east-west-detectors:latest
+    environment: *wenv
+    deploy:
+      replicas: ${EAST_WEST_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  anomaly-detector:
+    image: cernity/anomaly-detector:latest
+    environment: *wenv
+    deploy:
+      replicas: ${ANOMALY_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  coverage-detector:
+    image: cernity/coverage-detector:latest
+    environment: *wenv
+    deploy:
+      replicas: ${COVERAGE_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  threat-intel:
+    image: cernity/threat-intel:latest
+    environment: *wenv
+    deploy:
+      replicas: ${THREAT_INTEL_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  finding-service:
+    image: cernity/finding-service:latest
+    environment:
+      <<: *wenv
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    deploy:
+      replicas: ${FINDING_SERVICE_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+  findings-forwarder:
+    image: cernity/findings-forwarder:latest
+    environment:
+      <<: *wenv
+      CERNITY_SINK: ${CERNITY_SINK:-file}
+      CERNITY_SINK_FILE: ${CERNITY_SINK_FILE:-/out/findings.jsonl}
+    volumes: [cernity-out:/out]
+    deploy:
+      replicas: ${FINDINGS_FORWARDER_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
+volumes:
+  cernity-out: {}

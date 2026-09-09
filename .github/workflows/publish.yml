@@ -26,6 +26,9 @@ jobs:
           - threat-intel
           - finding-service
           - findings-forwarder
+          - normalizer
+          - asset-service
+          - correlation-service
     steps:
       - uses: actions/checkout@v4
 

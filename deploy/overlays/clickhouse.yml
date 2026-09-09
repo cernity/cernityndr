@@ -1,0 +1,100 @@
+# ClickHouse analytics overlay: adds raw-telemetry/findings retention and the
+# services that use it (normalizer, asset-service, correlation-service), and
+# switches finding-service to persist findings.
+#
+#   docker compose -f deploy/central/docker-compose.yml \
+#                  -f deploy/overlays/clickhouse.yml up --build
+#
+# Set CLICKHOUSE_PASSWORD in .env for anything real; a demo default is used otherwise.
+
+x-logging: &cernity-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: cernity-clickhouse
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      CLICKHOUSE_DB: ndr
+    volumes:
+      - ../clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - cernity-clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  normalizer:
+    image: cernity/normalizer:latest
+    build: {context: ../.., dockerfile: services/normalizer/Dockerfile}
+    container_name: cernity-normalizer
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  asset-service:
+    image: cernity/asset-service:latest
+    build: {context: ../.., dockerfile: services/asset-service/Dockerfile}
+    container_name: cernity-asset-service
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  correlation-service:
+    image: cernity/correlation-service:latest
+    build: {context: ../.., dockerfile: services/correlation-service/Dockerfile}
+    container_name: cernity-correlation-service
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  # switch finding-service to persist findings to ClickHouse
+  finding-service:
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redpanda: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+
+volumes:
+  cernity-clickhouse: {}

@@ -17,10 +17,8 @@ Cernity reimplements the stateful, Zeek/RITA-style analysis that people usually 
 at the edge, and moves it to a central box with CPU and memory to spare — so the
 sensor keeps inspecting packets at line rate instead of competing for resources.
 
-> **Status:** early. The engine has been proven in a private homelab and is being
-> extracted into this repository. See
-> [`docs/design/2026-09-09-cernity-extraction-design.md`](docs/design/2026-09-09-cernity-extraction-design.md)
-> for the full architecture and extraction plan. Code lands incrementally.
+> **Status:** early. The engine has run in production against live traffic and is
+> being packaged into this repository. Code and deployment docs land incrementally.
 
 ## How it fits together
 
@@ -84,6 +82,6 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
-- [Architecture & extraction design](docs/design/2026-09-09-cernity-extraction-design.md)
-- Suricata configuration guide — _coming with the extraction_
-- OpenSearch reference integration — _coming with the extraction_
+- Architecture overview — _coming_
+- Suricata configuration guide — _coming_
+- OpenSearch reference integration — _coming_

@@ -54,3 +54,30 @@ def match(dst_ip: str, ja3: str, cert_sha1: str,
     if c and c in cert_bl:
         return True, "sslbl_cert", c
     return False, "", ""
+
+
+def parse_fp_list(text: str) -> set[str]:
+    """Operator-supplied known-C2 server-fingerprint blocklist: one JA3S/JA4S/JARM
+    per line, '#' comments, optional trailing ',reason' column. Case-insensitive.
+    This is the operator's own list of malware-tool fingerprints (Cobalt Strike,
+    Sliver, etc.) — no feed is bundled."""
+    out = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tok = norm(line.split(",")[0])
+        if tok:
+            out.add(tok)
+    return out
+
+
+def match_server_fp(ja3s: str, ja4s: str, jarm: str, fp_bl: set) -> tuple[bool, str, str]:
+    """Match a TLS SERVER-side fingerprint (JA3S / JA4S / JARM) against the operator
+    known-C2 fingerprint blocklist. Returns (hit, fp_type, ioc). An empty blocklist
+    is a no-op (feature off)."""
+    for typ, val in (("ja3s", ja3s), ("ja4s", ja4s), ("jarm", jarm)):
+        v = norm(val)
+        if v and v in fp_bl:
+            return True, f"c2fp_{typ}", v
+    return False, "", ""

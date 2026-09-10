@@ -121,6 +121,8 @@ VALID_FINDING = {
     "category": "c2", "severity": 7, "confidence": 0.8,
     "first_seen": "2026-08-18T00:00:00Z", "last_seen": "2026-08-18T16:40:11Z",
     "state": "CANDIDATE",
+    # detectors emit entities as a JSON-serialized string on the wire (see below)
+    "entities": json.dumps([{"type": "ip", "role": "src", "value": "10.0.0.5"}]),
 }
 
 CANONICAL_TOPICS = {
@@ -145,6 +147,18 @@ def test_valid_docs_pass():
     check(DNS, VALID_DNS_V3)
     check(ASSET, VALID_ASSET)
     check(FINDING, VALID_FINDING)
+
+
+def test_finding_entities_accepts_wire_string_and_array():
+    # Detectors emit `entities` as a JSON-serialized string (east-west/behavioral/
+    # protocol/... all do `json.dumps([...])`). Guard that the published contract
+    # accepts the real wire form AND the raw array, so the two never drift again.
+    as_string = dict(VALID_FINDING)
+    as_string["entities"] = json.dumps([{"type": "ip", "value": "10.0.0.5"}])
+    check(FINDING, as_string)
+    as_array = dict(VALID_FINDING)
+    as_array["entities"] = [{"type": "ip", "value": "10.0.0.5"}]
+    check(FINDING, as_array)
 
 
 def test_envelope_requires_identity():

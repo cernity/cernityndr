@@ -46,6 +46,30 @@ def _bootstrap():
     return os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 
 
+def _security_config():
+    """SASL_SSL kwargs for a client pointed at a secured (external) broker. Returns
+    {} when NDR_BUS_SASL_MECHANISM is unset, so the default internal plaintext path
+    (central services on redpanda:9092) is byte-identical to before. Env:
+      NDR_BUS_SASL_MECHANISM  e.g. SCRAM-SHA-512 -- presence gates the whole block
+      NDR_BUS_SASL_USER / NDR_BUS_SASL_PASSWORD   required when the mechanism is set
+      NDR_BUS_TLS_CA          CA cert path (optional; omit to use system trust)
+    """
+    mech = os.environ.get("NDR_BUS_SASL_MECHANISM")
+    if not mech:
+        return {}
+    user = os.environ.get("NDR_BUS_SASL_USER")
+    pw = os.environ.get("NDR_BUS_SASL_PASSWORD")
+    if not user or not pw:
+        raise ValueError("NDR_BUS_SASL_MECHANISM is set but NDR_BUS_SASL_USER/"
+                         "NDR_BUS_SASL_PASSWORD is missing")
+    conf = {"security_protocol": "SASL_SSL", "sasl_mechanism": mech,
+            "sasl_plain_username": user, "sasl_plain_password": pw}
+    ca = os.environ.get("NDR_BUS_TLS_CA")
+    if ca:
+        conf["ssl_cafile"] = ca
+    return conf
+
+
 def _consumer_config(group_id, **overrides):
     """Throughput-tuned KafkaConsumer kwargs for one single-box replica. Larger
     fetch/poll sizing keeps the bus from becoming the ceiling when many replicas
@@ -61,6 +85,7 @@ def _consumer_config(group_id, **overrides):
         fetch_min_bytes=_int("NDR_FETCH_MIN_BYTES", 1),
         fetch_max_wait_ms=_int("NDR_FETCH_MAX_WAIT_MS", 500),
         value_deserializer=lambda b: json.loads(b.decode()),
+        **_security_config(),                                  # SASL_SSL when env-set, else {}
     )
     conf.update(overrides)
     return conf
@@ -77,6 +102,7 @@ def _producer_config(**overrides):
         linger_ms=_int("NDR_LINGER_MS", 10),
         batch_size=_int("NDR_BATCH_SIZE", 65536),
         compression_type=os.environ.get("NDR_COMPRESSION", "lz4"),
+        **_security_config(),                                  # SASL_SSL when env-set, else {}
     )
     conf.update(overrides)
     return conf

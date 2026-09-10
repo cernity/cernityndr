@@ -23,9 +23,17 @@ services:
       SURICATA_EVE_ALERTS: ${SURICATA_EVE_ALERTS:-/var/log/suricata/eve-alerts.json}
       SURICATA_EVE_NSM: ${SURICATA_EVE_NSM:-/var/log/suricata/eve-nsm.json}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Secure bus creds (default). Copy the central host's ca.crt to this host and
+      # point CERNITY_BUS_CA at it. For an insecure-demo bus, remove the SASL lines
+      # from deploy/fluent-bit/fluent-bit.conf instead.
+      CERNITY_BUS_USER: ${CERNITY_BUS_USER:-cernity-sensor}
+      CERNITY_BUS_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
+      CERNITY_BUS_TLS_CA: /certs/ca.crt
     volumes:
       # the shipper config
       - ../fluent-bit:/fluent-bit/etc:ro
+      # the CA that signed the bus's server cert (copied from the central host)
+      - ${CERNITY_BUS_CA:-./ca.crt}:/certs/ca.crt:ro
       # your Suricata log directory (read-only)
       - ${SURICATA_LOG_DIR:-/var/log/suricata}:/var/log/suricata:ro
       # shipper offset state, so a restart resumes where it left off

@@ -51,6 +51,66 @@ def test_producer_tuning():
     assert rt._producer_config(compression_type="zstd")["compression_type"] == "zstd"
 
 
+def test_security_unset_is_empty_and_configs_unchanged():
+    # default internal path: no SASL keys leak into the configs
+    assert rt._security_config() == {}
+    c = rt._consumer_config("g")
+    assert "security_protocol" not in c and "sasl_mechanism" not in c
+    assert "security_protocol" not in rt._producer_config()
+
+
+def test_security_full_sasl_env_populates_both_configs():
+    env = {"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512", "NDR_BUS_SASL_USER": "sensor",
+           "NDR_BUS_SASL_PASSWORD": "pw", "NDR_BUS_TLS_CA": "/certs/ca.crt"}
+    os.environ.update(env)
+    try:
+        assert rt._security_config() == {
+            "security_protocol": "SASL_SSL", "sasl_mechanism": "SCRAM-SHA-512",
+            "sasl_plain_username": "sensor", "sasl_plain_password": "pw",
+            "ssl_cafile": "/certs/ca.crt"}
+        assert rt._consumer_config("g")["security_protocol"] == "SASL_SSL"
+        assert rt._producer_config()["sasl_mechanism"] == "SCRAM-SHA-512"
+    finally:
+        for k in env:
+            del os.environ[k]
+
+
+def test_security_ca_optional():
+    env = {"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512", "NDR_BUS_SASL_USER": "u",
+           "NDR_BUS_SASL_PASSWORD": "p"}
+    os.environ.update(env)
+    try:
+        s = rt._security_config()
+        assert "ssl_cafile" not in s and s["security_protocol"] == "SASL_SSL"
+    finally:
+        for k in env:
+            del os.environ[k]
+
+
+def test_security_partial_env_raises():
+    os.environ["NDR_BUS_SASL_MECHANISM"] = "SCRAM-SHA-512"       # user/pass missing
+    try:
+        try:
+            rt._security_config()
+            assert False, "missing user/pass must raise"
+        except ValueError:
+            pass
+    finally:
+        del os.environ["NDR_BUS_SASL_MECHANISM"]
+
+
+def test_explicit_security_override_wins_over_env():
+    env = {"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512", "NDR_BUS_SASL_USER": "u",
+           "NDR_BUS_SASL_PASSWORD": "p"}
+    os.environ.update(env)
+    try:
+        c = rt._consumer_config("g", security_protocol="PLAINTEXT")
+        assert c["security_protocol"] == "PLAINTEXT"            # explicit wins over env
+    finally:
+        for k in env:
+            del os.environ[k]
+
+
 def test_assigned_partitions_scopes_by_topic():
     c = _FakeConsumer([_FakeTP("suricata.flow.v1", 0), _FakeTP("suricata.flow.v1", 3),
                        _FakeTP("suricata.dns.v1", 1)])

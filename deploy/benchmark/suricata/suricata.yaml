@@ -1,0 +1,78 @@
+%YAML 1.1
+---
+# Max-fidelity OFFLINE Suricata config for the benchmark. Run as:
+#   suricata -c /etc/suricata/suricata.yaml -r /pcaps/<file>.pcap -l /var/log/suricata
+# Offline pcap mode reads 100% of packets deterministically (no capture loss), so a
+# re-run is byte-identical — the fairness property the benchmark relies on.
+#
+# This mirrors the recommended production config in docs/suricata-config.md: split
+# EVE (alerts vs NSM), community-id on, nDPI + JA3/JA4, and the protocol logs the
+# east-west/protocol detectors consume. Validated by the deploy/benchmark smoke run,
+# not by unit tests (it is configuration).
+
+vars:
+  address-groups:
+    HOME_NET: "[10.0.0.0/8,192.168.0.0/16,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules        # ET Open (version pinned in the benchmark README)
+
+# nDPI plugin (optional but recommended). Present in nDPI-enabled images; if the
+# image lacks it, drop this block — the flow_risk/app fields simply won't appear.
+plugins:
+  - /usr/lib/suricata/ndpi.so
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      ja3-fingerprints: yes       # -> threat-intel JA3 match
+      ja4-fingerprints: yes       # -> protocol-detectors JA4/JA3 rarity, server-fp
+    krb5:
+      enabled: yes
+    smb:
+      enabled: yes
+    dcerpc:
+      enabled: yes
+    ssh:
+      enabled: yes
+    http:
+      enabled: yes
+    dns:
+      enabled: yes
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve-alerts.json
+      community-id: true
+      types:
+        - alert
+
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve-nsm.json
+      community-id: true
+      types:
+        - flow
+        - dns: { version: 3 }
+        - tls: { extended: yes }
+        - http: { extended: yes }
+        - ssh
+        - files: { force-magic: yes, force-hash: [sha256] }
+        - anomaly
+        - krb5
+        - smb
+        - dcerpc
+
+logging:
+  default-log-level: notice
+  outputs:
+    - console: { enabled: yes }

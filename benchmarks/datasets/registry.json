@@ -1,0 +1,25 @@
+{
+  "_comment": "Dataset registry. PCAPs are referenced/downloaded, NEVER committed (license + size). Record the source URL, license/citation, and the ground-truth labels file per scenario. Add an entry, drop the PCAP where BENCH_PCAP points, and run: python benchmarks/run.py <name>.",
+  "scenarios": {
+    "synthetic-beacon": {
+      "description": "Bundled, license-clean smoke scenario: one C2 beacon host among benign traffic. Runnable with no external download (see --from-docs).",
+      "source": "built-in (extends tools/eve-feeder/fixtures)",
+      "license": "project-owned",
+      "labels": "datasets/synthetic-beacon/labels.json"
+    },
+    "cic-ids-2017-friday": {
+      "description": "CIC-IDS2017 Friday (botnet + portscan + DDoS). Full PCAP + labels.",
+      "source": "https://www.unb.ca/cic/datasets/ids-2017.html",
+      "license": "UNB CIC — free for research, citation required (Sharafaldin et al., ICISSP 2018)",
+      "labels": "datasets/cic-ids-2017-friday/labels.json",
+      "note": "Download the PCAP yourself; set BENCH_PCAP_DIR. Do not commit it."
+    },
+    "ctu-13-neris": {
+      "description": "CTU-13 scenario (Neris botnet). Stratosphere Lab.",
+      "source": "https://www.stratosphereips.org/datasets-ctu13",
+      "license": "Stratosphere — PCAP privacy-limited; may be flow-only",
+      "labels": "datasets/ctu-13-neris/labels.json",
+      "note": "2011 botnet — expect the dataset-age caveat: current ET Open rules may not fire (fairness note, not a failure)."
+    }
+  }
+}

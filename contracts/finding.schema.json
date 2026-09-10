@@ -17,7 +17,11 @@
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "first_seen": { "type": "string", "format": "date-time" },
     "last_seen": { "type": "string", "format": "date-time" },
-    "entities": { "type": "array", "items": { "type": "object" } },
+    "entities": {
+      "description": "Typed entity objects (ip/domain/fingerprint/…). Detectors emit this as a JSON-serialized string on the wire (parsed by downstream consumers and the ClickHouse/SIEM boundary); the raw array form is also accepted.",
+      "type": ["array", "string"],
+      "items": { "type": "object" }
+    },
     "evidence_refs": { "type": "array", "items": { "type": "string" } },
     "mitre": {
       "type": "array",

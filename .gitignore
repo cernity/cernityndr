@@ -35,3 +35,6 @@ docs/plans/
 docs/brainstorms/
 docs/specs/
 docs/internal/
+
+# bus TLS certs + SCRAM creds (never commit)
+deploy/security/secrets/

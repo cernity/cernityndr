@@ -148,6 +148,12 @@ def llmnr_poison_score(answered_names: set, min_names: int = 5) -> tuple[bool, i
     answers only for its own name. `answered_names` = distinct query names this host
     answered. TELEMETRY NOTE: Suricata surfaces LLMNR (udp/5355) as dns events but
     does NOT decode NBT-NS (udp/137), so coverage is LLMNR/mDNS-leaning; see
-    docs/suricata-config.md. Returns (hit, n)."""
+    docs/suricata-config.md.
+
+    ROADMAP / NOT YET WIRED: this scoring is unit-tested but is not yet consumed by
+    app.py — east-west subscribes to flow/raw, not the dns stream. Wiring it to
+    per-responder dns-answer state is tracked; until then it does not emit findings.
+
+    Returns (hit, n)."""
     n = len({x for x in answered_names if x})
     return (n >= min_names, n)

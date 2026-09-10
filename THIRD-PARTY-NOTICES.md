@@ -46,6 +46,8 @@ project, as licenses change by version.
 | ClickHouse | raw-telemetry analytics store (optional) | Apache-2.0 |
 | MinIO | pcap/file object store (optional) | AGPL-3.0 |
 | OpenSearch / OpenSearch Dashboards | documented reference SIEM (not shipped) | Apache-2.0 |
+| SLIPS (Stratosphere IPS) | opt-in ML behavioral-detection overlay (`deploy/overlays/slips.yml`); pulled as the upstream `stratosphereips/slips` image, **not** part of Cernity's code | **GPL-2.0** — see note below |
+| Apache Flink | optional streaming-SQL detector overlay (`deploy/overlays/flink.yml`); pulled as the upstream image, not shipped in Cernity's code | Apache-2.0 |
 | Python + libraries (e.g. kafka client, boto3, prometheus-client, jsonschema) | service runtime | PSF / Apache-2.0 / MIT / BSD (per package) |
 
 ## Techniques modeled, not redistributed
@@ -74,6 +76,16 @@ image, however, does bundle that package. If you redistribute Cernity images com
 or offer JA4+ output as part of a paid product, review the FoxIO License 1.1 and contact
 FoxIO. Running Cernity for your own organization's security is squarely within the
 permitted non-commercial/internal use.
+
+## Note on SLIPS (GPL-2.0)
+
+The opt-in ML detection overlay runs **SLIPS** (Stratosphere IPS), which is **GPL-2.0**.
+Cernity does **not** vendor or link SLIPS' code: the overlay pulls the upstream
+`stratosphereips/slips` image and talks to it over files and the message bus, so the
+GPL obligation stays contained to that separately-distributed upstream image. Cernity's
+own adapters (`eve-bridge`, `slips-adapter`) are Cernity-licensed and contain no SLIPS
+code. The overlay is off by default; a future native ML detector would remove the GPL
+dependency entirely (see [docs/roadmap.md](docs/roadmap.md)).
 
 ## Note for redistributors
 

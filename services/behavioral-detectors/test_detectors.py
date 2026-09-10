@@ -240,6 +240,20 @@ def test_dns_exploded_ignores_repeated_same_query():
     assert d.dns_exploded_score(["host.example.com"] * 100, min_subdomains=30)[0] is False
 
 
+
+
+def test_low_slow_exfil():
+    import detectors as d
+    # sustained trickle below the 50MB burst ceiling, over many conns -> fires
+    assert d.low_slow_exfil(10_000_000, 20, "8.8.8.8")[0]
+    # a real burst is left to exfil_check (no double-fire)
+    assert not d.low_slow_exfil(60_000_000, 20, "8.8.8.8")[0]
+    # below the floor no-fire; too few conns no-fire; internal no-fire
+    assert not d.low_slow_exfil(1_000_000, 20, "8.8.8.8")[0]
+    assert not d.low_slow_exfil(10_000_000, 3, "8.8.8.8")[0]
+    assert not d.low_slow_exfil(10_000_000, 20, "10.0.0.5")[0]
+
+
 if __name__ == "__main__":
     import inspect
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

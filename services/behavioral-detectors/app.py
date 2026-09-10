@@ -344,6 +344,18 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             c = _candidate("exfil", "exfil", sev, escore, ent, ten)
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("EXFIL %s->%s bytes=%d", src, dst, int(total))
+        else:
+            # low-and-slow exfil: sustained trickle below the burst ceiling (T1030)
+            conns = int(_store.counter_get(key, "c") or 0)
+            is_ls, lscore = det.low_slow_exfil(int(total), conns, dst, threshold_bytes=cfg["exfil_bytes"])
+            if is_ls:
+                ent = json.dumps([{"type": "ip", "role": "src", "value": src},
+                                  {"type": "ip", "role": "dst", "value": dst},
+                                  {"type": "bytes", "value": int(total)},
+                                  {"type": "connections", "value": conns}])
+                c = _candidate("low_slow_exfil", "exfil", 6, lscore, ent, ten)
+                if c:
+                    producer.send(CANDIDATE_TOPIC, c); log.info("LOW_SLOW_EXFIL %s->%s bytes=%d conns=%d", src, dst, int(total), conns)
     # cumulative long-connection (moved from _handle, plan 007)
     for key in _scoped_keys("lc:", flow_parts):
         ten, entity = _key_parts(key); src, dst = _pair(entity)
@@ -435,6 +447,7 @@ def _handle(e, producer, now, part=0, cfg=None):
             _kv_add(f"ctx:{ten}:{src}|{dst}", [breed, risks])                # dst-context for severity (read in evaluate)
             _sadd_add(f"pv:{ten}:{dst}", src)                               # fleet prevalence (uncapped; env bucket unaffected)
             _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "b", b2s)  # exfil bytes -> threshold in evaluate()
+            _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "c", 1)    # connection count -> low-slow exfil in evaluate()
             _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "s", age)  # cumulative long-conn secs -> evaluate()
             _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "n", 1)    # ... and conn count
             _znx_add("kd:", part, f"kd:{part}:{ten}:{src}", dst, time.time())  # first-seen dst -> rare-dest in evaluate().

@@ -84,6 +84,76 @@ def test_elevated_risk_narrative_when_no_stage():
     assert "elevated risk" in inc["entities"]
 
 
+# --- ML×heuristic corroboration (plan 003) ---------------------------------
+
+def test_corroboration_when_ml_and_heuristic_agree():
+    fs = [_f("m", "slips_ml", "c2", 6, 1000, ["T1071"]),
+          _f("b", "beacon", "c2", 7, 1010, ["T1071"])]
+    groups = c.find_corroborations(fs)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["category"] == "c2"
+    assert g["detectors"] == ["beacon", "slips_ml"]
+    assert set(g["finding_ids"]) == {"m", "b"}
+    assert g["max_severity"] == 7
+
+
+def test_no_corroboration_same_detector_twice():
+    fs = [_f("a", "slips_ml", "c2", 6, 1000), _f("b", "slips_ml", "c2", 7, 1010)]
+    assert c.find_corroborations(fs) == []       # needs >=2 distinct detectors
+
+
+def test_no_corroboration_two_heuristics_no_ml():
+    # two distinct heuristics agree, but neither is ML -> not a corroboration
+    fs = [_f("a", "beacon", "c2", 7, 1000), _f("b", "long_connection", "c2", 6, 1010)]
+    assert c.find_corroborations(fs) == []
+
+
+def test_no_corroboration_across_different_categories():
+    # ML c2 + heuristic recon is a multi-tactic incident, not same-behavior agreement
+    fs = [_f("m", "slips_ml", "c2", 8, 1000), _f("s", "horizontal_scan", "recon", 5, 1010)]
+    assert c.find_corroborations(fs) == []
+
+
+def test_build_corroboration_boosts_and_cites_both():
+    fs = [_f("m", "slips_ml", "c2", 6, 1000, ["T1071"]),
+          _f("b", "beacon", "c2", 8, 1010, ["T1071", "T1071.001"])]
+    g = c.find_corroborations(fs)[0]
+    cor = c.build_corroboration("10.0.0.5", g, now=2000)
+    assert cor["detector_id"] == "correlation_corroboration"
+    assert cor["severity"] == 10                 # max constituent (8) + 2
+    assert cor["confidence"] == 0.9
+    assert set(cor["evidence_refs"]) == {"m", "b"}
+    assert cor["mitre"] == ["T1071", "T1071.001"]
+    assert cor["category"] == "c2"
+    assert "corroborated by beacon + slips_ml" in cor["entities"]
+
+
+def test_severity_boost_capped_at_ten():
+    fs = [_f("m", "slips_ml", "c2", 9, 1000), _f("b", "beacon", "c2", 9, 1010)]
+    cor = c.build_corroboration("h", c.find_corroborations(fs)[0], now=1)
+    assert cor["severity"] == 10                 # 9 + 2 clamped to 10
+
+
+def test_is_correlation_covers_incident_and_corroboration():
+    assert c.is_correlation({"detector_id": "correlation_incident"})
+    assert c.is_correlation({"detector_id": "correlation_corroboration"})
+    assert not c.is_correlation({"detector_id": "slips_ml"})
+    assert not c.is_correlation({"detector_id": "beacon"})
+
+
+def test_corroboration_output_never_re_corroborates_or_inflates():
+    # feeding a corroboration/incident back in is ignored (no loop, no risk skew)
+    fs = [_f("cor", "correlation_corroboration", "c2", 10, 1000),
+          _f("inc", "correlation_incident", "incident", 9, 1000),
+          _f("m", "slips_ml", "c2", 6, 1000), _f("b", "beacon", "c2", 7, 1000)]
+    groups = c.find_corroborations(fs)
+    assert len(groups) == 1 and set(groups[0]["finding_ids"]) == {"m", "b"}
+    # the incident decision ignores correlation-typed inputs (no loop, no skew):
+    # feeding them alongside m+b yields the same verdict as m+b alone.
+    assert c.should_incident(fs, now=1000) == c.should_incident([fs[2], fs[3]], now=1000)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

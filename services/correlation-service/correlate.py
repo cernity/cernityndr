@@ -14,6 +14,12 @@ import json
 import time
 
 INCIDENT_DETECTOR = "correlation_incident"
+CORROBORATION_DETECTOR = "correlation_corroboration"
+# Correlation outputs (incidents + corroborations) must never re-correlate.
+CORRELATION_SOURCES = {INCIDENT_DETECTOR, CORROBORATION_DETECTOR}
+# Detector ids whose findings count as the ML side of a corroboration. The shell
+# may extend this from env so future ML detectors join without a code change.
+ML_SOURCES = {"slips_ml"}
 
 # Finding category -> (kill-chain stage index, tactic label). Stages are
 # ordered so a sequence that advances through them over time is a chain.
@@ -39,6 +45,12 @@ DEFAULTS = {
 def is_incident(finding: dict) -> bool:
     """Incidents are findings too; the shell must not re-correlate them."""
     return finding.get("detector_id") == INCIDENT_DETECTOR
+
+
+def is_correlation(finding: dict) -> bool:
+    """Any correlation output (incident or corroboration) must never re-correlate
+    and must not inflate an entity's risk. Supersedes is_incident for filtering."""
+    return finding.get("detector_id") in CORRELATION_SOURCES
 
 
 def _severity(f: dict) -> float:
@@ -107,7 +119,7 @@ def should_incident(findings, now, params=None):
     """Decide whether an entity's findings warrant an incident. Ignores
     incident-typed inputs. Returns (bool, reason)."""
     p = {**DEFAULTS, **(params or {})}
-    active = [f for f in findings if not is_incident(f)]
+    active = [f for f in findings if not is_correlation(f)]
     if not active:
         return False, "no findings"
     distinct = {STAGE[f["category"]][0] for f in active if f.get("category") in STAGE}
@@ -130,7 +142,7 @@ def build_incident(entity, findings, now, tenant="homelab", reason="", params=No
     readable kill-chain narrative in entities. Correlation raises severity
     above the strongest constituent finding."""
     p = {**DEFAULTS, **(params or {})}
-    active = [f for f in findings if not is_incident(f)]
+    active = [f for f in findings if not is_correlation(f)]
     risk = entity_risk(active, now, p["half_life_secs"])
     by_stage = {}
     for idx, _ts_, label in tactic_stages(active):
@@ -162,6 +174,76 @@ def build_incident(entity, findings, now, tenant="homelab", reason="", params=No
         "entities": entities,
         "evidence_refs": finding_ids,
         "mitre": mitre,
+        "state": "CANDIDATE",
+    }
+
+
+def find_corroborations(findings, ml_sources=ML_SOURCES):
+    """ML×heuristic agreement. Group an entity's active findings by category; a
+    category corroborates when its distinct detector_ids include >=1 ml_source AND
+    >=1 non-ml (heuristic) source -- ML backing a heuristic on the same behavior is
+    a high-confidence signal the incident logic misses (same category = same stage,
+    so it is not "multi-tactic"). Returns a deterministic list of groups:
+    {category, detectors: sorted[str], finding_ids: [str], max_severity: int,
+    mitre: sorted[str]}. One strongest (tie: most recent) finding per detector,
+    mirroring entity_risk so one chatty detector cannot skew it."""
+    by_cat = {}  # category -> {"dets": {detector_id: (sev, ts, fid)}, "mitre": set}
+    for f in findings:
+        if is_correlation(f):
+            continue
+        cat, det = f.get("category", ""), f.get("detector_id", "")
+        if not cat or not det:
+            continue
+        sev, ts, fid = _severity(f), _ts(f, 0.0), f.get("finding_id")
+        g = by_cat.setdefault(cat, {"dets": {}, "mitre": set()})
+        prev = g["dets"].get(det)
+        if prev is None or sev > prev[0] or (sev == prev[0] and ts > prev[1]):
+            g["dets"][det] = (sev, ts, fid)
+        g["mitre"].update(f.get("mitre") or [])
+    out = []
+    for cat in sorted(by_cat):
+        dets = by_cat[cat]["dets"]
+        ml = any(d in ml_sources for d in dets)
+        heuristic = any(d not in ml_sources for d in dets)
+        if ml and heuristic:
+            out.append({
+                "category": cat,
+                "detectors": sorted(dets),
+                "finding_ids": [dets[d][2] for d in sorted(dets) if dets[d][2]],
+                "max_severity": int(max(v[0] for v in dets.values())),
+                "mitre": sorted(by_cat[cat]["mitre"]),
+            })
+    return out
+
+
+def build_corroboration(entity, group, now, tenant="homelab"):
+    """Shape a corroboration finding: a distinct type (detector_id=
+    correlation_corroboration) carrying the boost -- severity above the strongest
+    constituent, high confidence so finding-service finalizes it without a capture.
+    Category is preserved so downstream MITRE/stage stay meaningful; constituents
+    cited in evidence_refs; MITRE unioned. The shell owns the deterministic
+    finding_id (per entity+category+window-bucket)."""
+    cat = group["category"]
+    severity = max(1, min(10, int(group.get("max_severity", 1)) + 2))
+    narrative = f"{entity}: {cat} corroborated by " + " + ".join(group["detectors"])
+    entities = json.dumps([
+        {"type": "entity", "role": "subject", "value": entity},
+        {"type": "narrative", "value": narrative},
+        {"type": "agreement", "value": group["detectors"], "category": cat},
+    ])
+    return {
+        "finding_id": f"corrob-{entity}-{int(now)}-{cat}",
+        "tenant_id": tenant,
+        "detector_id": CORROBORATION_DETECTOR,
+        "detector_version": "1.0",
+        "category": cat,
+        "severity": severity,
+        "confidence": 0.9,
+        "first_seen": _fmt(now),
+        "last_seen": _fmt(now),
+        "entities": entities,
+        "evidence_refs": group["finding_ids"],
+        "mitre": group.get("mitre", []),
         "state": "CANDIDATE",
     }
 

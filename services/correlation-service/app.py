@@ -42,6 +42,9 @@ PARAMS = {
 }
 FINAL_TOPIC = "ndr.finding.final.v1"
 CANDIDATE_TOPIC = "ndr.finding.candidate.v1"
+# Detector ids counted as the ML side of a corroboration (env-extensible so future
+# ML detectors join without a code change).
+ML_SOURCES = {s.strip() for s in os.environ.get("CORROBORATION_ML_SOURCES", "slips_ml").split(",") if s.strip()}
 
 _state = defaultdict(list)   # entity -> list[normalized finding dict] within window
 _emitted = set()             # (entity, window-bucket, reason) dedupe
@@ -126,23 +129,36 @@ def _reload(ch):
 
 
 def evaluate(producer, now):
+    bucket = int(now // WINDOW)
     for ent, items in list(_state.items()):
+        # Incidents: risk / kill-chain / multi-tactic across the entity's findings.
         fire, reason = corr.should_incident(items, now, PARAMS)
-        if not fire:
-            continue
-        key = (ent, int(now // WINDOW), reason)
-        if key in _emitted:
-            continue
-        inc = corr.build_incident(ent, items, now, tenant=TENANT, reason=reason, params=PARAMS)
-        # Deterministic id per (entity, window-bucket, reason): a restart that
-        # re-emits the same incident produces the same finding_id, so ClickHouse
-        # (ReplacingMergeTree) and finding-service collapse it instead of
-        # creating a duplicate.
-        inc["finding_id"] = f"incident-{ent}-{int(now // WINDOW)}-{reason}"
-        producer.send(CANDIDATE_TOPIC, inc)
-        _emitted.add(key)
-        log.info("INCIDENT %s reason=%s sev=%s findings=%d",
-                 ent, reason, inc["severity"], len(items))
+        if fire:
+            key = (ent, bucket, reason)
+            if key not in _emitted:
+                inc = corr.build_incident(ent, items, now, tenant=TENANT, reason=reason, params=PARAMS)
+                # Deterministic id per (entity, window-bucket, reason): a restart
+                # that re-emits the same incident produces the same finding_id, so
+                # ClickHouse (ReplacingMergeTree) and finding-service collapse it
+                # instead of creating a duplicate.
+                inc["finding_id"] = f"incident-{ent}-{bucket}-{reason}"
+                producer.send(CANDIDATE_TOPIC, inc)
+                _emitted.add(key)
+                log.info("INCIDENT %s reason=%s sev=%s findings=%d",
+                         ent, reason, inc["severity"], len(items))
+        # Corroborations: ML and a heuristic agree on the same entity+behavior.
+        # Evaluated for every entity (not gated by the incident decision above).
+        for g in corr.find_corroborations(items, ML_SOURCES):
+            cat = g["category"]
+            key = (ent, bucket, f"corrob:{cat}")   # bucket at [1] so _prune works
+            if key in _emitted:
+                continue
+            cor = corr.build_corroboration(ent, g, now, tenant=TENANT)
+            cor["finding_id"] = f"corrob-{ent}-{bucket}-{cat}"
+            producer.send(CANDIDATE_TOPIC, cor)
+            _emitted.add(key)
+            log.info("CORROBORATION %s cat=%s sev=%s detectors=%s",
+                     ent, cat, cor["severity"], ",".join(g["detectors"]))
 
 
 def main():
@@ -161,7 +177,7 @@ def main():
         for _tp, recs in consumer.poll(timeout_ms=1000, max_records=500).items():
             for rec in recs:
                 f = rec.value
-                if corr.is_incident(f):          # never correlate incidents (no loop)
+                if corr.is_correlation(f):       # never re-correlate incidents/corroborations (no loop)
                     continue
                 ent = _entity_of(f, ch)
                 if ent:

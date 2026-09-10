@@ -1,0 +1,13 @@
+{
+  "dataset": "synthetic-beacon (built-in)",
+  "granularity": "host",
+  "malicious": ["10.0.0.5"],
+  "honesty": [
+    "This scenario is engineered to show the behavioral gap: a periodic C2 beacon has no signature, so raw Suricata (Arm A) does not alert on it, while Cernity's beaconing detector does. On traffic that DOES match an ET Open signature, Arm A and Arm B detect equally — Cernity's edge there is triage volume and enrichment, not raw catch rate.",
+    "A single synthetic host is not a prevalence sample; real precision/recall need a labeled corpus (see CIC-IDS / CTU-13 entries in registry.json)."
+  ],
+  "caveats": [
+    "Synthetic, hand-built scenario for smoke-testing the harness end to end.",
+    "Offline replay measures detection + analyst-volume, not throughput."
+  ]
+}

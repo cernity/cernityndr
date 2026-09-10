@@ -1,0 +1,36 @@
+{
+  "_comment": "No-infra smoke input for run.py --from-docs. Stand-in for what the two arms would return from OpenSearch on the synthetic-beacon scenario: raw Suricata alerts (Arm A) that MISS the signatureless beacon, vs a Cernity finding (Arm B) that catches it.",
+  "meta": {
+    "scenario": "synthetic-beacon",
+    "dataset": "synthetic-beacon (built-in)",
+    "granularity": "host",
+    "determinism_hash": "smoke0000000000",
+    "suricata_version": "jasonish/suricata:latest",
+    "zeek_version": "zeek/zeek:latest",
+    "etopen": "smoke",
+    "cernity_version": "dev"
+  },
+  "truth": ["10.0.0.5"],
+  "arms": {
+    "suricata_siem": {
+      "kind": "alerts",
+      "raw_events": 48000,
+      "alerts": 220,
+      "delivered": 220,
+      "docs": [
+        {"event_type": "alert", "src_ip": "10.0.0.9", "dest_ip": "151.101.0.10"},
+        {"event_type": "alert", "src_ip": "10.0.0.9", "dest_ip": "151.101.0.10"},
+        {"event_type": "alert", "src_ip": "10.0.0.21", "dest_ip": "23.45.67.89"}
+      ]
+    },
+    "cernity_siem": {
+      "kind": "findings",
+      "raw_events": 48000,
+      "alerts": 4,
+      "delivered": 2,
+      "docs": [
+        {"entities": "[{\"type\": \"ip\", \"role\": \"src\", \"value\": \"10.0.0.5\"}, {\"type\": \"ip\", \"role\": \"dst\", \"value\": \"203.0.113.10\"}, {\"type\": \"beacon\", \"interval_s\": 20}]"}
+      ]
+    }
+  }
+}

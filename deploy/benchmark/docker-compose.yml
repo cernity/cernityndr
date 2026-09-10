@@ -1,0 +1,102 @@
+# Benchmark stack: run one PCAP through Suricata->SIEM (Arm A), Suricata->Cernity->SIEM
+# (Arm B), and Zeek (reference), all into one OpenSearch, for a side-by-side comparison.
+# Orchestrated by benchmarks/run.py (it sequences: run engines offline, then ship, then
+# score). Infra only — validated by the smoke run, not unit tests.
+#
+#   BENCH_PCAP=/abs/path/to/scenario.pcap python benchmarks/run.py <scenario>
+#
+# Arm B reuses the full Cernity central stack:
+include:
+  - ../central/docker-compose.yml
+
+x-logging: &cernity-logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+services:
+  # Shared SIEM for BOTH arms (single node, security disabled — test only).
+  opensearch:
+    image: opensearchproject/opensearch:latest
+    container_name: cernity-bench-opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Bench_only_1
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+    ulimits: {memlock: {soft: -1, hard: -1}}
+    ports: ["9200:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *cernity-logging
+
+  # Offline Suricata over the PCAP -> split EVE on a shared volume (both arms read it).
+  suricata-offline:
+    image: jasonish/suricata:latest
+    container_name: cernity-bench-suricata
+    entrypoint: ["suricata", "-c", "/etc/suricata/suricata.yaml",
+                 "-r", "${BENCH_PCAP:-/pcaps/scenario.pcap}", "-l", "/eve", "-v"]
+    volumes:
+      - ./suricata/suricata.yaml:/etc/suricata/suricata.yaml:ro
+      - ${BENCH_PCAP_DIR:-./pcaps}:/pcaps:ro
+      - cernity-bench-eve:/eve
+    restart: "no"
+    logging: *cernity-logging
+
+  # Offline Zeek over the SAME PCAP -> JSON logs (reference arm).
+  zeek-offline:
+    image: zeek/zeek:latest
+    container_name: cernity-bench-zeek
+    entrypoint: ["sh", "-c",
+                 "cd /zeek-logs && zeek -r ${BENCH_PCAP:-/pcaps/scenario.pcap} -C /etc/zeek/local.zeek"]
+    volumes:
+      - ./zeek/local.zeek:/etc/zeek/local.zeek:ro
+      - ${BENCH_PCAP_DIR:-./pcaps}:/pcaps:ro
+      - cernity-bench-zeek:/zeek-logs
+    restart: "no"
+    logging: *cernity-logging
+
+  # Arm A: raw Suricata EVE -> OpenSearch (index prefix arm-a). Fluent Bit tails the
+  # EVE the offline run produced; no Cernity in this path.
+  arm-a-shipper:
+    image: fluent/fluent-bit:latest
+    container_name: cernity-bench-arm-a
+    volumes:
+      - ./arm-a/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - cernity-bench-eve:/eve:ro
+    depends_on:
+      opensearch: {condition: service_healthy}
+    restart: "no"
+    logging: *cernity-logging
+
+  # Arm B: the SAME EVE -> Cernity bus (feeder), so the central stack (from the include)
+  # turns it into findings; findings-forwarder is pointed at this OpenSearch below.
+  arm-b-feeder:
+    image: python:3.12-slim
+    container_name: cernity-bench-arm-b-feeder
+    working_dir: /feeder
+    entrypoint: ["sh", "-c",
+                 "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && "
+                 "python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+    volumes:
+      - ../../tools/eve-feeder:/feeder:ro
+      - cernity-bench-eve:/eve:ro
+    depends_on:
+      redpanda: {condition: service_healthy}
+    restart: "no"
+    logging: *cernity-logging
+
+# NOTE: point findings-forwarder (from the central include) at this OpenSearch by
+# setting these in .env before `up` — Arm B lands in the ndr-findings (arm-b) index:
+#   CERNITY_SINK=opensearch
+#   ES_ENDPOINT=http://opensearch:9200
+#   ES_INDEX_PREFIX=arm-b-findings
+
+volumes:
+  cernity-bench-eve: {}
+  cernity-bench-zeek: {}

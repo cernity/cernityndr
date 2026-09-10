@@ -35,8 +35,14 @@ services:
       - --reserve-memory=0M
       - --node-id=0
       - --check=false
-      - --kafka-addr=0.0.0.0:9092
-      - --advertise-kafka-addr=redpanda:9092
+      # Two listeners: internal (containers reach redpanda:9092 on the docker network)
+      # and external (a remote Suricata sensor reaches CENTRAL_HOST:19092). Set
+      # CERNITY_ADVERTISE_HOST in .env to this host's reachable IP/DNS so the external
+      # advertised address resolves for the sensor.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://${CERNITY_ADVERTISE_HOST:-127.0.0.1}:19092
+    ports:
+      - "19092:19092"        # external Kafka listener for remote sensor shippers
     healthcheck:
       test: ["CMD", "rpk", "cluster", "health"]
       interval: 5s

@@ -46,6 +46,26 @@ def test_no_match():
     assert ti.match("8.8.8.8", "abc", "def", {"1.1.1.1"}, set(), set())[0] is False
 
 
+def test_parse_fp_list():
+    txt = "# known C2 server fps\nT13d1516h2_8daaf6152771_b186095e22b6,CobaltStrike\n\n1a2b3c4d\n"
+    s = ti.parse_fp_list(txt)
+    assert "t13d1516h2_8daaf6152771_b186095e22b6" in s and "1a2b3c4d" in s   # lowercased
+
+
+def test_match_server_fp_ja4s():
+    bl = {"t13d1516h2_8daaf6152771_b186095e22b6"}
+    hit, typ, ioc = ti.match_server_fp("", "T13d1516h2_8daaf6152771_b186095e22b6", "", bl)
+    assert hit and typ == "c2fp_ja4s" and ioc == "t13d1516h2_8daaf6152771_b186095e22b6"
+
+
+def test_match_server_fp_empty_blocklist_is_noop():
+    assert ti.match_server_fp("x", "y", "z", set())[0] is False
+
+
+def test_match_server_fp_no_match():
+    assert ti.match_server_fp("aaa", "bbb", "ccc", {"ddd"})[0] is False
+
+
 def test_join_key_entities():
     # community_id/flow_id join the finding back to the exact connection's telemetry.
     import app

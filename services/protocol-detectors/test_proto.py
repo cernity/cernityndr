@@ -55,6 +55,43 @@ def test_icmp_exfil():
     assert not p.icmp_exfil_hit("ICMP", 500, "8.8.8.8")          # small
 
 
+def test_port_proto_mismatch():
+    assert p.port_proto_mismatch("ssh", 443)[0]                  # ssh on 443 fires
+    assert p.port_proto_mismatch("http", 443)[0]                 # cleartext on TLS port fires
+    assert p.port_proto_mismatch("tls", 22)[0]                   # tls on ssh port fires
+    assert not p.port_proto_mismatch("tls", 443)[0]              # https on 443 is fine
+    assert not p.port_proto_mismatch("ssl", 443)[0]              # ssl==tls normalized
+    assert not p.port_proto_mismatch("http", 8080)[0]            # http on 8080 fine
+    assert not p.port_proto_mismatch("tls", 9999)[0]             # no expectation for 9999
+    assert not p.port_proto_mismatch("", 443)[0]                 # absent app_proto no-fire
+    assert not p.port_proto_mismatch("unknown", 22)[0]           # unknown no-fire
+    assert not p.port_proto_mismatch("ssh", 443, allow_ports={443})[0]  # allowlisted no-fire
+
+
+def test_ech_present():
+    assert p.ech_present({"ech": True})
+    assert p.ech_present({"encrypted_client_hello": {}})
+    assert p.ech_present({"extensions": ["sni", "65037"]})       # ECH ext type
+    assert not p.ech_present({})
+    assert not p.ech_present({"extensions": ["sni", "alpn"]})
+
+
+def test_host_sni_mismatch():
+    assert p.host_sni_mismatch("cdn.akamai.com", "evil.com")     # fronting
+    assert not p.host_sni_mismatch("www.example.com", "example.com")   # www-insensitive
+    assert not p.host_sni_mismatch("example.com", "")            # host absent
+    assert not p.host_sni_mismatch("", "example.com")            # sni absent
+
+
+def test_ech_or_host_sni_mismatch():
+    assert p.ech_or_host_sni_mismatch({"ech": True}, "", "")[0]  # ECH alone fires
+    hit, why = p.ech_or_host_sni_mismatch({}, "cdn.akamai.com", "evil.com")
+    assert hit and "host_sni_mismatch" in why
+    assert not p.ech_or_host_sni_mismatch({}, "example.com", "example.com")[0]   # Host==SNI
+    # fully-encrypted HTTPS: no visible Host -> explicitly no-fire (documented limit)
+    assert not p.ech_or_host_sni_mismatch({}, "example.com", "")[0]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

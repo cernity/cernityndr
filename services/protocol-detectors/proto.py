@@ -57,6 +57,36 @@ DOH_SNIS = ("cloudflare-dns.com", "dns.google", "dns.quad9.net", "doh.opendns",
             "dns.nextdns", "chrome.cloudflare-dns")
 
 
+# Well-known port -> the Suricata app_proto expected on it. A detected app that
+# contradicts this (ssh on 443, cleartext http on a TLS port) is an evasion signal.
+_PORT_PROTO = {22: "ssh", 21: "ftp", 25: "smtp", 587: "smtp", 465: "smtp",
+               53: "dns", 80: "http", 8080: "http", 443: "tls", 8443: "tls",
+               110: "pop3", 995: "pop3", 143: "imap", 993: "imap",
+               445: "smb", 139: "smb", 3389: "rdp", 1883: "mqtt"}
+
+
+def port_proto_mismatch(app_proto: str, dst_port, allow_ports=frozenset()) -> tuple[bool, str]:
+    """True + why when Suricata's detected app_proto contradicts the well-known
+    service for dst_port (T1571). Skips absent/unknown app_proto, ports with no
+    expectation, and allowlisted tunneling ports. tls/ssl are treated as one."""
+    ap = (app_proto or "").lower()
+    if not ap or ap in ("failed", "unknown"):
+        return False, ""
+    try:
+        port = int(dst_port)
+    except (TypeError, ValueError):
+        return False, ""
+    if port in allow_ports:
+        return False, ""
+    expected = _PORT_PROTO.get(port)
+    if expected is None:
+        return False, ""
+    norm = lambda p: "tls" if p in ("tls", "ssl") else p
+    if norm(ap) != norm(expected):
+        return True, f"{norm(ap)} on port {port} (expected {norm(expected)})"
+    return False, ""
+
+
 def doh_hit(sni: str, dst_port: int, approved_resolvers: set) -> tuple[bool, str]:
     s = (sni or "").lower()
     if dst_port == 853:            # DoT is unambiguous
@@ -109,3 +139,42 @@ def icmp_exfil_hit(proto: str, total_bytes: int, dst_ip: str,
                    threshold: int = 1_000_000) -> bool:
     return (str(proto).upper() in ("ICMP", "IPV6-ICMP", "ICMPV6")
             and is_external(dst_ip) and total_bytes >= threshold)
+
+
+# --- Reframed domain fronting (T1090.004): ECH, or cleartext Host != TLS SNI -----
+def _strip_www(h: str) -> str:
+    h = (h or "").lower().strip().split(":")[0]
+    return h[4:] if h.startswith("www.") else h
+
+
+def ech_present(tls_evt: dict) -> bool:
+    """TLS ClientHello carrying Encrypted Client Hello (ECH), which hides the real
+    SNI. Suricata exposes this only in recent builds; an absent field means no fire
+    (dormant, documented in docs/suricata-config.md). ECH extension type is 0xfe0d."""
+    if not tls_evt:
+        return False
+    if tls_evt.get("ech") or "encrypted_client_hello" in tls_evt:
+        return True
+    exts = tls_evt.get("extensions") or tls_evt.get("client_extensions") or []
+    return any(str(e).lower() in ("ech", "encrypted_client_hello", "65037", "0xfe0d", "fe0d")
+               for e in exts)
+
+
+def host_sni_mismatch(sni: str, http_host: str) -> bool:
+    """Cleartext HTTP Host that does not match the TLS SNI seen on the same flow — a
+    domain-fronting tell. Both must be present (www-insensitive)."""
+    if not sni or not http_host:
+        return False
+    return _strip_www(sni) != _strip_www(http_host)
+
+
+def ech_or_host_sni_mismatch(tls_evt: dict, sni: str, http_host: str) -> tuple[bool, str]:
+    """Reframed domain fronting (T1090.004): ECH usage, or a cleartext Host that
+    disagrees with the flow's TLS SNI. Classic HTTPS fronting (fully encrypted, no
+    visible Host) is out of scope and explicitly does NOT fire — there is nothing to
+    compare. Returns (hit, reason)."""
+    if ech_present(tls_evt):
+        return True, "ech"
+    if host_sni_mismatch(sni, http_host):
+        return True, f"host_sni_mismatch:{http_host}!={sni}"
+    return False, ""

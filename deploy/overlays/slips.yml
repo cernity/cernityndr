@@ -1,0 +1,80 @@
+# ML behavioral detection overlay (opt-in). Runs SLIPS (Stratosphere behavioral
+# IPS) centrally as the ML leg over the same Suricata telemetry Cernity already
+# has, and bridges its verdicts into the normal finding pipeline. OFF by default.
+#
+#   docker compose -f deploy/central/docker-compose.yml \
+#                  -f deploy/overlays/slips.yml up --build
+#
+# Flow: bus EVE --(eve-bridge)--> eve.json --(SLIPS)--> alerts.json
+#       --(slips-adapter)--> ndr.finding.candidate.v1 --> finding-service --> SIEM.
+# SLIPS verdicts arrive as findings tagged detector_id=slips_ml.
+#
+# Resource note: SLIPS' reference footprint is ~8 GB RAM + its own Redis. Size the
+# central host before enabling. SLIPS runs IDS-only here (no blocking).
+# Licensing: SLIPS is GPLv2 and is pulled as its own upstream image -- it is NOT
+# part of Cernity's licensed code (see docs/ml-detection.md / THIRD-PARTY-NOTICES).
+#
+# The SLIPS invocation (command flags, how it is pointed at slips-redis and the
+# bridged eve.json) is upstream-version-sensitive and is validated at integration
+# time; treat the `slips` block below as the starting point, not gospel.
+
+x-logging: &cernity-logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+services:
+  # SLIPS' own Redis, isolated from Cernity's state Redis (SLIPS assumes :6379).
+  slips-redis:
+    image: redis:7-alpine
+    container_name: cernity-slips-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  # bus EVE -> growing eve.json that SLIPS ingests.
+  eve-bridge:
+    image: cernity/eve-bridge:latest
+    build: {context: ../.., dockerfile: services/eve-bridge/Dockerfile}
+    container_name: cernity-eve-bridge
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      EVE_BRIDGE_TOPICS: ${EVE_BRIDGE_TOPICS:-suricata.flow.v1,suricata.raw.v1}
+      EVE_BRIDGE_OUT: /slips-input/eve.json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes: [cernity-slips-input:/slips-input]
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  # SLIPS: upstream image; reads the bridged eve.json, writes alerts to output.
+  slips:
+    image: stratosphereips/slips:latest
+    container_name: cernity-slips
+    command: ["-f", "/slips-input/eve.json", "-o", "/slips-output"]
+    environment:
+      REDIS_HOST: slips-redis
+    volumes:
+      - cernity-slips-input:/slips-input
+      - cernity-slips-output:/slips-output
+    depends_on: [slips-redis, eve-bridge]
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  # SLIPS alerts.json -> ndr.finding.candidate.v1.
+  slips-adapter:
+    image: cernity/slips-adapter:latest
+    build: {context: ../.., dockerfile: services/slips-adapter/Dockerfile}
+    container_name: cernity-slips-adapter
+    environment:
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      SLIPS_ALERTS_FILE: /slips-output/alerts.json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes: [cernity-slips-output:/slips-output]
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+volumes:
+  cernity-slips-input: {}
+  cernity-slips-output: {}

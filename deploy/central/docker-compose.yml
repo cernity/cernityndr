@@ -26,21 +26,22 @@ services:
   redpanda:
     image: redpandadata/redpanda:latest
     container_name: cernity-redpanda
-    command:
-      - redpanda
-      - start
-      - --overprovisioned
-      - --smp=1
-      - --memory=1G
-      - --reserve-memory=0M
-      - --node-id=0
-      - --check=false
-      # Two listeners: internal (containers reach redpanda:9092 on the docker network)
-      # and external (a remote Suricata sensor reaches CENTRAL_HOST:19092). Set
-      # CERNITY_ADVERTISE_HOST in .env to this host's reachable IP/DNS so the external
-      # advertised address resolves for the sensor.
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr=internal://redpanda:9092,external://${CERNITY_ADVERTISE_HOST:-127.0.0.1}:19092
+    # Two listeners: internal (containers reach redpanda:9092 on the docker network,
+    # plaintext) and external (a remote sensor reaches CENTRAL_HOST:19092). By default
+    # the external listener is SASL/SCRAM-SHA-512 + TLS; the entrypoint selects secure
+    # vs the CERNITY_INSECURE_BUS=1 plaintext demo posture. Generate certs + a SCRAM
+    # credential with deploy/security/gen-bus-certs.sh and set CERNITY_BUS_USER/PASSWORD.
+    entrypoint: ["/entrypoint.sh"]
+    environment:
+      CERNITY_ADVERTISE_HOST: ${CERNITY_ADVERTISE_HOST:-127.0.0.1}
+      CERNITY_INSECURE_BUS: ${CERNITY_INSECURE_BUS:-0}
+      CERNITY_BUS_USER: ${CERNITY_BUS_USER:-cernity-sensor}
+      # Redpanda auto-seeds this SCRAM superuser at first boot.
+      RP_BOOTSTRAP_USER: ${CERNITY_BUS_USER:-cernity-sensor}:${CERNITY_BUS_PASSWORD:-}:SCRAM-SHA-512
+    volumes:
+      - ./redpanda/entrypoint.sh:/entrypoint.sh:ro
+      - ./redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro
+      - ../security/secrets:/certs:ro
     ports:
       - "19092:19092"        # external Kafka listener for remote sensor shippers
     healthcheck:

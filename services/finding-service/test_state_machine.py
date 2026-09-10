@@ -29,6 +29,21 @@ def test_recon_low_severity_is_delivery_suppressed():
     assert f["mitre"] == ["T1046"]
 
 
+def test_new_categories_map_to_mitre():
+    # U1: coverage-gap detectors emit new categories that must resolve to techniques.
+    for cat, tech in (("discovery", "T1046"), ("impact", "T1486"),
+                      ("defense_evasion", "T1571"), ("credential_access", "T1110")):
+        f, _ = sm.build_finding(dict(SCAN, category=cat, severity=8, confidence=1.0))
+        assert tech in f["mitre"], f"{cat} -> {f['mitre']}"
+
+
+def test_candidate_mitre_overrides_category_map():
+    # U1: a detector may emit its own precise technique (e.g. AS-REP roasting).
+    f, _ = sm.build_finding(dict(SCAN, category="credential_access", severity=8,
+                                 confidence=1.0, mitre=["T1558.004"]))
+    assert f["mitre"] == ["T1558.004"]             # candidate wins over the coarse map
+
+
 def test_finding_above_suppression_ceiling_is_delivered():
     # The same detector raised above the ceiling (threat gate saw a hostile dst)
     # is delivered normally.

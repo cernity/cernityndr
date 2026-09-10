@@ -21,11 +21,15 @@ SUPPRESS_MAX_SEVERITY = int(os.environ.get("NDR_SUPPRESS_MAX_SEVERITY", "5"))
 # MITRE ATT&CK mapping, applied when defensible (v2 §17).
 CATEGORY_MITRE = {
     "recon": ["T1046"],            # Network Service Discovery
+    "discovery": ["T1046"],        # Network Service Discovery (internal scanning)
     "c2": ["T1071"],              # Application Layer Protocol
     "dns_tunnel": ["T1071.004"],  # DNS
     "lateral": ["T1021"],         # Remote Services
     "exfil": ["TA0010"],          # Exfiltration
     "bruteforce": ["T1110"],      # Brute Force
+    "credential_access": ["T1110"],   # Brute Force (coarse fallback; detectors emit finer)
+    "defense_evasion": ["T1571"],     # Non-Standard Port (coarse fallback)
+    "impact": ["T1486"],          # Data Encrypted for Impact
 }
 
 LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
@@ -80,7 +84,9 @@ def build_finding(cand: dict) -> tuple[dict, str]:
     f = dict(cand)
     f.setdefault("sensor_ids", [])
     f.setdefault("evidence_refs", [])
-    f["mitre"] = CATEGORY_MITRE.get(cand.get("category"), [])
+    # A detector may emit its own precise technique(s) (e.g. T1558.004 for AS-REP
+    # roasting); otherwise fall back to the coarse category map.
+    f["mitre"] = cand.get("mitre") or CATEGORY_MITRE.get(cand.get("category"), [])
     f["capture_job_ids"] = []
     f["suppression_reason"] = ""
     if policy == "metadata_sufficient":

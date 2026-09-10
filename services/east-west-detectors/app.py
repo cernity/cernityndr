@@ -81,19 +81,32 @@ def _ew_add(prefix, part, src, member):
         _store.set_add(_index_key(prefix, part), key, WINDOW)   # partition index
 
 
-def _cand(detector, category, sev, conf, entities):
+def _cand(detector, category, sev, conf, entities, mitre=None):
     bucket = int(time.time() // 600)
     if not _store.dedup_seen(f"emit:{TENANT}:{detector}:{_stable(entities) % 10**12}:{bucket}", 600):
         return None
     now = time.strftime("%Y-%m-%d %H:%M:%S")
-    return {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
+    c = {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
             "tenant_id": TENANT, "detector_id": detector, "detector_version": "1.0",
             "category": category, "severity": sev, "confidence": conf,
             "first_seen": now, "last_seen": now, "entities": entities, "state": "CANDIDATE"}
+    if mitre:
+        c["mitre"] = mitre                          # precise technique(s); finding-service prefers this
+    return c
 
 
 def _src_of(key):
     return key.split(":", 3)[3]                                  # prefix:part:tenant:src (IPv6-safe)
+
+
+def _asrep_preauthless(k):
+    """AS-REQ with Kerberos pre-auth absent (AS-REP roastable). Suricata eve does
+    not currently expose a pre-auth flag, so this only fires when an explicit
+    field says pre-auth was absent — dormant by default, honest about the gap."""
+    mt = str(k.get("msg_type") or k.get("message_type") or "").upper()
+    is_as_req = "AS_REQ" in mt or mt in ("AS-REQ", "10")
+    preauth = k.get("preauth", k.get("pa_data", "unknown"))
+    return is_as_req and preauth in (False, None, [], "")
 
 
 def evaluate(producer, flow_parts=None, raw_parts=None):
@@ -110,6 +123,19 @@ def evaluate(producer, flow_parts=None, raw_parts=None):
             c = _cand("lateral_movement", "lateral", 7, 0.7, ent)
             if c:
                 producer.send(CAND, c); log.info("LATERAL %s -> %d internal hosts", _src_of(key), n)
+    # internal scan (flow.v1): one src -> many hosts (horizontal) or many ports (vertical)
+    for key in _scoped_keys("scan:", flow_parts):
+        members = _store.set_members(key)
+        if not members:
+            _prune_index(key); continue
+        pairs = {tuple(m.rsplit("|", 1)) for m in members}
+        hit, kind, n = ew.scan_score(pairs)
+        if hit:
+            ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
+                              {"type": "scan", "kind": kind, "count": n}])
+            c = _cand("internal_scan", "discovery", 6, 0.6, ent, mitre=["T1046"])
+            if c:
+                producer.send(CAND, c); log.info("INTERNAL_SCAN %s %s=%d", _src_of(key), kind, n)
     # RDP fan-out (flow.v1)
     for key in _scoped_keys("rdp:", flow_parts):
         dsts = set(_store.set_members(key))
@@ -135,6 +161,55 @@ def evaluate(producer, flow_parts=None, raw_parts=None):
             c = _cand("kerberoasting", "credential_access", 8, 0.8, ent)
             if c:
                 producer.send(CAND, c); log.info("KERBEROAST %s spns=%d rc4=%s", _src_of(key), spns, rc4)
+    # password spraying (raw.v1): one src failing auth across many distinct accounts
+    for key in _scoped_keys("spray:", raw_parts):
+        accts = set(_store.set_members(key))
+        if not accts:
+            _prune_index(key); continue
+        hit, n = ew.spray_score(accts)
+        if hit:
+            ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
+                              {"type": "spray", "distinct_accounts": n}])
+            c = _cand("password_spraying", "credential_access", 7, 0.7, ent, mitre=["T1110.003"])
+            if c:
+                producer.send(CAND, c); log.info("PASSWORD_SPRAY %s accounts=%d", _src_of(key), n)
+    # AS-REP roasting (raw.v1): AS-REQs for pre-auth-disabled accounts
+    for key in _scoped_keys("asrep:", raw_parts):
+        accts = set(_store.set_members(key))
+        if not accts:
+            _prune_index(key); continue
+        hit, n = ew.asrep_roast_score(accts)
+        if hit:
+            ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
+                              {"type": "asrep", "preauthless_accounts": n}])
+            c = _cand("as_rep_roasting", "credential_access", 7, 0.75, ent, mitre=["T1558.004"])
+            if c:
+                producer.send(CAND, c); log.info("ASREP_ROAST %s accounts=%d", _src_of(key), n)
+    # ransomware over SMB (raw.v1): write-heavy file flood across many distinct files
+    for key in _scoped_keys("rw:", raw_parts):
+        members = _store.set_members(key)
+        if not members:
+            _prune_index(key); continue
+        files = {m.split("|", 1)[1] for m in members if "|" in m}
+        writes = sum(1 for m in members if m.startswith("w|"))
+        reads = sum(1 for m in members if m.startswith("r|"))
+        hit, _w = ew.ransomware_smb_score(len(files), writes, reads)
+        if hit:
+            ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
+                              {"type": "ransomware", "distinct_files": len(files), "writes": writes}])
+            c = _cand("ransomware_smb", "impact", 9, 0.8, ent, mitre=["T1486"])
+            if c:
+                producer.send(CAND, c); log.info("RANSOMWARE_SMB %s files=%d writes=%d", _src_of(key), len(files), writes)
+    # lateral exec (raw.v1): known exec named-pipe / RPC signals per source
+    for key in _scoped_keys("lex:", raw_parts):
+        sigs = set(_store.set_members(key))
+        if not sigs:
+            _prune_index(key); continue
+        ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
+                          {"type": "lateral_exec", "signals": sorted(sigs)}])
+        c = _cand("lateral_exec", "lateral", 7, 0.75, ent, mitre=["T1021.002"])
+        if c:
+            producer.send(CAND, c); log.info("LATERAL_EXEC %s signals=%d", _src_of(key), len(sigs))
 
 
 def _handle(e, producer, part):
@@ -142,16 +217,51 @@ def _handle(e, producer, part):
     if et == "flow":
         src, dst, port = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
         if src and dst and ew.is_internal(src) and ew.is_internal(dst):
+            _ew_add("scan:", part, src, f"{dst}|{port}")        # internal scan fan-out
             if port in ew.ADMIN_PORTS:
                 _ew_add("lat:", part, src, f"{dst}|{port}")
             if port == 3389:
                 _ew_add("rdp:", part, src, dst)
     elif et == "krb5":
         k = e.get("krb5", {}) or {}
+        src = e.get("src_ip")
         if k.get("msg_type") in ("KRB_TGS_REQ", "TGS-REQ") or "sname" in k:
-            _ew_add("krb:", part, e.get("src_ip"),
+            _ew_add("krb:", part, src,
                     json.dumps({"sname": k.get("sname"),
                                 "encryption": k.get("encryption") or k.get("weak_encryption")}))
+        # password spraying: AS-REQ pre-auth failures accrue distinct failed accounts.
+        err = str(k.get("error_code", "")).upper()
+        if ("PREAUTH_FAILED" in err or err in ("24", "0x18")) and k.get("cname"):
+            _ew_add("spray:", part, src, k.get("cname"))
+        # AS-REP roasting: AS-REQ with pre-auth absent. Suricata eve does not
+        # currently expose a pre-auth flag, so this stays dormant until it does
+        # (see docs/suricata-config.md); it fires the moment the field appears.
+        if _asrep_preauthless(k) and k.get("cname"):
+            _ew_add("asrep:", part, src, k.get("cname"))
+    elif et == "smb":
+        s = e.get("smb", {}) or {}
+        src = e.get("src_ip")
+        cmd = str(s.get("command", "")).upper()
+        status = str(s.get("status", "")).upper()
+        # password spraying via SMB session-setup logon failures
+        if "SESSION_SETUP" in cmd and ("LOGON_FAILURE" in status or "ACCESS_DENIED" in status):
+            acct = (s.get("ntlmssp") or {}).get("user") or s.get("user")
+            if acct:
+                _ew_add("spray:", part, src, acct)
+        # ransomware: write/rename vs read ops across distinct files (T1486)
+        fname = s.get("filename")
+        if fname:
+            if any(x in cmd for x in ("WRITE", "SET_INFO", "RENAME")):
+                _ew_add("rw:", part, src, f"w|{fname}")
+            elif "READ" in cmd:
+                _ew_add("rw:", part, src, f"r|{fname}")
+        # lateral exec via known SMB named pipe (PsExec/schtasks/registry). WinRM
+        # fan-out (5985/6) is already covered by lateral_fanout via ADMIN_PORTS.
+        pipe = s.get("named_pipe") or (fname if fname and "pipe" in str(fname).lower() else None)
+        if pipe:
+            hit, matched = ew.lateral_exec_score([pipe], [], [])
+            if hit:
+                _ew_add("lex:", part, src, matched[0])
     elif et == "dcerpc":
         d = e.get("dcerpc", {}) or {}
         hit, desc = ew.dcerpc_lateral(d.get("interface_uuid") or d.get("interface"))

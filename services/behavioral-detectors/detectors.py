@@ -342,6 +342,23 @@ def exfil_check(bytes_to_server: int, dst_ip: str,
     return True, round(min(1.0, bytes_to_server / (threshold_bytes * 4)), 3)
 
 
+def low_slow_exfil(bytes_to_server: int, conn_count: int, dst_ip: str,
+                   low_floor: int = 5_000_000, threshold_bytes: int = 50_000_000,
+                   min_conns: int = 10) -> tuple[bool, float]:
+    """Low-and-slow exfil (T1029/T1030): cumulative outbound that stays BELOW the burst
+    ceiling (so exfil_check ignores it) but exceeds a floor spread over many connections
+    — the sustained-trickle band the burst detector misses. Skips internal/allowlisted."""
+    if not is_external(dst_ip):
+        return False, 0.0
+    if _EXFIL_ALLOW and any(dst_ip.startswith(p) for p in _EXFIL_ALLOW):
+        return False, 0.0
+    if bytes_to_server >= threshold_bytes:          # burst detector owns this band
+        return False, 0.0
+    if bytes_to_server < low_floor or conn_count < min_conns:
+        return False, 0.0
+    return True, round(min(1.0, conn_count / (min_conns * 5)), 3)
+
+
 # --- Threat gate (G5): scale a north-south behavioral finding's severity by how
 # hostile the destination looks, so beacons/exfil to safe known apps sink and
 # those to suspect/dangerous dsts rise. Uses nDPI breed/risk already on the flow

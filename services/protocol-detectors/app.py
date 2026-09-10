@@ -25,6 +25,7 @@ log = ndr_runtime.setup_logging("protocol-detectors")
 
 TENANT = os.environ.get("NDR_TENANT", "default")
 APPROVED_RESOLVERS = set(x for x in os.environ.get("APPROVED_RESOLVERS", "").split(",") if x)
+ALLOW_PROTO_PORTS = set(int(x) for x in os.environ.get("NDR_ALLOW_PROTO_PORTS", "").split(",") if x.strip().isdigit())
 GROUP_ID = os.environ.get("NDR_GROUP_ID", "ndr-protocol-detectors")
 STATE_BACKEND = os.environ.get("NDR_STATE_BACKEND", "memory")
 REDIS_URL = os.environ.get("NDR_REDIS_URL", "redis://ndr-redis:6379/0")
@@ -60,16 +61,19 @@ def _fp_rare(fp, kind):
     return rare
 
 
-def _emit(producer, detector, category, sev, conf, entities):
+def _emit(producer, detector, category, sev, conf, entities, mitre=None):
     bucket = int(time.time() // 3600)
     if not _store.dedup_seen(f"emit:{TENANT}:{detector}:{_stable(entities) % 10**12}:{bucket}", 3600):
         return                                                  # already emitted (shared across replicas)
     now = time.strftime("%Y-%m-%d %H:%M:%S")
-    producer.send(CAND, {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
-                         "tenant_id": TENANT, "detector_id": detector, "detector_version": "1.0",
-                         "category": category, "severity": sev, "confidence": conf,
-                         "first_seen": now, "last_seen": now, "entities": entities,
-                         "state": "CANDIDATE"})
+    cand = {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
+            "tenant_id": TENANT, "detector_id": detector, "detector_version": "1.0",
+            "category": category, "severity": sev, "confidence": conf,
+            "first_seen": now, "last_seen": now, "entities": entities,
+            "state": "CANDIDATE"}
+    if mitre:
+        cand["mitre"] = mitre                                   # precise technique; finding-service prefers it
+    producer.send(CAND, cand)
     log.info("%s %s", detector.upper(), entities[:120])
 
 
@@ -83,6 +87,14 @@ def _cid(e):
 def _handle(e, producer):
     et = e.get("event_type")
     src, dst, dport = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
+    # port/protocol mismatch (T1571): the event's own protocol IS the detected app
+    # (an ssh event on :443, an http event on :443); flow events carry app_proto.
+    mm, mm_why = proto.port_proto_mismatch(e.get("app_proto") or et, dport, ALLOW_PROTO_PORTS)
+    if mm and src and dst:
+        _emit(producer, "port_proto_mismatch", "defense_evasion", 4, 0.5,
+              json.dumps([{"type": "ip", "role": "src", "value": src},
+                          {"type": "ip", "role": "dst", "value": dst},
+                          {"type": "why", "value": mm_why}] + _cid(e)))
     if et in ("tls", "quic"):
         obj = e.get(et, {}) or {}
         sni = obj.get("sni")
@@ -97,6 +109,14 @@ def _handle(e, producer):
             _emit(producer, "ja4_rarity", "c2", 5, 0.5,
                   json.dumps(transport + [{"type": "ip", "role": "src", "value": src},
                                           {"type": "sni", "value": sni}] + _cid(e)))
+        # server-side fingerprint rarity (ja4s/ja3s) — rare server fp is a C2 signal
+        sja4, sja3 = obj.get("ja4s"), obj.get("ja3s")
+        sfp, skind = (sja4, "ja4s") if sja4 else (sja3, "ja3s")
+        if _fp_rare(sfp, skind):
+            _emit(producer, "server_fp_rarity", "c2", 5, 0.5,
+                  json.dumps([{"type": skind, "value": sfp},
+                              {"type": "ip", "role": "dst", "value": dst},
+                              {"type": "sni", "value": sni}] + _cid(e)))
         ch, c = proto.cloud_staging_hit(sni)
         if ch:
             _emit(producer, "cloud_staging", "exfil", 5, 0.5,
@@ -115,6 +135,18 @@ def _handle(e, producer):
                 _emit(producer, "tls_cert_anomaly", "c2", 5, 0.5,
                       json.dumps([{"type": "ip", "role": "dst", "value": dst},
                                   {"type": "sni", "value": sni}, {"type": "why", "value": why}] + _cid(e)))
+            # reframed domain fronting (T1090.004): ECH now, or a later cleartext
+            # Host on this flow disagreeing with this SNI. Remember the SNI keyed by
+            # community-id (short TTL) so the http branch can compare.
+            ep, ewhy = proto.ech_or_host_sni_mismatch(t, sni, None)
+            if ep:
+                _emit(producer, "ech_sni_mismatch", "defense_evasion", 5, 0.5,
+                      json.dumps([{"type": "ip", "role": "src", "value": src},
+                                  {"type": "ip", "role": "dst", "value": dst},
+                                  {"type": "why", "value": ewhy}] + _cid(e)), mitre=["T1090.004"])
+            cid = e.get("community_id")
+            if cid and sni:
+                _store.set_add(f"sni:{TENANT}:{cid}", sni, 120)
     elif et == "http":
         h = e.get("http", {}) or {}
         su, w = proto.suspicious_ua(h.get("http_user_agent"))
@@ -123,6 +155,17 @@ def _handle(e, producer):
                   json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst},
                               {"type": "ua", "value": w}]))
+        # domain fronting: cleartext Host != the TLS SNI seen on this same flow
+        cid, host = e.get("community_id"), h.get("hostname")
+        if cid and host:
+            for prev_sni in _store.set_members(f"sni:{TENANT}:{cid}"):
+                if proto.host_sni_mismatch(prev_sni, host):
+                    _emit(producer, "ech_sni_mismatch", "defense_evasion", 6, 0.6,
+                          json.dumps([{"type": "ip", "role": "src", "value": src},
+                                      {"type": "ip", "role": "dst", "value": dst},
+                                      {"type": "why", "value": f"host_sni_mismatch:{host}!={prev_sni}"}] + _cid(e)),
+                          mitre=["T1090.004"])
+                    break
     if (et == "ssh" or (et == "flow" and dport == 22)) and src and dst:
         n = _store.counter_add(f"ssh:{TENANT}:{src}|{dst}", "c", 1, SSH_WINDOW)
         if proto.ssh_brute_hit(int(n)):

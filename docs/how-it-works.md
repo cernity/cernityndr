@@ -118,14 +118,20 @@ and publishes candidates when something looks wrong.
   tunneling fingerprints.
 - **http-detector** — anomalies in HTTP traffic.
 - **protocol-detectors** — TLS/certificate oddities (self-signed, very short-lived,
-  rare fingerprints), DNS-over-HTTPS to unapproved resolvers, SSH brute force.
+  rare fingerprints), DNS-over-HTTPS to unapproved resolvers, SSH brute force,
+  port/protocol mismatch, and domain-fronting (ECH usage or a cleartext HTTP Host
+  that disagrees with the flow's TLS SNI).
 - **east-west-detectors** — internal-to-internal traffic that looks like an attacker
-  spreading between machines: SMB, RDP, DCE-RPC, Kerberos fan-out.
+  spreading between machines: SMB/RDP/DCE-RPC/Kerberos fan-out, internal scanning,
+  **password spraying** (one source failing auth across many accounts), **AS-REP
+  roasting**, **ransomware over SMB** (a write-heavy file flood across many shares),
+  and **remote-exec lateral movement** (PsExec/WMI/scheduled-task named pipes).
 - **anomaly-detector** — statistical outliers over the flow telemetry.
 - **coverage-detector** — a health signal: is the sensor actually mirroring the traffic
   we expect to see? Silence can mean a blind spot, not safety.
 - **threat-intel** — matches live traffic against abuse.ch blocklists (known C2 IPs,
-  bad TLS certificates, malicious JA3 fingerprints).
+  bad TLS certificates, malicious JA3 fingerprints) plus an operator-supplied
+  known-C2 **server-fingerprint** list (JA3S/JA4S/JARM — e.g. Cobalt Strike, Sliver).
 
 ### Findings lifecycle
 - **finding-service** — the brain of the output. De-duplicates candidates (the same
@@ -241,6 +247,10 @@ agent), self-arming over the bus, with no central coordinator holding keys.
 - It reproduces Zeek/RITA-style behavioral analysis centrally; on real traffic, the
   optional Zeek loop is mostly *forensic depth* (packet-level proof, file carving),
   not additional detections — so treat it as enrichment you turn on when you want it.
+- Put another way: **Cernity is the add-on that completes Suricata into a full NDR** —
+  the analytics, correlation, enrichment, prioritization, and response tier a standalone
+  IDS doesn't have. See `docs/ndr-coverage.md` for how each NDR capability area is covered
+  (and the honest boundaries — no ML models, no vuln scanning, console delegated to your SIEM).
 
 For configuring Suricata, deploying the sensor, and wiring your SIEM, see the other
 files in `docs/`.

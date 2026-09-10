@@ -262,6 +262,9 @@ outputs:
             force-magic: yes
             force-hash: [sha256]
         - anomaly
+        - krb5                             # kerberoasting, AS-REP roasting, password spraying
+        - smb                              # ransomware-over-SMB, lateral-exec named pipes, SMB spray
+        - dcerpc                           # lateral movement (PsExec/WMI/scheduled-task RPC)
 
 # Only if you run the file-inspection overlay (file-yara):
 file-store:
@@ -269,6 +272,25 @@ file-store:
   enabled: yes
   force-filestore: yes
 ```
+
+### Telemetry availability notes (east-west / evasion detectors)
+
+These detectors depend on how much of each protocol Suricata surfaces in EVE, which
+varies by version. Cernity's logic is built to fire the moment the field appears and
+to stay quiet (never false-positive) when it doesn't:
+
+- **AS-REP roasting** needs a Kerberos *pre-auth-absent* signal on the AS-REQ. Current
+  Suricata EVE does not expose a pre-auth flag, so this detector is **dormant** until a
+  build does — it never guesses.
+- **Ransomware-over-SMB** and **lateral-exec pipes** rely on SMB command/filename and
+  named-pipe fields; granularity varies by Suricata version and SMB dialect.
+- **Password spraying** reads Kerberos pre-auth-failure error codes and/or SMB
+  session-setup logon failures; account names may not always be present.
+- **Domain fronting** fires on ECH (only in very recent Suricata TLS output) or a
+  cleartext HTTP `Host` disagreeing with the flow's TLS `SNI`. Fully-encrypted HTTPS
+  fronting (no visible Host) is **not** detectable and deliberately does not fire.
+- **LLMNR/NBT-NS poisoning** logic exists but Suricata surfaces LLMNR only as DNS
+  events (udp/5355) and does **not** decode NBT-NS (udp/137); coverage is LLMNR/mDNS-leaning.
 
 ## 10. Point the shipper at these files
 

@@ -37,6 +37,17 @@ x-worker-env: &wenv
   EVAL_SECS: ${EVAL_SECS:-30}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   ids-alerts:
     image: cernity/ids-alerts:latest

@@ -3,11 +3,23 @@
 #
 #   docker compose -f deploy/central/docker-compose.yml \
 #                  -f deploy/overlays/soar.yml up --build
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   soar-forwarder:
     image: cernity/soar-forwarder:latest
     build: {context: ../.., dockerfile: services/soar-forwarder/Dockerfile}
     container_name: cernity-soar-forwarder
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       SOAR_WEBHOOK_URL: ${SOAR_WEBHOOK_URL:-}

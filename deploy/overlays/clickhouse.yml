@@ -13,10 +13,22 @@ x-logging: &cernity-logging
     max-size: "10m"
     max-file: "3"
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: cernity-clickhouse
+    <<: *hardening-infra
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-cernitydemo}
@@ -36,6 +48,7 @@ services:
     image: cernity/normalizer:latest
     build: {context: ../.., dockerfile: services/normalizer/Dockerfile}
     container_name: cernity-normalizer
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: clickhouse
@@ -54,6 +67,7 @@ services:
     image: cernity/asset-service:latest
     build: {context: ../.., dockerfile: services/asset-service/Dockerfile}
     container_name: cernity-asset-service
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: clickhouse
@@ -71,6 +85,7 @@ services:
     image: cernity/correlation-service:latest
     build: {context: ../.., dockerfile: services/correlation-service/Dockerfile}
     container_name: cernity-correlation-service
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: clickhouse
@@ -100,6 +115,7 @@ services:
     image: cernity/reconstruction:latest
     build: {context: ../.., dockerfile: services/reconstruction/Dockerfile}
     container_name: cernity-reconstruction
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: clickhouse

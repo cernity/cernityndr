@@ -13,11 +13,23 @@ x-logging: &cernity-logging
   driver: json-file
   options: {max-size: "10m", max-file: "3"}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   # Shared SIEM for BOTH arms (single node, security disabled — test only).
   opensearch:
     image: opensearchproject/opensearch:latest
     container_name: cernity-bench-opensearch
+    <<: *hardening-infra
     environment:
       - discovery.type=single-node
       - plugins.security.disabled=true
@@ -37,6 +49,7 @@ services:
   suricata-offline:
     image: jasonish/suricata:latest
     container_name: cernity-bench-suricata
+    <<: *hardening-infra
     entrypoint: ["suricata", "-c", "/etc/suricata/suricata.yaml",
                  "-r", "${BENCH_PCAP:-/pcaps/scenario.pcap}", "-l", "/eve", "-v"]
     volumes:
@@ -50,6 +63,7 @@ services:
   zeek-offline:
     image: zeek/zeek:latest
     container_name: cernity-bench-zeek
+    <<: *hardening-infra
     entrypoint: ["sh", "-c",
                  "cd /zeek-logs && zeek -r ${BENCH_PCAP:-/pcaps/scenario.pcap} -C /etc/zeek/local.zeek"]
     volumes:
@@ -64,6 +78,7 @@ services:
   arm-a-shipper:
     image: fluent/fluent-bit:latest
     container_name: cernity-bench-arm-a
+    <<: *hardening-infra
     volumes:
       - ./arm-a/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - cernity-bench-eve:/eve:ro
@@ -77,10 +92,9 @@ services:
   arm-b-feeder:
     image: python:3.12-slim
     container_name: cernity-bench-arm-b-feeder
+    <<: *hardening-infra
     working_dir: /feeder
-    entrypoint: ["sh", "-c",
-                 "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && "
-                 "python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]
+    entrypoint: ["sh", "-c", "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
     volumes:

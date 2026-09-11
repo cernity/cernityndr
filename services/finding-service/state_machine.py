@@ -7,6 +7,7 @@ erase a valid first-stage finding.
 """
 from __future__ import annotations
 
+import json
 import os
 
 # Delivery-suppression ceiling (ce-doc-review B2). A finding at or below this
@@ -37,6 +38,12 @@ LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
 
 
 CONFIRMED_THREAT_SOURCES = ("ids_signature", "threat_intel", "file_malware_hash")
+
+# Entity type -> capture profile the orchestrator/gates understand (ip/ja4/sni/dns).
+_ENTITY_PROFILE = {"ip": "ip", "domain": "sni", "sni": "sni", "dns": "dns",
+                   "fingerprint": "ja4", "ja3": "ja4", "ja4": "ja4"}
+# The peer side of the conversation is what the analyst needs packets for.
+_TARGET_ROLES = ("dst", "peer", "server", "c2", "destination", "target", "scanner")
 
 
 def decide_enrichment(cand: dict) -> str:
@@ -100,7 +107,7 @@ def build_finding(cand: dict) -> tuple[dict, str]:
             # Still emitted to final.v1 (correlation sees it) and persisted for
             # audit/hunting, but not delivered to the analyst/SIEM plane.
             f["state"] = "SUPPRESSED"
-            f["devo_delivery_state"] = "SUPPRESSED"
+            f["devo_delivery_state"] = "NONE"      # not delivered; SUPPRESSED is a state, not a delivery-state (schema enum: NONE/QUEUED/SENT)
             f["suppression_reason"] = (
                 f"low-severity ({f.get('severity')}) non-threat finding; kept for "
                 "correlation and audit, not delivered")
@@ -108,6 +115,16 @@ def build_finding(cand: dict) -> tuple[dict, str]:
             f["state"] = "FINAL"
             f["devo_delivery_state"] = "QUEUED"
         return f, "final"
+    # packets_needed. A confirmed threat is delivered to the SIEM immediately
+    # (deliver-now, F01): the capture path ENRICHES it later, it never GATES delivery —
+    # so the finding reaches the analyst even when no forensics overlay is deployed.
+    if policy == "packets_needed" and cand.get("detector_id") in CONFIRMED_THREAT_SOURCES:
+        f["state"] = "FINAL"
+        f["enrichment_state"] = "PENDING"        # delivered; evidence to follow
+        f["devo_delivery_state"] = "QUEUED"
+        return f, "final_and_capture"
+    # A low-confidence *content* finding still captures to ADJUDICATE; the result loop
+    # (or a timeout) finalizes it so it never dangles unenriched (F01).
     f["enrichment_state"] = "REQUIRED"
     f["state"] = "CAPTURE_REQUESTED"
     f["devo_delivery_state"] = "NONE"
@@ -126,3 +143,58 @@ def apply_enrichment_result(finding: dict, result: dict) -> dict:
     f["state"] = "FINAL"
     f["devo_delivery_state"] = "QUEUED"
     return f
+
+
+def finalize_timeout(finding: dict) -> dict:
+    """Finalize a finding whose enrichment never completed — no overlay deployed, the
+    orchestrator refused to arm, or the capture timed out. The finding is never
+    dropped: a confirmed threat was already delivered (deliver-now), and a
+    low-confidence one is delivered now rather than lost. This only resolves the
+    dangling enrichment_state (v2 §17: an absent/failed enrichment must not erase a
+    finding)."""
+    f = dict(finding)
+    f["state"] = "FINAL"
+    f["enrichment_state"] = "TIMEOUT"
+    f["devo_delivery_state"] = "QUEUED"
+    return f
+
+
+def _entities(finding: dict) -> list:
+    ents = finding.get("entities")
+    if isinstance(ents, str):
+        try:
+            ents = json.loads(ents)
+        except (ValueError, TypeError):
+            return []
+    return ents if isinstance(ents, list) else []
+
+
+def _first_sensor(finding: dict) -> str:
+    ids = finding.get("sensor_ids") or []
+    return ids[0] if ids else (finding.get("sensor_id") or "sensor-1")
+
+
+def _capture_target(finding: dict) -> tuple[str, str]:
+    """(capture_profile, value): the peer entity the analyst needs packets for, mapped
+    to a profile the gates understand. Defaults to ('ip', '') when no usable entity is
+    present — the orchestrator still gates it, but the pcap_ref will be finding-scoped."""
+    usable = [e for e in _entities(finding) if isinstance(e, dict)
+              and e.get("type") in _ENTITY_PROFILE and e.get("value")]
+    for e in usable:
+        if e.get("role") in _TARGET_ROLES:
+            return _ENTITY_PROFILE[e["type"]], str(e["value"])
+    if usable:
+        return _ENTITY_PROFILE[usable[0]["type"]], str(usable[0]["value"])
+    return "ip", ""
+
+
+def capture_job(finding: dict) -> dict:
+    """Sensor-specific capture directive for the orchestrator (F01): *which sensor* to
+    arm and *what value* to capture. The old job sent only {finding_id, entities}, so
+    the orchestrator defaulted every capture to sensor-1/ip/'' and collided on one
+    pcap_ref."""
+    profile, value = _capture_target(finding)
+    return {"finding_id": finding.get("finding_id"),
+            "sensor_id": _first_sensor(finding),
+            "capture_profile": profile, "value": value,
+            "entities": finding.get("entities")}

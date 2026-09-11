@@ -3,7 +3,16 @@
 against a malware-hash feed (abuse.ch MalwareBazaar), and flags risky executable
 delivery over cleartext. Pure matching is testable; app.py is the I/O + feed shell.
 """
+import hashlib
 import json
+import time
+
+
+def _stable(*parts) -> int:
+    """Stable cross-process id (F07): built-in hash() is PYTHONHASHSEED-randomized, so
+    the same file match produced a different finding_id per process and dedup never fired."""
+    s = "|".join("" if p is None else str(p) for p in parts)
+    return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16) % 10**10
 
 # EICAR standard antivirus test file — always matchable, for validation.
 EICAR_SHA256 = "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f"
@@ -95,7 +104,9 @@ def to_candidate(eve: dict, malware_hashes: set, tenant: str = "default") -> dic
             {"type": "match", "value": label}]
     ents += join_key_entities(eve)
     entities = json.dumps(ents)
-    return {"finding_id": f"{det}-{abs(hash((label, src, dst))) % 10**10}",
+    ts = eve.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {"finding_id": f"{det}-{_stable(label, src, dst)}",
             "tenant_id": tenant, "detector_id": det, "detector_version": "1.0",
             "category": "malware", "severity": sev, "confidence": conf,
+            "first_seen": ts, "last_seen": ts,
             "entities": entities, "state": "CANDIDATE"}

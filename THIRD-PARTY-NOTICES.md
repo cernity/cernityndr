@@ -42,7 +42,7 @@ project, as licenses change by version.
 | nDPI (ntop) | optional Suricata plugin; `flow_risk` verdict feeds `behavioral-detectors` (operator-built into Suricata, not shipped) | LGPL-3.0 (library) / GPL-3.0 (some tools) — verify by component |
 | Fluent Bit | sensor-side log shipper | Apache-2.0 |
 | Redpanda | message bus | Redpanda Community License / BSL (source-available) |
-| Redis | detector window state | RSALv2 / SSPL (recent versions) — verify by version |
+| Redis | detector window state | AGPL-3.0 (Redis 8+) or RSALv2 / SSPL (7.4–7.8); pre-7.4 is BSD — verify by version |
 | ClickHouse | raw-telemetry analytics store (optional) | Apache-2.0 |
 | MinIO | pcap/file object store (optional) | AGPL-3.0 |
 | OpenSearch / OpenSearch Dashboards | documented reference SIEM (not shipped) | Apache-2.0 |

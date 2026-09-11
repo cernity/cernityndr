@@ -22,10 +22,14 @@ spec:
         {{- include "cernity.labels" $ | nindent 8 }}
         app.kubernetes.io/component: {{ $d.name }}
     spec:
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ $d.name }}
           image: {{ include "cernity.image" (dict "Values" $.Values "name" $d.name) }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
           envFrom:
             - configMapRef:
                 name: {{ $.Release.Name }}-cernity-env
@@ -34,6 +38,12 @@ spec:
           ports:
             - name: metrics
               containerPort: 9108
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- if $d.hpa.enabled }}
 ---
 apiVersion: autoscaling/v2

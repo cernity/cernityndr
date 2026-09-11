@@ -56,7 +56,9 @@ services:
     image: redis:latest
     container_name: cernity-redis
     <<: *hardening-infra
-    command: ["redis-server", "--save", "", "--maxmemory-policy", "noeviction"]
+    # F14: AOF on, so the window state in the cernity-redis volume survives a restart
+    # (the old `--save ""` disabled RDB and never enabled AOF, so the volume held nothing).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
     ports: ["6379:6379"]     # workers: NDR_REDIS_URL=redis://<infra-host>:6379/0
     volumes: [cernity-redis:/data]
     logging: *lg

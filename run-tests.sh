@@ -27,6 +27,7 @@ run_dir() {
 
 run_dir "$ROOT/shared"
 run_dir "$ROOT/contracts"
+run_dir "$ROOT/benchmarks"
 for d in "$ROOT"/services/*/; do run_dir "$d"; done
 
 echo "all tests passed"

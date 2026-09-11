@@ -16,11 +16,10 @@ import signal
 import threading
 import time
 
-import boto3
-from kafka import KafkaConsumer, KafkaProducer
-
 import agent
 import suricata_socket as ss
+# boto3 / kafka are imported lazily in main() so the pure lifecycle logic here stays
+# importable (and unit-testable) without those service dependencies installed.
 
 log = ndr_runtime.setup_logging("capture-agent")
 
@@ -43,6 +42,13 @@ _running = True
 _active = 0
 _lock = threading.Lock()
 _shipped_shas = set()
+_last_progress = time.time()   # last arm-start or successful ship; feeds uploader health (F11)
+
+
+def _progress():
+    """Mark forward progress (an arm started or a slice shipped) for the health probe."""
+    global _last_progress
+    _last_progress = time.time()
 
 
 def _stop(*_):
@@ -67,8 +73,31 @@ def _pcap_entries():
     return _entries_in(PCAP_DIR)
 
 
+def _isolate(src, directive, fid):
+    """Carve the finding's own connection out of the (shared) window pcap via BPF (F11),
+    returning (path_to_ship, carved_temp_or_None). Falls back to the original file when
+    no BPF applies (app-layer profiles) or the carve yields nothing (e.g. tcpdump
+    absent) — best effort, never blocks the ship."""
+    import subprocess
+    bpf = agent.capture_bpf(directive)
+    if not bpf:
+        return src, None
+    out = f"/tmp/cap-{agent._sanitize(fid)}.pcap"
+    subprocess.run(["tcpdump", "-r", src, "-w", out, bpf], check=False, stderr=subprocess.DEVNULL)
+    if os.path.exists(out) and os.path.getsize(out) > 24:
+        return out, out
+    if os.path.exists(out):
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    return src, None
+
+
 def _capture(directive, producer, s3):
-    """One capture lifecycle: arm -> bounded wait -> disarm -> ship -> emit."""
+    """One capture lifecycle: arm -> bounded wait -> disarm -> carve the finding's slice
+    -> ship -> emit. The active-job counter is decremented in an OUTER finally, so any
+    failure (even during arming) frees the sensor's budget slot instead of leaking it (F11)."""
     global _active
     profile = directive.get("capture_profile", "ip")
     value = directive["value"].strip()
@@ -80,45 +109,57 @@ def _capture(directive, producer, s3):
     status = {"finding_id": fid, "sensor_id": SENSOR_ID, "profile": profile, "value": value}
     start = time.time()
     armed = False
+    carved = None
     try:
-        ss.dataset_add(SOCK, setname, settype, value)
-        armed = True
-        log.info("ARMED %s %s=%s ttl=%ss cap=%dB", setname, settype, value, ttl, cap_bytes)
-        # Bounded wait: stop at TTL or when captured bytes hit the cap.
-        while time.time() - start < ttl and _running:
-            time.sleep(2)
-            wpcaps = agent.window_pcaps(_pcap_entries(), start)
-            if sum(os.path.getsize(p) for p in wpcaps) >= cap_bytes:
-                log.info("byte cap hit for %s", value)
-                break
-    finally:
-        if armed:
-            try:
-                ss.dataset_remove(SOCK, setname, settype, value)
-                log.info("DISARMED %s=%s", setname, value)
-            except Exception as e:  # noqa: BLE001
-                log.error("DISARM FAILED %s=%s: %s", setname, value, e)
+        _progress()                          # an arm start counts as forward progress
+        try:
+            ss.dataset_add(SOCK, setname, settype, value)
+            armed = True
+            log.info("ARMED %s %s=%s ttl=%ss cap=%dB", setname, settype, value, ttl, cap_bytes)
+            # Bounded wait: stop at TTL or when captured bytes hit the cap.
+            while time.time() - start < ttl and _running:
+                time.sleep(2)
+                wpcaps = agent.window_pcaps(_pcap_entries(), start)
+                if sum(os.path.getsize(p) for p in wpcaps) >= cap_bytes:
+                    log.info("byte cap hit for %s", value)
+                    break
+        finally:
+            if armed:
+                try:
+                    ss.dataset_remove(SOCK, setname, settype, value)
+                    log.info("DISARMED %s=%s", setname, value)
+                except Exception as e:  # noqa: BLE001
+                    log.error("DISARM FAILED %s=%s: %s", setname, value, e)
 
-    wpcaps = agent.window_pcaps(_pcap_entries(), start)
-    wpcaps = [p for p in wpcaps if os.path.getsize(p) > 24]  # skip empty pcap headers
-    bucket, _, okey = key.partition("/")
-    try:
-        if not wpcaps:
-            raise RuntimeError("no packets captured in window")
-        # ponytail: upload the largest window file; concurrent arms share the
-        # conditional pcap-log, so BPF-narrow here if per-arm isolation matters.
-        src = max(wpcaps, key=os.path.getsize)
-        s3.upload_file(src, bucket, okey)
-        size = os.path.getsize(src)
-        producer.send(ENRICH_TOPIC, {"finding_id": fid, "sensor_id": SENSOR_ID, "pcap_ref": key})
-        producer.send(STATUS_TOPIC, {"finding_id": fid, "sensor_id": SENSOR_ID, "profile": profile,
-                                     "value": value, "state": "completed", "bytes": size,
-                                     "pcap_ref": key, "armed": False})
-        log.info("SHIPPED %s (%dB) -> %s; enrichment requested", src, size, key)
-    except Exception as e:  # noqa: BLE001
+        wpcaps = [p for p in agent.window_pcaps(_pcap_entries(), start) if os.path.getsize(p) > 24]
+        bucket, _, okey = key.partition("/")
+        try:
+            if not wpcaps:
+                raise RuntimeError("no packets captured in window")
+            # Per-finding isolation (F11): the conditional pcap-log is shared across
+            # concurrent arms; carve this finding's own connection so its slice can't
+            # leak another arm's packets.
+            src, carved = _isolate(max(wpcaps, key=os.path.getsize), directive, fid)
+            s3.upload_file(src, bucket, okey)
+            size = os.path.getsize(src)
+            producer.send(ENRICH_TOPIC, {"finding_id": fid, "sensor_id": SENSOR_ID, "pcap_ref": key})
+            producer.send(STATUS_TOPIC, {"finding_id": fid, "sensor_id": SENSOR_ID, "profile": profile,
+                                         "value": value, "state": "completed", "bytes": size,
+                                         "pcap_ref": key, "armed": False})
+            _progress()                      # a successful ship is forward progress
+            log.info("SHIPPED %s (%dB) -> %s; enrichment requested", src, size, key)
+        except Exception as e:  # noqa: BLE001
+            producer.send(STATUS_TOPIC, {**status, "state": "failed", "error": str(e), "armed": False})
+            log.error("CAPTURE FAILED %s=%s: %s", profile, value, e)
+    except Exception as e:  # noqa: BLE001  — arming/setup failure escaped the inner blocks
         producer.send(STATUS_TOPIC, {**status, "state": "failed", "error": str(e), "armed": False})
-        log.error("CAPTURE FAILED %s=%s: %s", profile, value, e)
+        log.error("CAPTURE SETUP FAILED %s=%s: %s", profile, value, e)
     finally:
+        if carved:
+            try:
+                os.remove(carved)
+            except OSError:
+                pass
         producer.flush()
         with _lock:
             _active -= 1
@@ -227,21 +268,28 @@ def _file_ship_loop(producer, s3):
 def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    import boto3                                   # lazy: keep app.py import-light for tests
     os.makedirs(PCAP_DIR, exist_ok=True)
-    producer = KafkaProducer(bootstrap_servers=BOOTSTRAP,
-                             value_serializer=lambda v: json.dumps(v).encode())
-    consumer = KafkaConsumer(ARM_TOPIC, bootstrap_servers=BOOTSTRAP,
-                             group_id=f"ndr-capture-agent-{SENSOR_ID}",
-                             auto_offset_reset="latest", enable_auto_commit=True,
-                             value_deserializer=lambda b: json.loads(b.decode()))
+    # Authenticated bus (F11): the agent runs ON a remote sensor and reaches the CENTRAL
+    # external listener, which is SASL/SCRAM over TLS. ndr_runtime applies SASL_SSL when
+    # NDR_BUS_* is set (with the produce-only sensor credential), else plaintext for a demo.
+    producer = ndr_runtime.make_producer()
+    consumer = ndr_runtime.make_consumer(ARM_TOPIC, group_id=f"ndr-capture-agent-{SENSOR_ID}",
+                                         auto_offset_reset="latest")
     s3 = boto3.client("s3", endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
                       aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"])
+    ndr_runtime.start_health(ready=("consumer", "uploader"))   # /healthz /readyz /metrics
     log.info("capture-agent up sensor=%s socket=%s pcap_dir=%s", SENSOR_ID, SOCK, PCAP_DIR)
     threading.Thread(target=_file_ship_loop, args=(producer, s3), daemon=True).start()
 
+    import metrics                                  # lazy: readiness updates (F11 measured health)
     global _active
     while _running:
+        # Flip readiness on a stalled uploader instead of the old constant-healthy stub.
+        with _lock:
+            active_now = _active
+        metrics.set_ready("uploader", agent.uploader_healthy(active_now, time.time() - _last_progress))
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=10).items():
             for rec in records:
                 d = rec.value

@@ -6,6 +6,7 @@ DNS tunneling / DGA (volume + entropy), exfiltration (outbound volume).
 Validate against RITA (ALTERNATIVES.md) as the FOSS oracle.
 """
 from __future__ import annotations
+import ipaddress
 import math
 import os
 
@@ -42,8 +43,17 @@ def is_multicast(ip: str) -> bool:
 
 
 def is_external(ip: str) -> bool:
-    return (bool(ip) and not is_multicast(ip)
-            and not any(ip.startswith(p) for p in PRIVATE_PREFIXES))
+    if not ip or is_multicast(ip):
+        return False
+    if any(ip.startswith(p) for p in PRIVATE_PREFIXES):   # IPv4 private + operator extras + fe80:
+        return False
+    if ":" in ip:                                          # IPv6: ULA (fc00::/7) / link-local = internal (F06)
+        try:
+            a = ipaddress.ip_address(ip)
+            return not (a.is_private or a.is_link_local)
+        except ValueError:
+            return False
+    return True
 
 
 # Pure content-CDN prefixes — high keepalive noise, low C2 risk. Deliberately

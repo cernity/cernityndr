@@ -47,12 +47,15 @@ def _bootstrap():
 
 
 def _security_config():
-    """SASL_SSL kwargs for a client pointed at a secured (external) broker. Returns
-    {} when NDR_BUS_SASL_MECHANISM is unset, so the default internal plaintext path
-    (central services on redpanda:9092) is byte-identical to before. Env:
+    """SASL kwargs for a client pointed at a secured broker. Returns {} when
+    NDR_BUS_SASL_MECHANISM is unset, so the fully-insecure demo path (no auth) is
+    byte-identical to before. TLS is used when a CA is provided (a remote sensor over
+    the external listener); without one, SASL runs over plaintext on the private
+    docker network (the central pipeline authenticating to the internal listener,
+    which is not reachable off-box). Env:
       NDR_BUS_SASL_MECHANISM  e.g. SCRAM-SHA-512 -- presence gates the whole block
       NDR_BUS_SASL_USER / NDR_BUS_SASL_PASSWORD   required when the mechanism is set
-      NDR_BUS_TLS_CA          CA cert path (optional; omit to use system trust)
+      NDR_BUS_TLS_CA          CA cert path -> SASL_SSL; omit -> SASL_PLAINTEXT
     """
     mech = os.environ.get("NDR_BUS_SASL_MECHANISM")
     if not mech:
@@ -62,9 +65,10 @@ def _security_config():
     if not user or not pw:
         raise ValueError("NDR_BUS_SASL_MECHANISM is set but NDR_BUS_SASL_USER/"
                          "NDR_BUS_SASL_PASSWORD is missing")
-    conf = {"security_protocol": "SASL_SSL", "sasl_mechanism": mech,
-            "sasl_plain_username": user, "sasl_plain_password": pw}
     ca = os.environ.get("NDR_BUS_TLS_CA")
+    conf = {"security_protocol": "SASL_SSL" if ca else "SASL_PLAINTEXT",
+            "sasl_mechanism": mech,
+            "sasl_plain_username": user, "sasl_plain_password": pw}
     if ca:
         conf["ssl_cafile"] = ca
     return conf

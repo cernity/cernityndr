@@ -54,6 +54,27 @@ def test_no_attacker_ip_is_dropped():
     assert alert_to_candidate({"Category": ["Anomaly"]}, "t") is None
 
 
+def test_threat_intel_module_is_not_ml_evidence():
+    # F12: a SLIPS blocklist / threat-intel LOOKUP is the same KIND of signal as Cernity's
+    # own threat_intel detector — not ML, not independent — so it must NOT be tagged
+    # slips_ml (else it would falsely corroborate a heuristic as ML×heuristic agreement).
+    a = {"Category": ["Intrusion.Botnet"], "Source": [{"IP4": ["10.0.0.5"]}],
+         "threat_level": "high", "module": "threatintelligence"}
+    c = alert_to_candidate(a, "t")
+    assert c["detector_id"] == "slips_intel"
+    ents = json.loads(c["entities"])
+    assert any(e.get("source") == "slips" and e.get("module") == "threatintelligence" for e in ents)
+
+
+def test_ml_module_stays_ml_evidence():
+    a = {"Category": ["Intrusion.Botnet"], "Source": [{"IP4": ["10.0.0.5"]}],
+         "threat_level": "high", "module": "flowmldetection"}
+    c = alert_to_candidate(a, "t")
+    assert c["detector_id"] == "slips_ml"
+    ents = json.loads(c["entities"])
+    assert any(e.get("module") == "flowmldetection" for e in ents)   # provenance preserved
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

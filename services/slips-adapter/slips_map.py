@@ -70,6 +70,33 @@ def _stable(s):
     return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16)
 
 
+# SLIPS modules that are LOOKUPS, not behavioral/ML analysis. A blocklist / threat-intel
+# hit is the same KIND of signal as Cernity's own threat_intel detector — not independent,
+# not ML — so it must NOT count as the ML side of an ML×heuristic corroboration (F12). A
+# SLIPS alert is its behavioral/ML verdict BY DEFAULT; only these known lookup modules are
+# demoted to slips_intel.
+_NON_ML_MODULES = ("threatintel", "blacklist", "riskiq", "spamhaus", "abuse.ch",
+                   "cesnet", "urlhaus", "whitelist")
+
+
+def _module(alert):
+    """SLIPS detecting module/model (provenance). SLIPS carries it as `module`/`by`; fall
+    back to scanning the free-text Note/Description for a known lookup module name."""
+    m = alert.get("module") or alert.get("by")
+    if m:
+        return str(m)
+    text = f"{alert.get('Note', '')} {alert.get('Description', '')}".lower()
+    return next((tok for tok in _NON_ML_MODULES if tok in text), "")
+
+
+def is_ml_evidence(module):
+    """True unless the module is a known blocklist / threat-intel LOOKUP (F12). SLIPS's
+    behavioral/ML modules (flow-ML, RNN C&C, scan/behavioral) are its analytical verdict,
+    independent of Cernity's heuristics; a blocklist lookup is neither ML nor independent."""
+    m = (module or "").lower()
+    return not any(tok in m for tok in _NON_ML_MODULES)
+
+
 def alert_to_candidate(alert, tenant, version="1.0"):
     """Return a candidate dict, or None if the alert has no usable attacker IP."""
     attacker = _first_ip(alert.get("Source"))
@@ -82,14 +109,21 @@ def alert_to_candidate(alert, tenant, version="1.0"):
     desc = alert.get("Description") or alert.get("Note") or "SLIPS behavioral alert"
     aid = str(alert.get("ID") or _stable(f"{attacker}:{alert.get('DetectTime', '')}:{desc}"))
 
+    module = _module(alert)
+    ml = is_ml_evidence(module)
+    # detector_id encodes ML-ness so correlation counts only genuine ML evidence as the ML
+    # side of a corroboration (F12); the module string carries the provenance.
+    detector = "slips_ml" if ml else "slips_intel"
+
     ents = [{"type": "ip", "role": "attacker", "value": attacker}]
     if victim:
         ents.append({"type": "ip", "role": "victim", "value": victim})
-    ents.append({"type": "ml", "source": "slips", "threat_level": tl, "description": desc})
+    ents.append({"type": "ml" if ml else "intel", "source": "slips", "module": module,
+                 "threat_level": tl, "description": desc})
 
     now = _idea_time(alert) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     c = {"finding_id": f"slips-{aid}",
-         "tenant_id": tenant, "detector_id": "slips_ml", "detector_version": version,
+         "tenant_id": tenant, "detector_id": detector, "detector_version": version,
          "category": category, "severity": _THREAT_SEV[tl], "confidence": conf,
          "first_seen": now, "last_seen": now,
          "entities": json.dumps(ents), "state": "CANDIDATE"}

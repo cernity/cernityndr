@@ -119,6 +119,10 @@ def test_exfil_allowlist_excludes_trusted_dst(monkeypatch):
 def test_is_external():
     assert d.is_external("8.8.8.8") and not d.is_external("10.0.0.5")
     assert not d.is_external("192.168.222.9") and not d.is_external("fe80::1")
+    # F06: IPv6 ULA (fc00::/7) is internal; globally-routable v6 is external (parity
+    # with the IPv4 private ranges, consistent across behavioral/protocol/east-west).
+    assert not d.is_external("fd12:3456::1") and not d.is_external("fc00::1")
+    assert d.is_external("2606:4700:4700::1111")
 
 
 def test_multicast_and_broadcast_not_external():

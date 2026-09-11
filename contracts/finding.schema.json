@@ -35,7 +35,8 @@
     },
     "enrichment_state": {
       "type": "string",
-      "enum": ["NOT_REQUIRED", "REQUIRED", "ENRICHED", "ENRICHMENT_FAILED"]
+      "description": "PENDING = a confirmed threat was delivered (deliver-now) and its evidence is still being captured; TIMEOUT = the capture never completed (no overlay, refusal, or timeout) but the finding was still delivered, not dropped (U1/F01).",
+      "enum": ["NOT_REQUIRED", "REQUIRED", "PENDING", "ENRICHED", "ENRICHMENT_FAILED", "TIMEOUT"]
     },
     "capture_job_ids": { "type": "array", "items": { "type": "string" } },
     "suppression_reason": { "type": "string" },

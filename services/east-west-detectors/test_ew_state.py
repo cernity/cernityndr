@@ -51,6 +51,10 @@ def test_kerberoast_fires():
     p = _P()
     app.evaluate(p, flow_parts=set(), raw_parts={3})     # krb scoped by raw.v1 partitions
     assert "kerberoasting" in _dets(p.sent)
+    # F16: kerberoasting carries its SPECIFIC technique (T1558.003), not the coarse
+    # credential_access -> T1110 (Brute Force) fallback.
+    krb = next(m for m in p.sent if m["detector_id"] == "kerberoasting")
+    assert krb.get("mitre") == ["T1558.003"]
 
 
 def test_below_threshold_no_fire():
@@ -82,6 +86,38 @@ def test_partition_scoped():
     app.evaluate(p, flow_parts={0}, raw_parts=set())     # only partition 0
     srcs = [e["value"] for m in p.sent for e in json.loads(m["entities"]) if e.get("role") == "src"]
     assert "10.0.0.1" in srcs and "10.0.0.2" not in srcs
+
+
+def test_dcerpc_lateral_from_interfaces_array():
+    # F06: real dcerpc EVE has interfaces[] (array), not a scalar interface_uuid — the
+    # old scalar read produced ZERO findings on real Suricata input.
+    _fresh()
+    p = _P()
+    app._handle({"event_type": "dcerpc", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+                 "dcerpc": {"interfaces": [{"uuid": "367abb81-9844-35f1-ad32-98f038001003"}]}}, p, 2)
+    assert "dcerpc_lateral" in _dets(p.sent)
+
+
+def test_smb_nested_dcerpc_fires_lateral_exec():
+    # F06: DCERPC-over-SMB nests under smb.dcerpc; the smb handler must extract it.
+    _fresh()
+    p = _P()
+    app._handle({"event_type": "smb", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+                 "smb": {"command": "SMB2_WRITE",
+                         "dcerpc": {"interfaces": [{"uuid": "8a885d04-1ceb-11c9-9fe8-08002b104860"}]}}}, p, 2)
+    app.evaluate(p, raw_parts={2})
+    assert "lateral_exec" in _dets(p.sent)
+
+
+def test_smb_filename_pipe_svcctl_fires_lateral_exec():
+    # F06: named-pipe access shows as filename "\svcctl" (no "pipe" substring); the old
+    # `"pipe" in filename` gate dropped it, missing PsExec-style remote exec.
+    _fresh()
+    p = _P()
+    app._handle({"event_type": "smb", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+                 "smb": {"command": "SMB2_CREATE", "filename": "\\svcctl"}}, p, 2)
+    app.evaluate(p, raw_parts={2})
+    assert "lateral_exec" in _dets(p.sent)
 
 
 if __name__ == "__main__":

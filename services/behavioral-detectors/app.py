@@ -64,11 +64,11 @@ def _stop(*_):
 
 
 def _tenant_of(e) -> str:
-    """Resolve the tenant/site for a record. A multi-tenant deployment stamps a
-    trusted `tenant`/`site` field upstream (Vector, from authenticated sensor
-    identity); single-tenant deploys fall back to NDR_TENANT. Deriving tenant
-    from a trusted signal (not a producer-set free field) is a security property
-    the multi-tenant rollout must uphold."""
+    """Resolve the tenant/site for a record. The Fluent Bit shipper stamps a trusted
+    `tenant`/`site` at ingress (deploy/fluent-bit/route.lua) from the sensor's own
+    configuration, OVERWRITING any value in the raw EVE record — so this field is the
+    authenticated sensor identity, not an attacker-influenced free field (F08).
+    Single-tenant deploys fall back to NDR_TENANT."""
     for k in ("tenant", "site"):
         v = e.get(k)
         if v:
@@ -455,12 +455,16 @@ def _handle(e, producer, now, part=0, cfg=None):
             # must share that clock domain -- else under consumer lag (event-time trails wall-time) the cursor excludes
             # newly-processed dsts and silently drops rare_destination. Processing order also matches the inline set-add
             # baseline, and one box means all replicas share the clock (so a rebalanced partition's scores stay comparable).
+            dom = _i2d_get(f"i2d:{ten}:{dst}", now)                          # read-through cache: round-trip only on cold miss
+            # IP-beacon: skip pure CDN / keepalive noise (a raw-IP beacon with no domain).
             if not det.beacon_noise_dst(dst):
                 _win_add("bc:", part, f"bc:{part}:{ten}:{src}|{dst}", evt, b2s + b2c)
-                dom = _i2d_get(f"i2d:{ten}:{dst}", now)                      # read-through cache: round-trip only on cold miss
-                if dom:
-                    _win_add("bf:", part, f"bf:{part}:{ten}:{src}|{dom[0]}", evt, b2s + b2c)
-                    _sadd_add(f"fi:{ten}:{src}|{dom[0]}", dst)
+            # FQDN-beacon: a beacon to a resolved DOMAIN is signal even when the IP is a
+            # CDN — domain-fronting C2 rides CDN IPs with an attacker SNI — so it accumulates
+            # regardless of the CDN-IP noise gate (F06). The domain, not the IP, is the key.
+            if dom:
+                _win_add("bf:", part, f"bf:{part}:{ten}:{src}|{dom[0]}", evt, b2s + b2c)
+                _sadd_add(f"fi:{ten}:{src}|{dom[0]}", dst)
         # inline stateless detectors (no Redis state): ndpi risk + age-based long connection
         hit, matched = det.ndpi_risk_hit([str(r) for r in risks])
         if not hit and det.ndpi_breed_hit(breed):

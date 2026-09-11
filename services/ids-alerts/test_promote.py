@@ -69,6 +69,30 @@ def test_major_signature_severity_promotes_even_if_numeric_soft():
     assert p.category_for(a) == "malware"
 
 
+def test_candidate_is_schema_complete():
+    # F13: every schema-required field is present (first_seen/last_seen were missing, so
+    # every ids-signature candidate was rejected by finding.schema.json).
+    import json, pathlib
+    req = json.loads((pathlib.Path(__file__).parents[2] / "contracts"
+                      / "finding.schema.json").read_text())["required"]
+    c = p.to_candidate(SPAMHAUS)
+    assert all(k in c for k in req), [k for k in req if k not in c]
+
+
+def test_finding_id_is_stable_across_processes():
+    # F07: the id must NOT depend on PYTHONHASHSEED (built-in hash()); SHA-1-based ids are
+    # identical across processes, so ClickHouse/finding-service dedup can collapse them.
+    import json, os, subprocess, sys
+    code = ("import promote, json; "
+            "print(promote.to_candidate(json.loads(%r))['finding_id'])" % json.dumps(SPAMHAUS))
+    outs = set()
+    for seed in ("0", "1", "12345"):
+        r = subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(__file__) or ".",
+                           capture_output=True, text=True, env={**os.environ, "PYTHONHASHSEED": seed})
+        outs.add(r.stdout.strip())
+    assert len(outs) == 1 and next(iter(outs)), f"finding_id varies with hash seed: {outs}"
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

@@ -29,6 +29,17 @@ def test_ignores_non_anomaly():
     assert a.to_candidate(FLOW) is None
 
 
+def test_candidate_is_schema_complete_and_deterministic():
+    # F13: schema-required first_seen/last_seen present (were missing). F07 cross-process
+    # id stability is proven by the shared _stable() pattern (see ids-alerts subprocess test).
+    import json, pathlib
+    req = json.loads((pathlib.Path(__file__).parents[2] / "contracts"
+                      / "finding.schema.json").read_text())["required"]
+    c = a.to_candidate(APPLAYER)
+    assert all(k in c for k in req), [k for k in req if k not in c]
+    assert c["finding_id"] == a.to_candidate(APPLAYER)["finding_id"]
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

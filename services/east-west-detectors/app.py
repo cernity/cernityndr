@@ -158,7 +158,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "kerberoast", "distinct_spns": spns, "rc4": rc4}])
-            c = _cand("kerberoasting", "credential_access", 8, 0.8, ent)
+            c = _cand("kerberoasting", "credential_access", 8, 0.8, ent, mitre=["T1558.003"])
             if c:
                 producer.send(CAND, c); log.info("KERBEROAST %s spns=%d rc4=%s", _src_of(key), spns, rc4)
     # password spraying (raw.v1): one src failing auth across many distinct accounts
@@ -267,13 +267,14 @@ def _handle(e, producer, part):
                 _ew_add("rw:", part, src, f"w|{fname}")
             elif "READ" in cmd:
                 _ew_add("rw:", part, src, f"r|{fname}")
-        # lateral exec via known SMB named pipe (PsExec/schtasks/registry). WinRM
-        # fan-out (5985/6) is already covered by lateral_fanout via ADMIN_PORTS.
-        pipe = s.get("named_pipe") or (fname if fname and "pipe" in str(fname).lower() else None)
-        if pipe:
-            hit, matched = ew.lateral_exec_score([pipe], [], [])
-            if hit:
-                _ew_add("lex:", part, src, matched[0])
+        # lateral exec via SMB named pipe (svcctl/atsvc/winreg/samr/lsarpc) or DCERPC-
+        # over-SMB (nested smb.dcerpc). F06: the pipe shows up as filename "\svcctl" (no
+        # "pipe" substring), so pass the filename straight to the exec-pipe matcher — which
+        # normalizes and filters to the known exec pipes — instead of pre-gating on "pipe".
+        pipes = [p for p in (s.get("named_pipe"), fname) if p]
+        hit, matched = ew.lateral_exec_score(pipes, ew.dcerpc_uuids(s.get("dcerpc")), [])
+        if hit:
+            _ew_add("lex:", part, src, matched[0])
     elif et == "dns":
         d = e.get("dns", {}) or {}
         # LLMNR/mDNS runs on udp/5355; a Responder-style attacker ANSWERS name queries
@@ -284,14 +285,16 @@ def _handle(e, producer, part):
             _ew_add("llmnr:", part, e.get("src_ip"), d.get("rrname"))
     elif et == "dcerpc":
         d = e.get("dcerpc", {}) or {}
-        hit, desc = ew.dcerpc_lateral(d.get("interface_uuid") or d.get("interface"))
+        # F06: real EVE carries dcerpc.interfaces[] (array of {uuid}); the old scalar read
+        # produced zero findings. Match every advertised interface against the lateral set.
+        hit, matched = ew.lateral_exec_score([], ew.dcerpc_uuids(d), [])
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": e.get("src_ip")},
                               {"type": "ip", "role": "dst", "value": e.get("dest_ip")},
-                              {"type": "dcerpc", "op": desc}])
+                              {"type": "dcerpc", "op": "; ".join(matched)}])
             c = _cand("dcerpc_lateral", "lateral", 7, 0.75, ent)
             if c:
-                producer.send(CAND, c); log.info("DCERPC_LATERAL %s->%s %s", e.get("src_ip"), e.get("dest_ip"), desc)
+                producer.send(CAND, c); log.info("DCERPC_LATERAL %s->%s %s", e.get("src_ip"), e.get("dest_ip"), matched)
 
 
 def main():

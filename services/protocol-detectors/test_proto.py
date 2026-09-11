@@ -92,6 +92,14 @@ def test_ech_or_host_sni_mismatch():
     assert not p.ech_or_host_sni_mismatch({}, "example.com", "")[0]
 
 
+def test_is_external_ipv6_ula():
+    # F06: IPv6 ULA (fc00::/7) is internal; global v6 is external — parity with behavioral
+    # and east-west so IPv6 traffic is classified consistently across detectors.
+    assert not p.is_external("fd00::1") and not p.is_external("fc00::abcd")
+    assert not p.is_external("fe80::1")
+    assert p.is_external("2606:4700:4700::1111")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

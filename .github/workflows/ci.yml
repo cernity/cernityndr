@@ -26,5 +26,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: End-to-end walking skeleton (Docker)
+      # Fresh-install e2e, both bus postures (F09):
+      # 1) DEFAULT quickstart from a clean checkout — a replayed beacon must surface as a
+      #    finding in the sink (proves the whole pipeline starts and delivers).
+      - name: Fresh-install e2e — default quickstart (Docker)
         run: python tests/test_e2e_skeleton.py
+      # 2) SECURE bus from a clean checkout — the produce-only sensor credential is refused
+      #    forging findings while the central pipeline works (F02/F09 acceptance).
+      - name: Fresh-install e2e — secure bus ACLs (Docker)
+        run: ./deploy/security/test_bus_acls.sh

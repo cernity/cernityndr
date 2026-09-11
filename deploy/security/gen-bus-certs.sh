@@ -33,26 +33,39 @@ openssl x509 -req -in broker.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out broker.crt -days "$DAYS" -sha256 -extfile broker.ext 2>/dev/null
 rm -f broker.csr broker.ext ca.srl
 
-# SCRAM credential for the sensor->bus path
-USER="${CERNITY_BUS_USER:-cernity-sensor}"
-PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
-echo "$USER" > bus_user.txt
-printf '%s' "$PASS" > bus_password.txt
-chmod 600 ca.key broker.key bus_password.txt
+# Three SCRAM-SHA-512 credentials, each with its own blast radius (F02):
+#   sensor  — produce-only, distributed to every remote sensor
+#   central — the trusted pipeline principal (central host only)
+#   admin   — bootstrap / break-glass superuser (central host only)
+genpass() { openssl rand -base64 24 | tr -d '/+=' | head -c 32; }
+SENSOR_USER="${CERNITY_BUS_USER:-cernity-sensor}";   SENSOR_PASS="$(genpass)"
+CENTRAL_USER="${CERNITY_BUS_CENTRAL_USER:-cernity-central}"; CENTRAL_PASS="$(genpass)"
+ADMIN_USER="${CERNITY_BUS_ADMIN_USER:-cernity-admin}";       ADMIN_PASS="$(genpass)"
+echo "$SENSOR_USER" > bus_user.txt
+printf '%s' "$SENSOR_PASS" > bus_password.txt
+printf '%s' "$CENTRAL_PASS" > bus_central_password.txt
+printf '%s' "$ADMIN_PASS" > bus_admin_password.txt
+chmod 600 ca.key broker.key bus_password.txt bus_central_password.txt bus_admin_password.txt
 
 cat <<MSG
 
 Generated in $DIR :
   ca.crt / ca.key               internal CA (distribute ca.crt to sensors)
   broker.crt / broker.key       Redpanda server cert (SAN=$HOST)
-  bus_user.txt / bus_password.txt   SCRAM-SHA-512 credential
+  bus_password.txt              produce-only SENSOR SCRAM password
+  bus_central_password.txt      central pipeline SCRAM password (keep on central host)
+  bus_admin_password.txt        bootstrap admin SCRAM password (keep on central host)
 
-On the CENTRAL host .env:
-  CERNITY_BUS_USER=$USER
-  CERNITY_BUS_PASSWORD=$PASS
-On each REMOTE sensor (copy ca.crt over first):
+On the CENTRAL host .env (all three — central + admin never leave this host):
+  CERNITY_BUS_USER=$SENSOR_USER
+  CERNITY_BUS_PASSWORD=$SENSOR_PASS
+  CERNITY_BUS_CENTRAL_USER=$CENTRAL_USER
+  CERNITY_BUS_CENTRAL_PASSWORD=$CENTRAL_PASS
+  CERNITY_BUS_ADMIN_USER=$ADMIN_USER
+  CERNITY_BUS_ADMIN_PASSWORD=$ADMIN_PASS
+On each REMOTE sensor (copy ca.crt over first) — ONLY the produce-only credential:
   CERNITY_BUS_SASL=1
-  CERNITY_BUS_USER=$USER
-  CERNITY_BUS_PASSWORD=$PASS
+  CERNITY_BUS_USER=$SENSOR_USER
+  CERNITY_BUS_PASSWORD=$SENSOR_PASS
   CERNITY_BUS_TLS_CA=/certs/ca.crt
 MSG

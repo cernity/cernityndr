@@ -12,6 +12,25 @@ CERNITY_SINK=devo,webhook         # fan out: Devo for the SOC + a webhook to cha
 
 Set the variables below in `.env`. All are also listed in `cernity.env.example`.
 
+## Durable delivery (retry, dead-letter, at-least-once)
+Every sink is wrapped so a SIEM outage never silently loses findings:
+- **Retry with backoff, then dead-letter.** A failing sink is retried; if it stays down the
+  batch is written to a dead-letter file (`CERNITY_DLQ_DIR/dlq-<sink>.jsonl`) — never dropped.
+- **At-least-once.** The forwarder commits its Kafka offset only *after* a batch is durably
+  delivered (or dead-lettered), so a crash/redeploy replays instead of losing findings.
+- **Idempotent admission.** Duplicates are dropped by `finding_id` (stable across processes),
+  so a replay delivers each finding once; an idempotent sink (ES uses `finding_id` as `_id`)
+  also dedups server-side.
+- **Readiness reflects the sink.** `/readyz` goes unready while a sink is dead-lettering.
+- **The file sink rotates** at a size cap so it can't fill the disk.
+
+```
+CERNITY_DELIVER_RETRIES=4              # attempts before dead-lettering
+CERNITY_DELIVER_BACKOFF_SECS=1.0       # exponential backoff base (seconds)
+CERNITY_DLQ_DIR=/out/dlq               # dead-letter files, one per sink
+CERNITY_SINK_FILE_MAX_BYTES=104857600  # file-sink rotation cap (100 MiB; 0 disables)
+```
+
 ## file (default)
 Writes JSONL to a volume — good for eval and piping into your own collector.
 ```

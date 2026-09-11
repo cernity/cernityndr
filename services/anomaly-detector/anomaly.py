@@ -5,7 +5,16 @@ anomalies (protocol violations, unexpected events) are evasion/exploit tells;
 decode-layer anomalies (bad checksums, malformed L2/L3) are engine noise. This
 filters to the threat-relevant ones and emits finding candidates. Pure + testable.
 """
+import hashlib
 import json
+import time
+
+
+def _stable(*parts) -> int:
+    """Stable cross-process id (F07): built-in hash() is PYTHONHASHSEED-randomized, so
+    the same anomaly produced a different finding_id per process and dedup never fired."""
+    s = "|".join("" if p is None else str(p) for p in parts)
+    return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16) % 10**10
 
 _THREAT_TYPES = ("applayer",)          # app-layer protocol anomalies = threat-relevant
 _KEEP_STREAM = ("overlap_different_data", "data_after_reset", "reassembly",
@@ -36,7 +45,9 @@ def to_candidate(eve: dict, tenant: str = "homelab") -> dict | None:
                            {"type": "ip", "role": "dst", "value": dst},
                            {"type": "anomaly", "value": ev},
                            {"type": "app_proto", "value": eve.get("app_proto")}])
-    return {"finding_id": f"anom-{abs(hash((ev, src, dst))) % 10**10}",
+    ts = eve.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {"finding_id": f"anom-{_stable(ev, src, dst)}",
             "tenant_id": tenant, "detector_id": "protocol_anomaly", "detector_version": "1.0",
             "category": "anomaly", "severity": 5, "confidence": 0.5,
+            "first_seen": ts, "last_seen": ts,
             "entities": entities, "state": "CANDIDATE"}

@@ -7,6 +7,24 @@ def test_is_internal():
     assert not ew.is_internal("8.8.8.8")
 
 
+def test_is_internal_ipv6(  ):
+    # F06: east-west over IPv6 was invisible — is_internal was IPv4-prefix only. ULA
+    # (fc00::/7) and link-local are internal; global v6 is external.
+    assert ew.is_internal("fd12:3456:789a::1"), "ULA fd00::/8 must be internal"
+    assert ew.is_internal("fc00::1"), "ULA fc00::/8 must be internal"
+    assert ew.is_internal("fe80::1"), "link-local must be internal"
+    assert not ew.is_internal("2606:4700:4700::1111"), "global IPv6 must be external"
+
+
+def test_dcerpc_uuids_from_interfaces_array():
+    # F06: real Suricata dcerpc EVE carries interfaces[] (array of {uuid}); also accept
+    # the older scalar interface_uuid/interface.
+    svcctl = "367abb81-9844-35f1-ad32-98f038001003"
+    assert ew.dcerpc_uuids({"interfaces": [{"uuid": svcctl}, {"uuid": "x"}]}) == [svcctl, "x"]
+    assert ew.dcerpc_uuids({"interface_uuid": svcctl}) == [svcctl]
+    assert ew.dcerpc_uuids({}) == [] and ew.dcerpc_uuids(None) == []
+
+
 def test_lateral_fanout():
     targets = {(f"192.168.1.{i}", 445) for i in range(6)}
     hit, n = ew.lateral_fanout(targets)

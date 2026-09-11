@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 import cef
 
 log = logging.getLogger("findings-forwarder")
+import time                                        # noqa: E402 (kept near the durable-delivery code)
+
+MAX_RETRIES = int(os.environ.get("CERNITY_DELIVER_RETRIES", "4"))
+BACKOFF_SECS = float(os.environ.get("CERNITY_DELIVER_BACKOFF_SECS", "1.0"))
+DLQ_DIR = os.environ.get("CERNITY_DLQ_DIR", "/var/lib/cernity/dlq")
+DEDUP_MAX = int(os.environ.get("CERNITY_DEDUP_MAX", "100000"))
 
 
 def _live(findings):
@@ -24,15 +30,88 @@ def _live(findings):
     return [f for f in findings if f.get("state") != "SUPPRESSED"]
 
 
-class FileAdapter:
-    def __init__(self, path):
-        self.path = path
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+class DurableSink:
+    """Durable per-sink delivery (F07): wraps one sink adapter with retry + dead-letter
+    + idempotent admission. Each sink is INDEPENDENT — a finding already delivered here
+    is recorded (by finding_id) so a Kafka replay (offsets are committed only after
+    delivery) or a duplicate is never re-sent, and a sink outage retries with bounded
+    backoff, then dead-letters the batch to a file (never silently dropped). Because the
+    retry is per-sink, a partial multi-sink outage never re-delivers to the healthy sinks.
+    ponytail: the dedup set is in-memory (bounded FIFO); a stable finding_id (F13) makes an
+    idempotent sink like ES dedup across restarts on its own — add a persistent dedup only
+    if a non-idempotent sink needs cross-restart exactly-once."""
+
+    def __init__(self, inner, name, dlq_dir=DLQ_DIR, retries=MAX_RETRIES,
+                 backoff=BACKOFF_SECS, sleep=time.sleep, dedup_max=DEDUP_MAX, on_health=None):
+        self.inner, self.name = inner, name
+        self._dlq_path = os.path.join(dlq_dir, f"dlq-{name}.jsonl")
+        self._retries, self._backoff, self._sleep = retries, backoff, sleep
+        self._dedup_max = dedup_max
+        self._seen: dict = {}                       # finding_id -> None (insertion-ordered FIFO)
+        # F15: report real backend health — a delivery flips readiness true, an exhausted
+        # dead-letter flips it false, so the /readyz probe reflects a wedged sink.
+        self._on_health = on_health or (lambda ok: None)
+
+    def _mark(self, findings):
+        for f in findings:
+            fid = f.get("finding_id")
+            if fid is not None:
+                self._seen[fid] = None
+        while len(self._seen) > self._dedup_max:
+            self._seen.pop(next(iter(self._seen)))
+
+    def _dlq(self, findings, err):
+        os.makedirs(os.path.dirname(self._dlq_path) or ".", exist_ok=True)
+        with open(self._dlq_path, "a") as fh:
+            for f in findings:
+                fh.write(json.dumps({"sink": self.name, "error": str(err), "finding": f}) + "\n")
+        log.error("%s: dead-lettered %d finding(s) after %d retries: %s",
+                  self.name, len(findings), self._retries, err)
 
     def emit(self, finding):
         self.emit_batch([finding])
 
     def emit_batch(self, findings):
+        fresh = [f for f in findings if f.get("finding_id") not in self._seen]
+        if not fresh:
+            return
+        for attempt in range(self._retries + 1):
+            try:
+                self.inner.emit_batch(fresh)
+                self._mark(fresh)                   # delivered: don't re-send on replay
+                self._on_health(True)
+                return
+            except Exception as e:                  # noqa: BLE001
+                if attempt >= self._retries:
+                    self._dlq(fresh, e)             # dead-lettered = durably handled
+                    self._mark(fresh)
+                    self._on_health(False)          # backend down -> readiness false (F15)
+                    return
+                log.warning("%s: delivery failed (attempt %d/%d), retrying: %s",
+                            self.name, attempt + 1, self._retries, e)
+                self._sleep(self._backoff * (2 ** attempt))
+
+
+class FileAdapter:
+    def __init__(self, path, max_bytes=None):
+        self.path = path
+        # Size-cap rotation (F15): when the sink file exceeds max_bytes it is rotated to
+        # `<path>.1` (single generation, overwritten) so an unattended file sink can't fill
+        # the disk. 0/None disables. Default 100 MiB.
+        self.max_bytes = int(os.environ.get("CERNITY_SINK_FILE_MAX_BYTES", "104857600")
+                             if max_bytes is None else max_bytes)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    def _rotate_if_needed(self):
+        if self.max_bytes and os.path.exists(self.path) \
+                and os.path.getsize(self.path) >= self.max_bytes:
+            os.replace(self.path, self.path + ".1")   # atomic; keeps one prior generation
+
+    def emit(self, finding):
+        self.emit_batch([finding])
+
+    def emit_batch(self, findings):
+        self._rotate_if_needed()
         with open(self.path, "a") as fh:
             for f in _live(findings):
                 fh.write(json.dumps(f) + "\n")
@@ -268,8 +347,11 @@ def _make(kind):
     raise ValueError(f"unknown CERNITY_SINK: {kind}")
 
 
-def get_adapter():
-    names = [n for n in os.environ.get("CERNITY_SINK", "file").split(",") if n.strip()]
-    if len(names) > 1:
-        return MultiAdapter([_make(n) for n in names])
-    return _make(names[0] if names else "file")
+def get_adapter(on_health=None):
+    names = [n.strip() for n in os.environ.get("CERNITY_SINK", "file").split(",") if n.strip()] or ["file"]
+    # Each sink retries + dead-letters + dedups independently (F07 durable delivery) and
+    # reports its own health to readiness (F15) via on_health(name, ok).
+    def _h(name):
+        return (lambda ok: on_health(name, ok)) if on_health else None
+    sinks = [DurableSink(_make(n), n, on_health=_h(n)) for n in names]
+    return sinks[0] if len(sinks) == 1 else MultiAdapter(sinks)

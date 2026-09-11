@@ -75,13 +75,17 @@ def test_security_full_sasl_env_populates_both_configs():
             del os.environ[k]
 
 
-def test_security_ca_optional():
+def test_security_no_ca_is_sasl_plaintext():
+    # No CA -> SASL over plaintext, for the central pipeline authenticating to the
+    # internal listener on the private docker network (not reachable off-box). A
+    # remote sensor sets NDR_BUS_TLS_CA and gets SASL_SSL (test above).
     env = {"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512", "NDR_BUS_SASL_USER": "u",
            "NDR_BUS_SASL_PASSWORD": "p"}
     os.environ.update(env)
     try:
         s = rt._security_config()
-        assert "ssl_cafile" not in s and s["security_protocol"] == "SASL_SSL"
+        assert "ssl_cafile" not in s and s["security_protocol"] == "SASL_PLAINTEXT"
+        assert rt._consumer_config("g")["security_protocol"] == "SASL_PLAINTEXT"
     finally:
         for k in env:
             del os.environ[k]

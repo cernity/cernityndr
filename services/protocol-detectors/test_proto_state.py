@@ -1,4 +1,6 @@
 """protocol-detectors externalized state + fleet JA4 rarity + shared dedup (plan 006)."""
+import json
+
 import app
 import store
 
@@ -49,6 +51,35 @@ def test_dedup_no_double_emit():
 
 def test_stable_hash_deterministic():
     assert app._stable("x") == app._stable("x")
+
+
+def test_ja3_object_fingerprint_does_not_crash_and_uses_the_hash():
+    # F06: newer Suricata emits tls.ja3 / ja3s as {"hash","string"} OBJECTS, not strings.
+    # The old code used the object directly as a rarity-set member -> unhashable-dict
+    # TypeError (the audit's crash). Normalize to the hash string.
+    _fresh()
+    p = _P()
+    for i in range(6):                                    # warm up with distinct object fps
+        app._handle({"event_type": "tls", "src_ip": f"10.0.0.{i}",
+                     "tls": {"ja3": {"hash": f"h{i}", "string": "771,4-5"}, "sni": "x"}}, p)
+    app._handle({"event_type": "tls", "src_ip": "10.0.0.99",
+                 "tls": {"ja3": {"hash": "hnew", "string": "771,4-5"}, "sni": "evil"}}, p)
+    hits = [m for m in p.sent if m["detector_id"] == "ja4_rarity"]
+    assert hits, "ja3-object client after warmup was not flagged rare"
+    ents = json.loads(hits[-1]["entities"])
+    fp = next(e["value"] for e in ents if e.get("type") in ("ja3", "ja4"))
+    assert fp == "hnew", f"fingerprint should be the hash string, got {fp!r}"
+
+
+def test_ja3s_object_server_fingerprint_does_not_crash():
+    _fresh()
+    p = _P()
+    for i in range(6):
+        app._handle({"event_type": "tls", "dest_ip": f"1.1.1.{i}",
+                     "tls": {"ja3s": {"hash": f"s{i}", "string": "a,b"}, "sni": "x"}}, p)
+    app._handle({"event_type": "tls", "dest_ip": "2.2.2.2",
+                 "tls": {"ja3s": {"hash": "snew", "string": "a,b"}, "sni": "evil"}}, p)
+    assert any(m["detector_id"] == "server_fp_rarity" for m in p.sent)
 
 
 if __name__ == "__main__":

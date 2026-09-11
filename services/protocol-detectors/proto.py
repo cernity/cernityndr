@@ -3,6 +3,7 @@ consumes tls/http/ssh/dns/flow. Covers JA4 rarity, cloud-staging, DoH, TLS cert
 anomalies, suspicious user-agents, SSH brute-force, and ICMP exfil.
 """
 from __future__ import annotations
+import ipaddress
 import os
 
 _EXTRA = tuple(p.strip() for p in os.environ.get("NDR_INTERNAL_PREFIXES", "").split(",") if p.strip())
@@ -24,7 +25,17 @@ def is_multicast(ip: str) -> bool:
 
 
 def is_external(ip: str) -> bool:
-    return bool(ip) and not is_multicast(ip) and not any(ip.startswith(p) for p in PRIVATE)
+    if not ip or is_multicast(ip):
+        return False
+    if any(ip.startswith(p) for p in PRIVATE):     # IPv4 private + operator extras + fe80:
+        return False
+    if ":" in ip:                                   # IPv6: ULA (fc00::/7) / link-local = internal (F06)
+        try:
+            a = ipaddress.ip_address(ip)
+            return not (a.is_private or a.is_link_local)
+        except ValueError:
+            return False
+    return True
 
 
 # --- JA4 rarity (T1071): a client fingerprint not seen before, past warmup ------

@@ -11,6 +11,7 @@ it to Kafka, the local socket, the pcap dir, and MinIO.
 """
 from __future__ import annotations
 import os
+import re
 
 # Same mapping the orchestrator uses (v2 §18.2). Kept local so the agent has no
 # import dependency on the orchestrator package.
@@ -52,14 +53,34 @@ def dataset_for(profile: str) -> tuple[str, str]:
     return PROFILE_DATASET[profile]
 
 
+_SAFE_KEY = re.compile(r"^[A-Za-z0-9._\-/]{1,256}$")
+
+
+def _valid_key(ref) -> bool:
+    """A MinIO object key we're willing to trust verbatim from a bus directive: safe
+    charset, bounded length, no path traversal, no absolute path. The directive comes
+    off the bus, so an untrusted/forged pcap_ref must not become an arbitrary key."""
+    return (isinstance(ref, str) and bool(_SAFE_KEY.match(ref))
+            and ".." not in ref and not ref.startswith("/"))
+
+
+def _sanitize(s, default: str = "cap") -> str:
+    """Reduce a directive-supplied component to a safe filename atom (no separators
+    and no dot-run traversal, so it can never introduce traversal in the fallback)."""
+    s = re.sub(r"[^A-Za-z0-9._\-]", "", str(s)).replace("..", "").strip(".")[:128]
+    return s or default
+
+
 def pcap_key(directive: dict) -> str:
     """MinIO object key (bucket/key) the agent uploads to and hands to Zeek.
-    Matches what the orchestrator advertised so the loop stays consistent."""
+    Matches what the orchestrator advertised so the loop stays consistent. An
+    advertised pcap_ref is honored only if it is a safe key; otherwise (and for the
+    computed fallback) every component is sanitized."""
     ref = directive.get("pcap_ref")
-    if ref:
+    if _valid_key(ref):
         return ref
-    fid = directive.get("finding_id") or directive.get("value", "cap")
-    profile = directive.get("capture_profile", "ip")
+    fid = _sanitize(directive.get("finding_id") or directive.get("value"))
+    profile = _sanitize(directive.get("capture_profile", "ip"))
     return f"ndr-pcap/{fid}-{profile}.pcap"
 
 

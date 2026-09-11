@@ -54,12 +54,17 @@ def decide_enrichment(cand: dict) -> str:
     cat = cand.get("category")
     det = cand.get("detector_id")
     conf = float(cand.get("confidence", 0) or 0)
-    if cat == "recon":
+    if det in CONFIRMED_THREAT_SOURCES:
+        return "packets_needed"          # evidence capture, any confidence
+    # Structural detections answerable from the metadata itself (you either requested
+    # N SPNs / scanned N hosts / answered N LLMNR names, or you didn't) — deliver them
+    # to the SIEM directly rather than gating on packet capture, so they are NOT lost
+    # in a deployment without the optional forensics overlay. Ambiguous *content*
+    # findings (c2/exfil/dns_tunnel) still adjudicate via capture when low-confidence.
+    if cat in ("recon", "discovery", "credential_access", "lateral", "impact", "defense_evasion"):
         return "metadata_sufficient"
     if det == "ndpi_risk":
         return "metadata_sufficient"     # low-confidence feature; corroboration escalates, not capture
-    if det in CONFIRMED_THREAT_SOURCES:
-        return "packets_needed"          # evidence capture, any confidence
     if conf >= 0.9:
         return "metadata_sufficient"
     return "packets_needed"

@@ -109,6 +109,14 @@ def test_g3_confirmed_threat_source_captures_evidence_regardless_of_confidence()
     # (corroboration by another detector escalates it), so it finalizes on metadata.
     assert sm.decide_enrichment({"detector_id": "ndpi_risk", "category": "malware", "confidence": 0.6}) == "metadata_sufficient"
     assert sm.decide_enrichment({"detector_id": "beacon", "category": "c2", "confidence": 0.95}) == "metadata_sufficient"
+    # structural east-west detections are metadata-answerable -> deliver to the SIEM
+    # directly (not lost to the capture path when no forensics overlay runs), even
+    # below the 0.9 confidence bar. Ambiguous content (c2/exfil) still captures.
+    for cat in ("discovery", "credential_access", "lateral", "impact", "defense_evasion"):
+        assert sm.decide_enrichment({"detector_id": "kerberoasting", "category": cat, "confidence": 0.7}) == "metadata_sufficient", cat
+    assert sm.decide_enrichment({"detector_id": "beacon", "category": "c2", "confidence": 0.6}) == "packets_needed"
+    # a confirmed-threat source still captures for evidence regardless of category
+    assert sm.decide_enrichment({"detector_id": "ids_signature", "category": "lateral", "confidence": 0.9}) == "packets_needed"
 
 
 if __name__ == "__main__":

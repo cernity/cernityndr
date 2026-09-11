@@ -62,10 +62,13 @@ you'll copy to each sensor in Step 3). For a throwaway single-host demo with no 
 you can skip this and set `CERNITY_INSECURE_BUS=1` (plaintext external listener; warns loudly —
 never on an untrusted network).
 
-Then bring it up (Compose reads `.env` automatically):
+Then bring it up. **Pass `--env-file .env`** so your bus credentials load — when you invoke
+Compose with `-f deploy/central/...`, it does *not* auto-load a repo-root `.env`, and secure
+mode needs `CERNITY_BUS_PASSWORD` (you'll see a clear `CERNITY_BUS_PASSWORD required in secure
+mode` error if it's missing):
 
 ```bash
-docker compose -f deploy/central/docker-compose.yml up -d
+docker compose --env-file .env -f deploy/central/docker-compose.yml up -d
 ```
 
 That starts the bus (Redpanda), the detectors, `finding-service`, and

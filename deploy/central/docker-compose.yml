@@ -48,8 +48,8 @@ services:
       CERNITY_ADVERTISE_HOST: ${CERNITY_ADVERTISE_HOST:-127.0.0.1}
       CERNITY_INSECURE_BUS: ${CERNITY_INSECURE_BUS:-0}
       CERNITY_BUS_USER: ${CERNITY_BUS_USER:-cernity-sensor}
-      # Redpanda auto-seeds this SCRAM superuser at first boot.
-      RP_BOOTSTRAP_USER: ${CERNITY_BUS_USER:-cernity-sensor}:${CERNITY_BUS_PASSWORD:-}:SCRAM-SHA-512
+      # The entrypoint seeds this SCRAM superuser via the admin API once redpanda is up.
+      CERNITY_BUS_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
     volumes:
       - ./redpanda/entrypoint.sh:/entrypoint.sh:ro
       - ./redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro

@@ -65,7 +65,7 @@ def _emit(producer, detector, category, sev, conf, entities, mitre=None):
     bucket = int(time.time() // 3600)
     if not _store.dedup_seen(f"emit:{TENANT}:{detector}:{_stable(entities) % 10**12}:{bucket}", 3600):
         return                                                  # already emitted (shared across replicas)
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cand = {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
             "tenant_id": TENANT, "detector_id": detector, "detector_version": "1.0",
             "category": category, "severity": sev, "confidence": conf,

@@ -85,7 +85,7 @@ def join_key_entities(eve: dict) -> list[dict]:
 
 
 def _candidate(feed, ioc, dst, extra):
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ents = [{"type": "ioc", "feed": feed, "value": ioc}]
     if dst:
         ents.append({"type": "ip", "role": "dst", "value": dst})

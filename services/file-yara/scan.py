@@ -35,7 +35,7 @@ def finding_from_matches(event, matched_rules, tenant="default"):
         {"type": "yara_rules", "value": sorted(matched_rules)},
         {"type": "mime", "value": event.get("mime", "")},
     ])
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {
         "finding_id": f"{DETECTOR}-{sha256[:16] or 'nohash'}",
         "tenant_id": tenant,

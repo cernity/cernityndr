@@ -58,11 +58,12 @@ def _category(alert):
 
 
 def _idea_time(alert):
-    """IDEA0 DetectTime is ISO8601; Cernity findings use "%Y-%m-%d %H:%M:%S"."""
+    """IDEA0 DetectTime is ISO8601; normalise to RFC3339 UTC (`...T...Z`)."""
     t = alert.get("DetectTime") or alert.get("CreateTime")
     if not t:
         return None
-    return str(t).replace("T", " ").replace("Z", "").split(".")[0][:19]
+    base = str(t).replace(" ", "T").split(".")[0].split("+")[0].rstrip("Z")[:19]
+    return base + "Z"
 
 
 def _stable(s):
@@ -86,7 +87,7 @@ def alert_to_candidate(alert, tenant, version="1.0"):
         ents.append({"type": "ip", "role": "victim", "value": victim})
     ents.append({"type": "ml", "source": "slips", "threat_level": tl, "description": desc})
 
-    now = _idea_time(alert) or time.strftime("%Y-%m-%d %H:%M:%S")
+    now = _idea_time(alert) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     c = {"finding_id": f"slips-{aid}",
          "tenant_id": tenant, "detector_id": "slips_ml", "detector_version": version,
          "category": category, "severity": _THREAT_SEV[tl], "confidence": conf,

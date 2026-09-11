@@ -132,7 +132,7 @@ def _candidate(detector_id, category, severity, confidence, entities, tenant):
     if not _store.dedup_seen(f"emit:{tenant}:{detector_id}:{_stable(entities) % 10**12}:{bucket}", WINDOW):
         return None
     metrics.finding(detector_id, tenant)
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {"finding_id": f"{detector_id}-{_stable(entities) % 10**10}-{bucket}",
             "tenant_id": tenant, "detector_id": detector_id, "detector_version": "1.0",
             "category": category, "severity": severity, "confidence": confidence,

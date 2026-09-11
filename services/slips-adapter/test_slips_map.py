@@ -18,7 +18,7 @@ def test_maps_source_target_threat_level_and_technique():
     assert c["severity"] == 8
     assert c["confidence"] == 0.8
     assert c["state"] == "CANDIDATE"
-    assert c["first_seen"] == "2026-09-10 12:00:00"
+    assert c["first_seen"] == "2026-09-10T12:00:00Z"       # RFC3339 UTC
     ents = json.loads(c["entities"])   # emitted as a json string, matching detectors
     assert {"type": "ip", "role": "attacker", "value": "10.0.0.5"} in ents
     assert any(e.get("role") == "victim" and e["value"] == "93.184.216.34" for e in ents)

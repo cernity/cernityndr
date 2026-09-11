@@ -50,7 +50,7 @@ def _handle(e, producer):
         dk = f"{det}:{src}:{dst}:{url}"
         if not _store.dedup_seen(f"emit:{TENANT}:{det}:{_stable(dk) % 10**12}:{bucket}", 600):
             continue                                     # already emitted (shared across replicas)
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                           {"type": "ip", "role": "dst", "value": dst},
                           {"type": "host", "value": h.get("hostname")},

@@ -249,4 +249,4 @@ def build_corroboration(entity, group, now, tenant="homelab"):
 
 
 def _fmt(epoch: float) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))

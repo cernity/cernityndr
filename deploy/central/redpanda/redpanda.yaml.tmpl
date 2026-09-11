@@ -10,6 +10,16 @@ redpanda:
   empty_seed_starts_cluster: true
   seed_servers: []
 
+  rpc_server:
+    address: 0.0.0.0
+    port: 33145
+  advertised_rpc_api:
+    address: redpanda
+    port: 33145
+  admin:
+    - address: 0.0.0.0
+      port: 9644
+
   kafka_api:
     - name: internal
       address: 0.0.0.0
@@ -34,14 +44,3 @@ redpanda:
       key_file: /certs/broker.key
       truststore_file: /certs/ca.crt
       require_client_auth: false
-
-  superusers:
-    - ${CERNITY_BUS_USER}
-
-rpk:
-  overprovisioned: true
-  additional_start_flags:
-    - --smp=1
-    - --memory=1G
-    - --reserve-memory=0M
-    - --check=false

@@ -289,8 +289,10 @@ to stay quiet (never false-positive) when it doesn't:
 - **Domain fronting** fires on ECH (only in very recent Suricata TLS output) or a
   cleartext HTTP `Host` disagreeing with the flow's TLS `SNI`. Fully-encrypted HTTPS
   fronting (no visible Host) is **not** detectable and deliberately does not fire.
-- **LLMNR/NBT-NS poisoning** logic exists but Suricata surfaces LLMNR only as DNS
-  events (udp/5355) and does **not** decode NBT-NS (udp/137); coverage is LLMNR/mDNS-leaning.
+- **LLMNR/mDNS poisoning** is wired: east-west consumes DNS events and flags a host that
+  answers many names on udp/5355 (a `dns` type in your EVE, enabled by default). Suricata does
+  **not** decode NBT-NS (udp/137), so coverage is LLMNR/mDNS-leaning — the NBT-NS half is a
+  telemetry gap, not a logic gap.
 
 ## 10. Point the shipper at these files
 

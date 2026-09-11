@@ -109,7 +109,7 @@ def _asrep_preauthless(k):
     return is_as_req and preauth in (False, None, [], "")
 
 
-def evaluate(producer, flow_parts=None, raw_parts=None):
+def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
     # lateral fan-out (flow.v1)
     for key in _scoped_keys("lat:", flow_parts):
         members = _store.set_members(key)
@@ -210,6 +210,18 @@ def evaluate(producer, flow_parts=None, raw_parts=None):
         c = _cand("lateral_exec", "lateral", 7, 0.75, ent, mitre=["T1021.002"])
         if c:
             producer.send(CAND, c); log.info("LATERAL_EXEC %s signals=%d", _src_of(key), len(sigs))
+    # LLMNR/mDNS poisoning (dns.v1): a host answering many distinct names (Responder-style)
+    for key in _scoped_keys("llmnr:", dns_parts):
+        names = set(_store.set_members(key))
+        if not names:
+            _prune_index(key); continue
+        hit, n = ew.llmnr_poison_score(names)
+        if hit:
+            ent = json.dumps([{"type": "ip", "role": "responder", "value": _src_of(key)},
+                              {"type": "llmnr", "answered_names": n}])
+            c = _cand("llmnr_poison", "credential_access", 7, 0.6, ent, mitre=["T1557.001"])
+            if c:
+                producer.send(CAND, c); log.info("LLMNR_POISON %s names=%d", _src_of(key), n)
 
 
 def _handle(e, producer, part):
@@ -262,6 +274,14 @@ def _handle(e, producer, part):
             hit, matched = ew.lateral_exec_score([pipe], [], [])
             if hit:
                 _ew_add("lex:", part, src, matched[0])
+    elif et == "dns":
+        d = e.get("dns", {}) or {}
+        # LLMNR/mDNS runs on udp/5355; a Responder-style attacker ANSWERS name queries
+        # it does not own. Accrue distinct answered names per responding host (src of
+        # the answer). NBT-NS (udp/137) is not decoded by Suricata; see suricata-config.
+        if (e.get("dest_port") == 5355 or e.get("src_port") == 5355) \
+                and str(d.get("type")) == "answer" and d.get("rrname"):
+            _ew_add("llmnr:", part, e.get("src_ip"), d.get("rrname"))
     elif et == "dcerpc":
         d = e.get("dcerpc", {}) or {}
         hit, desc = ew.dcerpc_lateral(d.get("interface_uuid") or d.get("interface"))
@@ -278,7 +298,7 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     producer = ndr_runtime.make_producer()
-    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.raw.v1", group_id=GROUP_ID, auto_offset_reset="latest")
+    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.raw.v1", "suricata.dns.v1", group_id=GROUP_ID, auto_offset_reset="latest")
     m = ndr_runtime.metrics
     m.start(int(os.environ.get("NDR_METRICS_PORT", "9108")))
     m.set_ready("store", False)
@@ -301,7 +321,8 @@ def main():
             try:
                 fp = ndr_runtime.assigned_partitions(consumer, "suricata.flow.v1")
                 rp = ndr_runtime.assigned_partitions(consumer, "suricata.raw.v1")
-                evaluate(producer, fp, rp); producer.flush()
+                dp = ndr_runtime.assigned_partitions(consumer, "suricata.dns.v1")
+                evaluate(producer, fp, rp, dp); producer.flush()
             except Exception as ex:
                 m.dropped("evaluate"); log.warning("evaluate failed: %s", ex)
             last = time.time()

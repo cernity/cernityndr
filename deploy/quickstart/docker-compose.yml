@@ -30,7 +30,7 @@ services:
     command:
       - sh
       - -c
-      - "pip install --no-cache-dir kafka-python-ng >/dev/null 2>&1 && sleep 8 && python feeder.py fixtures/beacon-eve.jsonl"
+      - "pip install --no-cache-dir kafka-python-ng >/dev/null 2>&1 && sleep 8 && python feeder.py ${CERNITY_FEED_FIXTURE:-fixtures/beacon-eve.jsonl}"
     depends_on:
       redpanda:
         condition: service_healthy

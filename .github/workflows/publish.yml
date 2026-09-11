@@ -40,6 +40,8 @@ jobs:
           - file-yara
           - soar-forwarder
           - flink
+          - eve-bridge
+          - slips-adapter
     steps:
       - uses: actions/checkout@v4
 

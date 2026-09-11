@@ -20,6 +20,20 @@ def test_dataset_for():
     assert agent.dataset_for("ja4") == ("ndr-capture-ja4", "string")
 
 
+def test_pcap_key_rejects_unsafe_advertised_ref():
+    # a forged/unsafe pcap_ref off the bus must NOT become the object key
+    for bad in ("../../etc/passwd", "/etc/passwd", "ndr-pcap/../x", "a b; rm -rf",
+                "x\n../y", 123, None):
+        k = agent.pcap_key({"pcap_ref": bad, "finding_id": "f1", "capture_profile": "ip"})
+        assert k == "ndr-pcap/f1-ip.pcap", (bad, k)   # falls back to the safe computed key
+
+
+def test_pcap_key_sanitizes_fallback_components():
+    # unsafe finding_id/profile can't introduce traversal in the computed key
+    k = agent.pcap_key({"finding_id": "../../evil", "capture_profile": "ip/../x"})
+    assert ".." not in k and k.startswith("ndr-pcap/") and k.endswith(".pcap")
+
+
 def test_pcap_key_prefers_advertised_ref():
     assert agent.pcap_key({"pcap_ref": "ndr-pcap/x.pcap"}) == "ndr-pcap/x.pcap"
     k = agent.pcap_key({"finding_id": "f1", "capture_profile": "ip"})

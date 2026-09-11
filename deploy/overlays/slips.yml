@@ -22,11 +22,23 @@ x-logging: &cernity-logging
   driver: json-file
   options: {max-size: "10m", max-file: "3"}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   # SLIPS' own Redis, isolated from Cernity's state Redis (SLIPS assumes :6379).
   slips-redis:
     image: redis:7-alpine
     container_name: cernity-slips-redis
+    <<: *hardening-infra
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     logging: *cernity-logging
     restart: unless-stopped
@@ -36,6 +48,7 @@ services:
     image: cernity/eve-bridge:latest
     build: {context: ../.., dockerfile: services/eve-bridge/Dockerfile}
     container_name: cernity-eve-bridge
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       EVE_BRIDGE_TOPICS: ${EVE_BRIDGE_TOPICS:-suricata.flow.v1,suricata.raw.v1}
@@ -50,6 +63,7 @@ services:
   slips:
     image: stratosphereips/slips:latest
     container_name: cernity-slips
+    <<: *hardening-infra
     command: ["-f", "/slips-input/eve.json", "-o", "/slips-output"]
     environment:
       REDIS_HOST: slips-redis
@@ -65,6 +79,7 @@ services:
     image: cernity/slips-adapter:latest
     build: {context: ../.., dockerfile: services/slips-adapter/Dockerfile}
     container_name: cernity-slips-adapter
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}

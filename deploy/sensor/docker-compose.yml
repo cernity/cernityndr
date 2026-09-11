@@ -14,10 +14,22 @@ x-logging: &cernity-logging
     max-size: "10m"
     max-file: "3"
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   fluent-bit:
     image: fluent/fluent-bit:latest
     container_name: cernity-fluent-bit
+    <<: *hardening-infra
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       SURICATA_EVE_ALERTS: ${SURICATA_EVE_ALERTS:-/var/log/suricata/eve-alerts.json}
@@ -49,6 +61,7 @@ services:
     image: cernity/capture-agent:latest
     build: {context: ../.., dockerfile: services/capture-agent/Dockerfile}
     container_name: cernity-capture-agent
+    <<: *hardening
     profiles: [capture]
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}

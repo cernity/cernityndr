@@ -22,10 +22,22 @@ x-detector-env: &detector-env
   LOG_FORMAT: ${LOG_FORMAT:-json}
   HEARTBEAT_SECS: ${HEARTBEAT_SECS:-300}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   redpanda:
     image: redpandadata/redpanda:latest
     container_name: cernity-redpanda
+    <<: *hardening-infra
     # Two listeners: internal (containers reach redpanda:9092 on the docker network,
     # plaintext) and external (a remote sensor reaches CENTRAL_HOST:19092). By default
     # the external listener is SASL/SCRAM-SHA-512 + TLS; the entrypoint selects secure
@@ -56,6 +68,7 @@ services:
     image: cernity/ids-alerts:latest
     build: {context: ../.., dockerfile: services/ids-alerts/Dockerfile}
     container_name: cernity-ids-alerts
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -65,6 +78,7 @@ services:
     image: cernity/behavioral-detectors:latest
     build: {context: ../.., dockerfile: services/behavioral-detectors/Dockerfile}
     container_name: cernity-behavioral-detectors
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -74,6 +88,7 @@ services:
     image: cernity/dns-detector:latest
     build: {context: ../.., dockerfile: services/dns-detector/Dockerfile}
     container_name: cernity-dns-detector
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -83,6 +98,7 @@ services:
     image: cernity/http-detector:latest
     build: {context: ../.., dockerfile: services/http-detector/Dockerfile}
     container_name: cernity-http-detector
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -92,6 +108,7 @@ services:
     image: cernity/protocol-detectors:latest
     build: {context: ../.., dockerfile: services/protocol-detectors/Dockerfile}
     container_name: cernity-protocol-detectors
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -101,6 +118,7 @@ services:
     image: cernity/east-west-detectors:latest
     build: {context: ../.., dockerfile: services/east-west-detectors/Dockerfile}
     container_name: cernity-east-west-detectors
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -110,6 +128,7 @@ services:
     image: cernity/anomaly-detector:latest
     build: {context: ../.., dockerfile: services/anomaly-detector/Dockerfile}
     container_name: cernity-anomaly-detector
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -119,6 +138,7 @@ services:
     image: cernity/coverage-detector:latest
     build: {context: ../.., dockerfile: services/coverage-detector/Dockerfile}
     container_name: cernity-coverage-detector
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -128,6 +148,7 @@ services:
     image: cernity/threat-intel:latest
     build: {context: ../.., dockerfile: services/threat-intel/Dockerfile}
     container_name: cernity-threat-intel
+    <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -137,6 +158,7 @@ services:
     image: cernity/finding-service:latest
     build: {context: ../.., dockerfile: services/finding-service/Dockerfile}
     container_name: cernity-finding-service
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
@@ -151,6 +173,7 @@ services:
     image: cernity/findings-forwarder:latest
     build: {context: ../.., dockerfile: services/findings-forwarder/Dockerfile}
     container_name: cernity-findings-forwarder
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CERNITY_SINK: ${CERNITY_SINK:-file}

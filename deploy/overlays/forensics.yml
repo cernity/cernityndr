@@ -18,10 +18,22 @@ x-minio-creds: &minio-creds
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-cernity}
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-cernitydemo}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   minio:
     image: minio/minio:latest
     container_name: cernity-minio
+    <<: *hardening-infra
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cernity}
@@ -38,6 +50,7 @@ services:
   minio-init:
     image: minio/mc:latest
     container_name: cernity-minio-init
+    <<: *hardening-infra
     depends_on: {minio: {condition: service_healthy}}
     entrypoint:
       - sh
@@ -58,6 +71,7 @@ services:
     image: cernity/capture-orchestrator:latest
     build: {context: ../.., dockerfile: services/capture-orchestrator/Dockerfile}
     container_name: cernity-capture-orchestrator
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -69,6 +83,7 @@ services:
     image: cernity/zeek-central:latest
     build: {context: ../.., dockerfile: services/zeek-central/Dockerfile}
     container_name: cernity-zeek-central
+    <<: *hardening
     environment:
       <<: *minio-creds
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
@@ -83,6 +98,7 @@ services:
     image: cernity/zeek-notice:latest
     build: {context: ../.., dockerfile: services/zeek-notice/Dockerfile}
     container_name: cernity-zeek-notice
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
@@ -95,6 +111,7 @@ services:
     image: cernity/file-threat:latest
     build: {context: ../.., dockerfile: services/file-threat/Dockerfile}
     container_name: cernity-file-threat
+    <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
@@ -107,6 +124,7 @@ services:
     image: cernity/file-yara:latest
     build: {context: ../.., dockerfile: services/file-yara/Dockerfile}
     container_name: cernity-file-yara
+    <<: *hardening
     environment:
       <<: *minio-creds
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}

@@ -14,10 +14,22 @@ x-logging: &lg
   driver: json-file
   options: {max-size: "10m", max-file: "3"}
 
+# Tiered container hardening. Cernity's own (python) services drop all caps, gain
+# no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
+# clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
+x-hardening: &hardening
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+x-hardening-infra: &hardening-infra
+  security_opt: ["no-new-privileges:true"]
+
 services:
   redpanda:
     image: redpandadata/redpanda:latest
     container_name: cernity-redpanda
+    <<: *hardening-infra
     command:
       - redpanda
       - start
@@ -43,6 +55,7 @@ services:
   redis:
     image: redis:latest
     container_name: cernity-redis
+    <<: *hardening-infra
     command: ["redis-server", "--save", "", "--maxmemory-policy", "noeviction"]
     ports: ["6379:6379"]     # workers: NDR_REDIS_URL=redis://<infra-host>:6379/0
     volumes: [cernity-redis:/data]
@@ -52,6 +65,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: cernity-clickhouse
+    <<: *hardening-infra
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
@@ -71,6 +85,7 @@ services:
   minio:
     image: minio/minio:latest
     container_name: cernity-minio
+    <<: *hardening-infra
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cernity}

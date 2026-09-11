@@ -49,6 +49,19 @@ sensor can connect — edit `.env` and set:
 CERNITY_ADVERTISE_HOST=CENTRAL_HOST     # this host's LAN IP or DNS name
 ```
 
+The external bus listener (`:19092`, the port your remote sensor connects to) is
+**SASL/SCRAM-SHA-512 over TLS by default** — an unauthenticated client is refused. Generate
+the CA, broker cert, and a SCRAM credential:
+
+```bash
+CERNITY_ADVERTISE_HOST=CENTRAL_HOST ./deploy/security/gen-bus-certs.sh
+```
+
+It prints the `CERNITY_BUS_USER` / `CERNITY_BUS_PASSWORD` to add to `.env` (and the `ca.crt`
+you'll copy to each sensor in Step 3). For a throwaway single-host demo with no remote sensor,
+you can skip this and set `CERNITY_INSECURE_BUS=1` (plaintext external listener; warns loudly —
+never on an untrusted network).
+
 Then bring it up (Compose reads `.env` automatically):
 
 ```bash
@@ -120,13 +133,22 @@ The shipper is a tiny Fluent Bit container that tails those two EVE files and fo
 them to Cernity. It runs **on the sensor** (it's the one piece that must be where the logs
 are) and uses almost nothing.
 
-On the **sensor**, from a checkout of this repo:
+First copy the `ca.crt` generated in Step 1 from the Cernity host to this sensor. Then, on
+the **sensor**, from a checkout of this repo (the shipper authenticates to the secure bus with
+the SCRAM credential + CA):
 
 ```bash
 REDPANDA_BOOTSTRAP=CENTRAL_HOST:19092 \
 SURICATA_LOG_DIR=/var/log/suricata \
+CERNITY_BUS_USER=cernity-sensor \
+CERNITY_BUS_PASSWORD=<from Step 1> \
+CERNITY_BUS_CA=/path/to/ca.crt \
 docker compose -f deploy/sensor/docker-compose.yml up -d
 ```
+
+(Only if the central host runs with `CERNITY_INSECURE_BUS=1`: skip the CA/creds and remove the
+`rdkafka.sasl.*`/`ssl.*` lines from `deploy/fluent-bit/fluent-bit.conf` so the shipper connects
+plaintext.)
 
 (Replace `CENTRAL_HOST` with your Cernity host. If your EVE files live elsewhere, set
 `SURICATA_EVE_ALERTS` / `SURICATA_EVE_NSM` — see [deploy-sensor.md](deploy-sensor.md).)
@@ -220,7 +242,8 @@ Cernity is live: your sensor's telemetry is becoming findings and landing in you
 | Symptom | Likely cause / fix |
 |---|---|
 | A central service keeps restarting | `docker compose -f deploy/central/docker-compose.yml logs <svc>` — usually a missing `.env` value (e.g. an unset `CLICKHOUSE_PASSWORD` while ClickHouse is enabled; leave it empty to run without ClickHouse). |
-| Shipper can't reach `CENTRAL_HOST:19092` | Open TCP 19092 on the Cernity host's firewall, and set `CERNITY_ADVERTISE_HOST` to a name/IP the sensor can reach; confirm `REDPANDA_BOOTSTRAP` points at the right host. |
+| Shipper can't reach `CENTRAL_HOST:19092` | Open TCP 19092 on the Cernity host's firewall, and set `CERNITY_ADVERTISE_HOST` to a name/IP the sensor can reach; confirm `REDPANDA_BOOTSTRAP` points at the right host. The port is auth+TLS by default — it *should* refuse unauthenticated clients. |
+| Shipper connects but the bus rejects it (auth/TLS errors) | The secure bus needs the SCRAM creds + CA on the sensor: `CERNITY_BUS_USER`/`CERNITY_BUS_PASSWORD` (from `gen-bus-certs.sh`) and `CERNITY_BUS_CA` pointing at the `ca.crt` copied from the central host. The cert's SAN must include `CERNITY_ADVERTISE_HOST`. |
 | No findings arrive | Confirm both EVE files are growing (Step 2), the shipper shows no errors (Step 3), and `finding-service` logs show `FINAL` lines: `docker compose -f deploy/central/docker-compose.yml logs finding-service`. |
 | SIEM shows nothing | Check `findings-forwarder` logs for auth/endpoint errors (Step 4); verify the credentials and that the index/HEC token exists. |
 

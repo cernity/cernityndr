@@ -17,10 +17,20 @@ spec:
         {{- include "cernity.labels" . | nindent 8 }}
         app.kubernetes.io/component: finding-service
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: finding-service
           image: {{ include "cernity.image" (dict "Values" .Values "name" "finding-service") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           envFrom:
             - configMapRef:
                 name: {{ .Release.Name }}-cernity-env
@@ -58,10 +68,20 @@ spec:
         {{- include "cernity.labels" . | nindent 8 }}
         app.kubernetes.io/component: findings-forwarder
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: findings-forwarder
           image: {{ include "cernity.image" (dict "Values" .Values "name" "findings-forwarder") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           envFrom:
             - configMapRef:
                 name: {{ .Release.Name }}-cernity-env
@@ -91,10 +111,20 @@ spec:
         {{- include "cernity.labels" . | nindent 8 }}
         app.kubernetes.io/component: normalizer
     spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: normalizer
           image: {{ include "cernity.image" (dict "Values" .Values "name" "normalizer") }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           envFrom:
             - configMapRef:
                 name: {{ .Release.Name }}-cernity-env

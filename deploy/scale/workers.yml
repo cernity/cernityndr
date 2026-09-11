@@ -51,6 +51,7 @@ x-hardening-infra: &hardening-infra
 services:
   ids-alerts:
     image: cernity/ids-alerts:latest
+    <<: *hardening
     profiles: [ingest]
     environment: *wenv
     deploy:
@@ -60,6 +61,7 @@ services:
 
   behavioral-detectors:
     image: cernity/behavioral-detectors:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -69,6 +71,7 @@ services:
 
   dns-detector:
     image: cernity/dns-detector:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -78,6 +81,7 @@ services:
 
   http-detector:
     image: cernity/http-detector:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -87,6 +91,7 @@ services:
 
   protocol-detectors:
     image: cernity/protocol-detectors:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -96,6 +101,7 @@ services:
 
   east-west-detectors:
     image: cernity/east-west-detectors:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -105,6 +111,7 @@ services:
 
   anomaly-detector:
     image: cernity/anomaly-detector:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -114,6 +121,7 @@ services:
 
   coverage-detector:
     image: cernity/coverage-detector:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -123,6 +131,7 @@ services:
 
   threat-intel:
     image: cernity/threat-intel:latest
+    <<: *hardening
     profiles: [detection]
     environment: *wenv
     deploy:
@@ -132,6 +141,7 @@ services:
 
   finding-service:
     image: cernity/finding-service:latest
+    <<: *hardening
     profiles: [findings]
     environment:
       <<: *wenv
@@ -145,6 +155,7 @@ services:
 
   findings-forwarder:
     image: cernity/findings-forwarder:latest
+    <<: *hardening
     profiles: [findings]
     environment:
       <<: *wenv

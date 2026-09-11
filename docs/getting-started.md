@@ -49,23 +49,26 @@ sensor can connect — edit `.env` and set:
 CERNITY_ADVERTISE_HOST=CENTRAL_HOST     # this host's LAN IP or DNS name
 ```
 
-The external bus listener (`:19092`, the port your remote sensor connects to) is
-**SASL/SCRAM-SHA-512 over TLS by default** — an unauthenticated client is refused. Generate
-the CA, broker cert, and a SCRAM credential:
+The bus uses **SASL/SCRAM-SHA-512 with authorization enforced by default** — an
+unauthenticated or unauthorized client is refused. There are **three separate credentials** so
+a compromised sensor can't forge findings: a **produce-only sensor** credential (distributed to
+sensors, scoped to `suricata.*`), and central-only **pipeline** + **admin** credentials. Generate
+the CA, broker cert, and all three:
 
 ```bash
 CERNITY_ADVERTISE_HOST=CENTRAL_HOST ./deploy/security/gen-bus-certs.sh
 ```
 
-It prints the `CERNITY_BUS_USER` / `CERNITY_BUS_PASSWORD` to add to `.env` (and the `ca.crt`
-you'll copy to each sensor in Step 3). For a throwaway single-host demo with no remote sensor,
-you can skip this and set `CERNITY_INSECURE_BUS=1` (plaintext external listener; warns loudly —
-never on an untrusted network).
+It prints the `CERNITY_BUS_*` values to add to `.env` (all three on the central host; only the
+produce-only `CERNITY_BUS_USER`/`CERNITY_BUS_PASSWORD` + the `ca.crt` go to each sensor in
+Step 3). For a throwaway single-host demo, set `CERNITY_INSECURE_BUS=1` **and**
+`CERNITY_BUS_CENTRAL_MECHANISM=` (empty) — no auth on either listener, warns loudly, never on
+an untrusted network.
 
 Then bring it up. **Pass `--env-file .env`** so your bus credentials load — when you invoke
 Compose with `-f deploy/central/...`, it does *not* auto-load a repo-root `.env`, and secure
-mode needs `CERNITY_BUS_PASSWORD` (you'll see a clear `CERNITY_BUS_PASSWORD required in secure
-mode` error if it's missing):
+mode needs the three `CERNITY_BUS_*` credentials (you'll see a clear `... required in secure
+mode` error if one is missing):
 
 ```bash
 docker compose --env-file .env -f deploy/central/docker-compose.yml up -d

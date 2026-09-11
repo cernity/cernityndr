@@ -10,8 +10,20 @@ x-logging: &cernity-logging
     max-size: "10m"
     max-file: "3"
 
+# Central pipeline bus credential (F02). Central services authenticate to the internal
+# SASL listener as the trusted 'central' principal (a superuser on the private docker
+# net); with no CA this is SASL over plaintext. This is a DIFFERENT credential from the
+# produce-only sensor one distributed to remote sensors — a compromised sensor can
+# never present the central credential. In the fully-insecure demo posture
+# (CERNITY_INSECURE_BUS=1) set CERNITY_BUS_CENTRAL_MECHANISM= (empty) so clients skip SASL.
+x-central-bus-auth: &central-bus-auth
+  NDR_BUS_SASL_MECHANISM: ${CERNITY_BUS_CENTRAL_MECHANISM-SCRAM-SHA-512}
+  NDR_BUS_SASL_USER: ${CERNITY_BUS_CENTRAL_USER:-cernity-central}
+  NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
+
 # Common environment shared by the detector services.
 x-detector-env: &detector-env
+  <<: *central-bus-auth
   REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
   NDR_STATE_BACKEND: ${NDR_STATE_BACKEND:-memory}
   NDR_TENANT: ${NDR_TENANT:-default}
@@ -47,10 +59,19 @@ services:
     environment:
       CERNITY_ADVERTISE_HOST: ${CERNITY_ADVERTISE_HOST:-127.0.0.1}
       CERNITY_INSECURE_BUS: ${CERNITY_INSECURE_BUS:-0}
+      # Produce-only sensor credential (distributed to sensors) + the central-only
+      # pipeline and bootstrap-admin credentials. The entrypoint seeds all three and
+      # their ACLs, then enables authorization (F02). The sensor is never a superuser.
       CERNITY_BUS_USER: ${CERNITY_BUS_USER:-cernity-sensor}
-      # The entrypoint seeds this SCRAM superuser via the admin API once redpanda is up.
       CERNITY_BUS_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
+      CERNITY_BUS_CENTRAL_USER: ${CERNITY_BUS_CENTRAL_USER:-cernity-central}
+      CERNITY_BUS_CENTRAL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
+      CERNITY_BUS_ADMIN_USER: ${CERNITY_BUS_ADMIN_USER:-cernity-admin}
+      CERNITY_BUS_ADMIN_PASSWORD: ${CERNITY_BUS_ADMIN_PASSWORD:-}
     volumes:
+      # Named data volume (F14): the broker's log/offsets survive a container recreate, so
+      # in-flight findings/offsets are not lost on redeploy (stable down/up reattachment).
+      - cernity-redpanda-data:/var/lib/redpanda/data
       - ./redpanda/entrypoint.sh:/entrypoint.sh:ro
       - ./redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro
       - ../security/secrets:/certs:ro
@@ -160,10 +181,18 @@ services:
     container_name: cernity-finding-service
     <<: *hardening
     environment:
+      <<: *central-bus-auth
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      # F04: Tier-2 enrichment is opt-in via these toggles/keys — pass them through so
+      # setting them in .env reaches finding-service. F01 finalization timeout too.
+      NDR_ENRICH_TIMEOUT_SECS: ${NDR_ENRICH_TIMEOUT_SECS:-120}
+      INTEL_RDNS: ${INTEL_RDNS:-}
+      INTEL_RDAP: ${INTEL_RDAP:-}
+      GREYNOISE_API_KEY: ${GREYNOISE_API_KEY:-}
+      INTEL_HTTP_TIMEOUT: ${INTEL_HTTP_TIMEOUT:-3}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on: {redpanda: {condition: service_healthy}}
     logging: *cernity-logging
@@ -175,9 +204,40 @@ services:
     container_name: cernity-findings-forwarder
     <<: *hardening
     environment:
+      <<: *central-bus-auth
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       CERNITY_SINK: ${CERNITY_SINK:-file}
       CERNITY_SINK_FILE: ${CERNITY_SINK_FILE:-/out/findings.jsonl}
+      CERNITY_SINK_FILE_MAX_BYTES: ${CERNITY_SINK_FILE_MAX_BYTES:-104857600}
+      CERNITY_DLQ_DIR: ${CERNITY_DLQ_DIR:-/out/dlq}
+      # F04: pass the selected SIEM sink's credentials through to the container, so setting
+      # any of these in .env actually reaches findings-forwarder and delivers. Unset ->
+      # empty; each adapter only reads the vars for the CERNITY_SINK(s) you selected.
+      ES_ENDPOINT: ${ES_ENDPOINT:-}
+      ES_USER: ${ES_USER:-}
+      ES_PASSWORD: ${ES_PASSWORD:-}
+      ES_INDEX_PREFIX: ${ES_INDEX_PREFIX:-ndr-findings}
+      ES_TLS_VERIFY: ${ES_TLS_VERIFY:-true}
+      SPLUNK_HEC_URL: ${SPLUNK_HEC_URL:-}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-}
+      SPLUNK_SOURCETYPE: ${SPLUNK_SOURCETYPE:-cernity:finding}
+      SPLUNK_TLS_VERIFY: ${SPLUNK_TLS_VERIFY:-true}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_AUTH: ${WEBHOOK_AUTH:-}
+      WEBHOOK_TLS_VERIFY: ${WEBHOOK_TLS_VERIFY:-true}
+      SYSLOG_HOST: ${SYSLOG_HOST:-}
+      SYSLOG_PORT: ${SYSLOG_PORT:-514}
+      SYSLOG_TLS: ${SYSLOG_TLS:-false}
+      DEVO_TRANSPORT: ${DEVO_TRANSPORT:-syslog}
+      DEVO_FORMAT: ${DEVO_FORMAT:-json}
+      DEVO_TAG: ${DEVO_TAG:-my.app.cernity.findings}
+      DEVO_RELAY: ${DEVO_RELAY:-}
+      DEVO_PORT: ${DEVO_PORT:-443}
+      DEVO_CERT: ${DEVO_CERT:-}
+      DEVO_KEY: ${DEVO_KEY:-}
+      DEVO_CHAIN: ${DEVO_CHAIN:-}
+      DEVO_ENDPOINT: ${DEVO_ENDPOINT:-}
+      DEVO_TOKEN: ${DEVO_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - cernity-out:/out
@@ -187,3 +247,4 @@ services:
 
 volumes:
   cernity-out: {}
+  cernity-redpanda-data: {}      # F14: durable broker state across container recreate

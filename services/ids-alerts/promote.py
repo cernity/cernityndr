@@ -11,9 +11,20 @@ policy/info/protocol-decode), or an explicit Major/Critical signature_severity,
 and always drop engine/decoder + ET INFO/POLICY signatures.
 """
 from __future__ import annotations
+import hashlib
 import json
+import time
 
 THREAT_SEVERITY_MAX = 2
+
+
+def _stable(*parts) -> int:
+    """Stable cross-process id. Python's built-in hash() is PYTHONHASHSEED-randomized,
+    so the same alert produced a DIFFERENT finding_id in each process/restart and the
+    dedup (ClickHouse ReplacingMergeTree + finding-service, keyed by finding_id) never
+    collapsed it (F07). SHA-1 of the joined parts is identical everywhere."""
+    s = "|".join("" if p is None else str(p) for p in parts)
+    return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16) % 10**10
 
 # Engine/decoder + pure-informational signatures — never a threat finding.
 _NOISE_PREFIXES = (
@@ -100,9 +111,13 @@ def to_candidate(eve: dict, tenant: str = "homelab") -> dict | None:
     ]
     ents += join_key_entities(eve)
     entities = json.dumps(ents)
+    # Suricata's event time is the real first/last-seen; fall back to now (F13: the
+    # schema requires both, and they were missing so every ids candidate was invalid).
+    ts = eve.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return {
-        "finding_id": f"idsig-{sid}-{abs(hash((sid, src, dst))) % 10**10}",
+        "finding_id": f"idsig-{sid}-{_stable(sid, src, dst)}",
         "tenant_id": tenant, "detector_id": "ids_signature", "detector_version": "1.0",
         "category": category_for(alert), "severity": our_sev, "confidence": 0.9,
+        "first_seen": ts, "last_seen": ts,
         "entities": entities, "state": "CANDIDATE",
     }

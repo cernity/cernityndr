@@ -57,6 +57,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # F15: always tag :latest (operator preference) AND, on a version tag push, the
+      # exact version — so a release is addressable by an immutable, reproducible tag.
+      - name: Docker tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: cernity/${{ matrix.service }}
+          tags: |
+            type=raw,value=latest
+            type=ref,event=tag
+
       - name: Build and push ${{ matrix.service }} (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
@@ -64,4 +75,8 @@ jobs:
           file: services/${{ matrix.service }}/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: cernity/${{ matrix.service }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          # F16: ship an SBOM + provenance attestation with every released image, so
+          # what's inside each image (and how it was built) is inspectable/auditable.
+          sbom: true
+          provenance: mode=max

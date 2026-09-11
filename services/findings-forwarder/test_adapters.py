@@ -4,7 +4,7 @@ import tempfile
 
 import adapters
 from adapters import (FileAdapter, ElasticsearchAdapter, SplunkAdapter, WebhookAdapter,
-                      SyslogCefAdapter, DevoAdapter, MultiAdapter, get_adapter)
+                      SyslogCefAdapter, DevoAdapter, MultiAdapter, DurableSink, get_adapter)
 
 F = {"finding_id": "f1", "detector_id": "beacon", "category": "c2", "severity": 8,
      "entities": [{"role": "src", "value": "10.0.0.5"}, {"role": "dst", "value": "203.0.113.10"}]}
@@ -64,10 +64,12 @@ def test_devo_http_config():
 def test_get_adapter_single_and_fanout():
     os.environ["CERNITY_SINK"] = "file"
     os.environ["CERNITY_SINK_FILE"] = tempfile.mktemp()
-    assert isinstance(get_adapter(), FileAdapter)
+    a = get_adapter()
+    assert isinstance(a, DurableSink) and isinstance(a.inner, FileAdapter)   # durable-wrapped (F07)
     os.environ["CERNITY_SINK"] = "file,webhook"
     m = get_adapter()
     assert isinstance(m, MultiAdapter) and len(m.adapters) == 2
+    assert all(isinstance(s, DurableSink) for s in m.adapters)               # each sink durable
 
 
 def test_multiadapter_isolates_failure():
@@ -90,6 +92,16 @@ def test_unknown_sink_raises():
         pass
     finally:
         os.environ["CERNITY_SINK"] = "file"
+
+
+def test_file_sink_rotates_at_size_cap():
+    # F15: an unattended file sink must not fill the disk — rotate to `<path>.1` at a cap.
+    p = tempfile.mktemp()
+    a = FileAdapter(p, max_bytes=300)
+    for i in range(60):
+        a.emit_batch([{"finding_id": f"f{i}", "category": "c2", "pad": "y" * 40}])
+    assert os.path.exists(p + ".1"), "file sink did not rotate at the size cap"
+    assert os.path.getsize(p) < 60 * 60, "rotation did not bound the live file"
 
 
 if __name__ == "__main__":

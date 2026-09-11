@@ -42,6 +42,17 @@ DEFAULTS = {
 }
 
 
+def entity_key(tenant: str, base: str) -> str:
+    """Tenant-scoped, stable correlation + Kafka partition key for an entity (F08).
+    `tenant` is the AUTHENTICATED tenant — the deployment env / ingress-stamped
+    identity — NEVER a client-supplied message field, so a spoofed `tenant` in a raw
+    Suricata record cannot make one tenant's traffic correlate into another's. `base`
+    is the resolved entity (an asset key or `ip:<addr>`). Keying findings by this value
+    keeps one host's whole history on one partition, so correlation replicas never
+    split an entity across themselves."""
+    return f"{tenant}|{base}"
+
+
 def is_incident(finding: dict) -> bool:
     """Incidents are findings too; the shell must not re-correlate them."""
     return finding.get("detector_id") == INCIDENT_DETECTOR

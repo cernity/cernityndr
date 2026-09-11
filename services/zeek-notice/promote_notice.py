@@ -20,8 +20,26 @@ notice.log record (dict), whether Zeek emitted it as JSON or Vector parsed the
 TSV. Field names follow Zeek's notice.log: note, msg, sub, src, dst, id.orig_h,
 id.resp_h, uid.
 """
+import hashlib
 import json
 import os
+import time
+
+
+def _stable(*parts) -> int:
+    """Stable cross-process id (F07): built-in hash() is PYTHONHASHSEED-randomized, so
+    the same notice produced a different finding_id per process and dedup never fired."""
+    s = "|".join("" if p is None else str(p) for p in parts)
+    return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16) % 10**10
+
+
+def _notice_ts(notice: dict) -> str:
+    """RFC3339 UTC from Zeek's epoch-float notice `ts` (F13: schema requires first/last
+    seen), or now when absent/unparseable."""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(notice.get("ts"))))
+    except (TypeError, ValueError):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 # Operational / health notices are NOT detections (SIEM/DE team feedback): the
 # sensor talking about itself, not detecting a threat. Dropped before promotion.
@@ -111,9 +129,11 @@ def to_candidate(notice: dict, tenant: str = "default") -> dict | None:
     if sub and sub != "-":
         ents.append({"type": "indicator", "value": sub})
     ents += join_key_entities(notice)
-    return {"finding_id": f"zeeknotice-{abs(hash((note, src, dst, msg))) % 10**10}",
+    ts = _notice_ts(notice)
+    return {"finding_id": f"zeeknotice-{_stable(note, src, dst, msg)}",
             "tenant_id": tenant, "detector_id": "zeek_notice", "detector_version": "1.0",
             "category": category, "severity": severity, "confidence": 0.8,
+            "first_seen": ts, "last_seen": ts,
             "entities": json.dumps(ents), "state": "CANDIDATE"}
 
 

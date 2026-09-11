@@ -12,8 +12,15 @@ Design (KTD1-3 of the enterprise-hardening plan):
   - windows (beacon/dns callbacks) -> sorted set scored by event time, so
     time-pruning is `range(key, min_score)` / `prune(key, min_score)`, atomic in
     Redis, with a key-level TTL as a backstop against leaks.
-  - running accumulators (exfil bytes, cumulative long-conn) -> hash counters + TTL.
-  - baselines (known-dsts, fleet prevalence, rotating IPs) -> capped sets + TTL.
+  - running accumulators / rate counters (exfil bytes, ssh/icmp) -> hash counters on a
+    TUMBLING window: TTL is set from the FIRST write and NOT refreshed, so continuous
+    activity can't keep a counter alive (accumulating a past window's counts) forever (F05).
+  - baselines (known-dsts, fleet prevalence, rotating IPs) + the partition index ->
+    expiry-scored SORTED SETS (member -> its own expiry), pruned on read, so each member
+    ages on its OWN window and cardinality stays bounded however busy the key is (F05).
+    Upgrade note: these were plain SETs; Redis holds only ephemeral window state, so on
+    upgrade flush the Cernity DB (or let old SET-typed keys age out within one window) —
+    a stale SET-typed key would otherwise WRONGTYPE a ZADD.
   - passive-DNS / dst-context -> key/value + TTL.
   - emit-once dedup -> set-if-absent with TTL.
 Every operation takes a TTL, so nothing lives past its window. No accumulator can
@@ -142,9 +149,14 @@ class InMemoryStore(WindowStore):
     def counter_add(self, key, field, delta, ttl):
         if not self._alive(key, self._exp):
             self._h.pop(key, None)
+            self._exp.pop(key, None)              # expired -> a fresh window sets its own TTL
         h = self._h.setdefault(key, {})
         h[field] = h.get(field, 0) + delta
-        self._exp[key] = self._now() + ttl
+        # F05: TTL from the FIRST write of the window (tumbling), NOT refreshed on every
+        # write -- otherwise continuous activity keeps the counter alive forever and it
+        # accumulates a previous window's counts. ponytail: tumbling window, not sliding;
+        # switch to time-bucketed keys if a sliding count is ever needed.
+        self._exp.setdefault(key, self._now() + ttl)
         return h[field]
 
     def counter_get(self, key, field):
@@ -156,31 +168,43 @@ class InMemoryStore(WindowStore):
         self._h.pop(key, None)
         self._exp.pop(key, None)
 
-    def set_add(self, key, member, ttl, cap=None):
-        if not self._alive(key, self._exp):
+    def _live_set(self, key):
+        """Live members of a set, pruning any past their individual expiry (F05: each
+        member ages on its OWN window, so continuous writes to the key cannot keep a
+        stale member alive or grow cardinality without bound). `_s[key]` is a
+        {member: expiry} map."""
+        now = self._now()
+        s = self._s.get(key)
+        if s is None:
+            return {}
+        for m in [m for m, e in s.items() if e <= now]:
+            del s[m]
+        if not s:
             self._s.pop(key, None)
-        s = self._s.setdefault(key, set())
-        if cap is None or len(s) <= cap:
-            s.add(member)
-        self._exp[key] = self._now() + ttl
+        return s
+
+    def set_add(self, key, member, ttl, cap=None):
+        now = self._now()
+        s = self._live_set(key)                     # prune first, so cap counts live members
+        s = self._s.setdefault(key, s)
+        if cap is None or len(s) <= cap or member in s:
+            s[member] = now + ttl                   # each member carries its own expiry
+        self._exp[key] = now + ttl                  # key-level backstop (keys_matching)
 
     def set_len(self, key):
-        return len(self._s.get(key, ())) if self._alive(key, self._exp) else 0
+        return len(self._live_set(key))
 
     def set_contains(self, key, member):
-        return self._alive(key, self._exp) and member in self._s.get(key, ())
+        return member in self._live_set(key)
 
     def set_members(self, key):
-        if not self._alive(key, self._exp):
-            self._s.pop(key, None)
-            return []
-        return list(self._s.get(key, ()))
+        return list(self._live_set(key))
 
     def set_remove(self, key, member):
         # discard only; never create the key or (re)set a TTL (plan 004 U1)
         s = self._s.get(key)
         if s is not None:
-            s.discard(member)
+            s.pop(member, None)
 
     def kv_set(self, key, value, ttl):
         self._kv[key] = (value, self._now() + ttl)
@@ -247,7 +271,7 @@ class RedisStore(WindowStore):
         pipe = self._r.pipeline(transaction=False)
         pipe.zadd(key, {self._json.dumps([score, value]): score})
         pipe.expire(key, int(ttl) + 1)
-        pipe.sadd(idx_key, key)
+        pipe.zadd(idx_key, {key: time.time() + ttl})   # index is an expiry-scored ZSET (F05)
         pipe.expire(idx_key, int(ttl) + 1)
         pipe.execute()
 
@@ -266,34 +290,39 @@ class RedisStore(WindowStore):
         #   ("sadd", key, member, ttl)
         if not ops:
             return
+        now = time.time()
         pipe = self._r.pipeline(transaction=False)
         expd = set()                                         # dedup EXPIREs within the batch: all
         def _exp(k, ttl):                                    # ttls are WINDOW, so one per key suffices --
             if k not in expd:                                # index keys are shared across every entity
                 pipe.expire(k, int(ttl) + 1); expd.add(k)    # on a partition, so this cuts the command
+        def _idx(idx, key, ttl):                             # index is an expiry-scored ZSET (F05):
+            pipe.zadd(idx, {key: now + ttl}); _exp(idx, ttl) # entity keys age out of the index too
         for op in ops:                                       # count (the single-Redis ceiling, R7b) a lot.
             kind = op[0]
             if kind == "win":
                 _, key, idx, score, value, ttl = op
                 pipe.zadd(key, {self._json.dumps([score, value]): score}); _exp(key, ttl)
                 if idx is not None:
-                    pipe.sadd(idx, key); _exp(idx, ttl)
+                    _idx(idx, key, ttl)
             elif kind == "cnt":
                 _, key, field, delta, ttl, idx = op
-                pipe.hincrbyfloat(key, field, delta); _exp(key, ttl)
+                # F05: tumbling window — set TTL only if the counter has none (NX), so
+                # continuous writes don't refresh it into never expiring.
+                pipe.hincrbyfloat(key, field, delta); pipe.expire(key, int(ttl) + 1, nx=True)
                 if idx is not None:
-                    pipe.sadd(idx, key); _exp(idx, ttl)
+                    _idx(idx, key, ttl)
             elif kind == "znx":
                 _, key, member, score, ttl, idx = op
                 pipe.zadd(key, {member: score}, nx=True); _exp(key, ttl)   # NX: keep earliest; TTL activity-refreshed
                 if idx is not None:
-                    pipe.sadd(idx, key); _exp(idx, ttl)
+                    _idx(idx, key, ttl)
             elif kind == "kv":
                 _, key, value, ttl = op
                 pipe.set(key, self._json.dumps(value), ex=int(ttl) + 1)
             elif kind == "sadd":
                 _, key, member, ttl = op
-                pipe.sadd(key, member); _exp(key, ttl)
+                pipe.zadd(key, {member: now + ttl}); _exp(key, ttl)   # expiry-scored ZSET (F05)
         pipe.execute()
 
     def zset_since(self, key, min_score):
@@ -319,7 +348,9 @@ class RedisStore(WindowStore):
     def counter_add(self, key, field, delta, ttl):
         pipe = self._r.pipeline(transaction=False)   # incr + expire in one round-trip
         pipe.hincrbyfloat(key, field, delta)
-        pipe.expire(key, int(ttl) + 1)
+        # F05: tumbling window — TTL set only when the counter has none (NX), so a run of
+        # continuous writes cannot refresh it into living (and accumulating) forever.
+        pipe.expire(key, int(ttl) + 1, nx=True)
         return pipe.execute()[0]
 
     def counter_get(self, key, field):
@@ -329,24 +360,39 @@ class RedisStore(WindowStore):
     def counter_clear(self, key):
         self._r.delete(key)
 
+    # Sets are expiry-scored ZSETs (member -> its own expiry) so each member ages on its
+    # OWN window (F05); reads prune members below `now`, so continuous writes to a key
+    # can't keep a stale member alive or grow cardinality without bound. The partition
+    # index (idx:*) uses the same shape (see pipeline_ops/window_add_indexed) so
+    # set_members over it stays type-consistent.
+    def _prune_set(self, key):
+        self._r.zremrangebyscore(key, "-inf", f"({time.time()}")
+
     def set_add(self, key, member, ttl, cap=None):
-        pipe = self._r.pipeline(transaction=False)   # sadd (+cap) + expire in one round-trip
-        if cap is None or self._r.scard(key) <= cap:
-            pipe.sadd(key, member)
+        now = time.time()
+        if cap is not None:                          # cap counts LIVE members
+            self._prune_set(key)
+            if self._r.zcard(key) > cap and self._r.zscore(key, member) is None:
+                return
+        pipe = self._r.pipeline(transaction=False)   # zadd + expire backstop in one round-trip
+        pipe.zadd(key, {member: now + ttl})
         pipe.expire(key, int(ttl) + 1)
         pipe.execute()
 
     def set_len(self, key):
-        return self._r.scard(key)
+        self._prune_set(key)
+        return self._r.zcard(key)
 
     def set_contains(self, key, member):
-        return bool(self._r.sismember(key, member))
+        self._prune_set(key)
+        return self._r.zscore(key, member) is not None
 
     def set_members(self, key):
-        return list(self._r.smembers(key))          # empty for an expired/absent key
+        self._prune_set(key)
+        return list(self._r.zrange(key, 0, -1))      # remaining members are all still live
 
     def set_remove(self, key, member):
-        self._r.srem(key, member)                   # SREM; no key create, no TTL touch
+        self._r.zrem(key, member)                    # ZREM; no key create, no TTL touch
 
     def kv_set(self, key, value, ttl):
         self._r.set(key, self._json.dumps(value), ex=int(ttl) + 1)

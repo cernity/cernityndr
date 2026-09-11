@@ -82,10 +82,11 @@ def _entity_of(f, ch):
             "SELECT asset_key FROM ndr.asset WHERE tenant_id=%(t)s AND has(ip_set, %(ip)s) LIMIT 1",
             parameters={"t": TENANT, "ip": ip})
         if r.result_rows:
-            return r.result_rows[0][0]
+            return corr.entity_key(TENANT, r.result_rows[0][0])
     except Exception as e:                       # asset spine optional; fall back
         log.debug("asset lookup failed: %s", e)
-    return f"ip:{ip}"
+    # TENANT is the trusted deployment identity, never a finding-supplied field (F08).
+    return corr.entity_key(TENANT, f"ip:{ip}")
 
 
 def _normalize(f, now):
@@ -142,7 +143,8 @@ def evaluate(producer, now):
                 # ClickHouse (ReplacingMergeTree) and finding-service collapse it
                 # instead of creating a duplicate.
                 inc["finding_id"] = f"incident-{ent}-{bucket}-{reason}"
-                producer.send(CANDIDATE_TOPIC, inc)
+                # Key by entity (F08): one host's incidents land on one partition.
+                producer.send(CANDIDATE_TOPIC, inc, key=ent.encode())
                 _emitted.add(key)
                 log.info("INCIDENT %s reason=%s sev=%s findings=%d",
                          ent, reason, inc["severity"], len(items))
@@ -155,7 +157,7 @@ def evaluate(producer, now):
                 continue
             cor = corr.build_corroboration(ent, g, now, tenant=TENANT)
             cor["finding_id"] = f"corrob-{ent}-{bucket}-{cat}"
-            producer.send(CANDIDATE_TOPIC, cor)
+            producer.send(CANDIDATE_TOPIC, cor, key=ent.encode())
             _emitted.add(key)
             log.info("CORROBORATION %s cat=%s sev=%s detectors=%s",
                      ent, cat, cor["severity"], ",".join(g["detectors"]))

@@ -1,9 +1,13 @@
 # Redpanda config template for the SECURE bus. The entrypoint envsubst's
-# ${CERNITY_ADVERTISE_HOST} then starts redpanda with this file. Internal listener
-# (9092) stays plaintext on the private docker net; external (19092) requires
-# SASL/SCRAM-SHA-512 over TLS. The SCRAM superuser is seeded via RP_BOOTSTRAP_USER.
-# NOTE: Redpanda config keys are version-sensitive — validate against the running
-# redpandadata/redpanda:latest on the test env (plan U2 is deploy-verified).
+# ${CERNITY_ADVERTISE_HOST} then starts redpanda with this file. Both listeners
+# authenticate via SASL/SCRAM-SHA-512 because kafka_enable_authorization is enforced
+# cluster-wide (Redpanda denies the unauthenticated/empty principal, so the internal
+# pipeline must authenticate too): internal (9092) is SASL over PLAINTEXT on the
+# private docker net (never published off-box); external (19092) is SASL over TLS for
+# remote sensors. The entrypoint seeds the principals + ACLs then enables enforcement.
+# NOTE: Redpanda config keys are version-sensitive — validated against
+# redpandadata/redpanda v26.2 (rpk security acl / prefixed patterns / empty-principal
+# behavior); re-verify on a major bump.
 redpanda:
   data_directory: /var/lib/redpanda/data
   node_id: 0
@@ -24,10 +28,11 @@ redpanda:
     - name: internal
       address: 0.0.0.0
       port: 9092
+      authentication_method: sasl      # SASL over plaintext (private docker net only)
     - name: external
       address: 0.0.0.0
       port: 19092
-      authentication_method: sasl
+      authentication_method: sasl      # SASL over TLS (kafka_api_tls below)
 
   advertised_kafka_api:
     - name: internal

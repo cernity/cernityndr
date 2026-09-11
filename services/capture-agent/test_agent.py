@@ -128,6 +128,24 @@ def test_lookback_arm_still_requires_validation():
     assert not agent.validate(bad)[0]                # but validation still rejects it
 
 
+# --- U4/F11: per-finding isolation + measured uploader health -------------------
+def test_capture_bpf_isolates_the_finding():
+    # F11: the forward conditional pcap-log is shared across concurrent arms; carve
+    # the finding's own connection so one finding's slice can't leak another's packets.
+    assert agent.capture_bpf({"capture_profile": "ip", "value": "203.0.113.9"}) == "host 203.0.113.9"
+    # app-layer profiles have no packet-level BPF from an IP dataset -> no carve (best effort)
+    assert agent.capture_bpf({"capture_profile": "sni", "value": "evil.com"}) is None
+    # injection guard: a whitespaced value never becomes a BPF
+    assert agent.capture_bpf({"capture_profile": "ip", "value": "1.2.3.4 or 1"}) is None
+
+
+def test_uploader_health_reflects_a_stall():
+    # F11: replace the constant-healthy stub with measured health.
+    assert agent.uploader_healthy(active_jobs=0, secs_since_progress=9999)        # idle = healthy
+    assert agent.uploader_healthy(active_jobs=2, secs_since_progress=5, stale_secs=300)   # recent progress
+    assert not agent.uploader_healthy(active_jobs=1, secs_since_progress=10_000, stale_secs=300)  # stalled
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

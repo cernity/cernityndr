@@ -123,16 +123,23 @@ def lookback_pcaps(entries: list[tuple[str, float]], trigger_ts: float,
     return [p for p, m in sorted(entries, key=lambda e: e[1]) if lo <= m <= hi]
 
 
-def lookback_bpf(directive: dict) -> "str | None":
-    """BPF to carve the finding's connection out of the ring slice. Buildable only
-    for the IP profile (a packet-level host filter); app-layer profiles (sni/ja4/
-    dns) have no packet BPF from an IP-keyed ring, so return None (no carve)."""
+def capture_bpf(directive: dict) -> "str | None":
+    """BPF that isolates the finding's own connection (F11). The forward conditional
+    pcap-log and the rolling ring are both SHARED across concurrent arms, so carving
+    by this filter before upload keeps one finding's slice from leaking another
+    finding's packets. Buildable only for the IP profile (a packet-level host filter);
+    app-layer profiles (sni/ja4/dns) have no packet BPF from an IP-keyed capture, so
+    return None (ship as captured — best effort)."""
     if directive.get("capture_profile", "ip") == "ip":
         value = (directive.get("value") or "").strip()
         # validate() already guarantees no whitespace; guard the shell/BPF anyway
         if value and not any(c.isspace() for c in value):
             return f"host {value}"
     return None
+
+
+# Look-back uses the same per-finding isolation filter as the forward path.
+lookback_bpf = capture_bpf
 
 
 def lookback_key(directive: dict) -> str:
@@ -147,6 +154,20 @@ def budget_ok(active_jobs: int) -> tuple[bool, str]:
     if active_jobs >= LOCAL_MAX_CONCURRENT:
         return False, "agent_max_concurrent"
     return True, "ok"
+
+
+# Measured uploader health (F11): a stalled uploader = jobs in flight but no forward
+# progress (an arm started or a slice shipped) within AGENT_STALE_SECS. Idle (no active
+# jobs) is healthy. Replaces the constant-healthy stub so a wedged MinIO/socket flips
+# the readiness probe instead of silently pretending to be up.
+AGENT_STALE_SECS = float(os.environ.get("AGENT_STALE_SECS", "300"))
+
+
+def uploader_healthy(active_jobs: int, secs_since_progress: float,
+                     stale_secs: float = AGENT_STALE_SECS) -> bool:
+    if active_jobs <= 0:
+        return True
+    return secs_since_progress < stale_secs
 
 
 def ttl_secs(directive: dict) -> int:

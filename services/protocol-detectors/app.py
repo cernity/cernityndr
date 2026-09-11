@@ -48,6 +48,16 @@ def _stable(s):
     return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16)
 
 
+def _fp_hash(v):
+    """Normalize a TLS/QUIC fingerprint to its hash string (F06). Newer Suricata emits
+    ja3/ja3s (and occasionally ja4*) as {"hash": ..., "string": ...} OBJECTS; older builds
+    emit a bare string. The object was used directly as a rarity-set member -> unhashable
+    dict TypeError. Return the hash (falling back to the raw string form)."""
+    if isinstance(v, dict):
+        return v.get("hash") or v.get("string")
+    return v
+
+
 def _fp_rare(fp, kind):
     """Fleet-wide TLS-client-fingerprint rarity via a shared Redis set (mirrors
     proto.is_rare_ja4: warmed up + not previously seen). `kind` is 'ja4' or 'ja3'
@@ -100,7 +110,7 @@ def _handle(e, producer):
         sni = obj.get("sni")
         # Prefer JA4 (newer, more robust); fall back to JA3 so rarity still works
         # if the sensor only emits ja3-fingerprints.
-        ja4, ja3 = obj.get("ja4"), obj.get("ja3")
+        ja4, ja3 = _fp_hash(obj.get("ja4")), _fp_hash(obj.get("ja3"))
         fp, kind = (ja4, "ja4") if ja4 else (ja3, "ja3")
         transport = [{"type": kind, "value": fp}]
         if et != "tls":
@@ -110,7 +120,7 @@ def _handle(e, producer):
                   json.dumps(transport + [{"type": "ip", "role": "src", "value": src},
                                           {"type": "sni", "value": sni}] + _cid(e)))
         # server-side fingerprint rarity (ja4s/ja3s) — rare server fp is a C2 signal
-        sja4, sja3 = obj.get("ja4s"), obj.get("ja3s")
+        sja4, sja3 = _fp_hash(obj.get("ja4s")), _fp_hash(obj.get("ja3s"))
         sfp, skind = (sja4, "ja4s") if sja4 else (sja3, "ja3s")
         if _fp_rare(sfp, skind):
             _emit(producer, "server_fp_rarity", "c2", 5, 0.5,

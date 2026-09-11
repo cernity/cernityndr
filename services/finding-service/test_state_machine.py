@@ -24,7 +24,7 @@ def test_recon_low_severity_is_delivery_suppressed():
     assert route == "final"                       # still on the bus for correlation
     assert f["state"] == "SUPPRESSED"
     assert f["enrichment_state"] == "NOT_REQUIRED"
-    assert f["devo_delivery_state"] == "SUPPRESSED"
+    assert f["state"] == "SUPPRESSED" and f["devo_delivery_state"] == "NONE"  # SUPPRESSED is a state; delivery-state stays a valid enum
     assert f["suppression_reason"]
     assert f["mitre"] == ["T1046"]
 
@@ -103,7 +103,10 @@ def test_g3_confirmed_threat_source_captures_evidence_regardless_of_confidence()
     # finalizes on metadata (unchanged).
     f, route = sm.build_finding({"detector_id": "ids_signature", "category": "c2",
                                  "confidence": 0.9, "severity": 8, "entities": "[]"})
-    assert route == "capture" and f["enrichment_state"] == "REQUIRED"
+    # deliver-now (F01): a confirmed threat reaches the SIEM immediately and still
+    # requests capture for evidence — it never dangles in CAPTURE_REQUESTED.
+    assert route == "final_and_capture" and f["enrichment_state"] == "PENDING"
+    assert f["state"] == "FINAL"
     assert sm.decide_enrichment({"detector_id": "threat_intel", "category": "c2", "confidence": 0.95}) == "packets_needed"
     # nDPI risk alone is a low-confidence feature: it does NOT spend capture budget
     # (corroboration by another detector escalates it), so it finalizes on metadata.
@@ -117,6 +120,55 @@ def test_g3_confirmed_threat_source_captures_evidence_regardless_of_confidence()
     assert sm.decide_enrichment({"detector_id": "beacon", "category": "c2", "confidence": 0.6}) == "packets_needed"
     # a confirmed-threat source still captures for evidence regardless of category
     assert sm.decide_enrichment({"detector_id": "ids_signature", "category": "lateral", "confidence": 0.9}) == "packets_needed"
+
+
+SIG = {"finding_id": "sig-1", "tenant_id": "homelab", "detector_id": "ids_signature",
+       "detector_version": "1", "category": "c2", "severity": 8, "confidence": 0.9,
+       "entities": '[{"type":"ip","role":"dst","value":"203.0.113.9"}]',
+       "sensor_ids": ["sensor-7"], "state": "CANDIDATE"}
+
+
+def test_confirmed_threat_delivered_immediately_and_still_captures():
+    # F01 blocker: a confirmed threat must reach the SIEM immediately, not sit in
+    # CAPTURE_REQUESTED waiting on a forensics overlay that may not be deployed.
+    f, route = sm.build_finding(SIG)
+    assert route == "final_and_capture"
+    assert f["state"] == "FINAL"                    # on the SIEM now
+    assert f["enrichment_state"] == "PENDING"       # evidence follows; it does not gate
+    assert f["devo_delivery_state"] == "QUEUED"
+
+
+def test_capture_job_carries_sensor_and_value():
+    # F01: the orchestrator needs sensor identity + a concrete value; the old job
+    # sent only {finding_id, entities}, so every capture defaulted to sensor-1/ip/''.
+    f, _ = sm.build_finding(SIG)
+    job = sm.capture_job(f)
+    assert job["finding_id"] == "sig-1"
+    assert job["sensor_id"] == "sensor-7"
+    assert job["capture_profile"] == "ip"
+    assert job["value"] == "203.0.113.9"
+
+
+def test_capture_target_prefers_peer_and_maps_domain_to_sni():
+    job = sm.capture_job({"finding_id": "x", "entities":
+                          '[{"type":"ip","role":"src","value":"10.0.0.5"},'
+                          '{"type":"domain","role":"dst","value":"evil.example"}]'})
+    assert job["capture_profile"] == "sni" and job["value"] == "evil.example"
+
+
+def test_capture_job_defaults_when_no_usable_entity():
+    job = sm.capture_job({"finding_id": "x", "entities": "[]"})
+    assert job == {"finding_id": "x", "sensor_id": "sensor-1",
+                   "capture_profile": "ip", "value": "", "entities": "[]"}
+
+
+def test_timeout_finalizes_without_dropping():
+    # An unavailable/absent overlay must not leave a finding PENDING forever.
+    f, _ = sm.build_finding(SIG)
+    done = sm.finalize_timeout(f)
+    assert done["state"] == "FINAL"                 # delivered, never dropped
+    assert done["enrichment_state"] == "TIMEOUT"
+    assert done["devo_delivery_state"] == "QUEUED"
 
 
 if __name__ == "__main__":

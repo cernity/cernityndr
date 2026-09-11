@@ -74,6 +74,17 @@ def test_tsv_parser_reads_zeek_notice_log():
     assert c and c["category"] == "c2" and c["severity"] == 8
 
 
+def test_candidate_is_schema_complete_and_deterministic():
+    # F13: schema-required first_seen/last_seen present (were missing). F07: SHA-1 id
+    # (shared _stable pattern; cross-process stability proven in ids-alerts).
+    import json, pathlib
+    req = json.loads((pathlib.Path(__file__).parents[2] / "contracts"
+                      / "finding.schema.json").read_text())["required"]
+    c = p.to_candidate(INTEL)
+    assert all(k in c for k in req), [k for k in req if k not in c]
+    assert c["finding_id"] == p.to_candidate(INTEL)["finding_id"]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

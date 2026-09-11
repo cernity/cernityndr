@@ -141,11 +141,18 @@ and publishes candidates when something looks wrong.
   beacon seen repeatedly becomes one finding), tags MITRE techniques, **enriches** the
   finding (GeoIP/ASN and community-ID always; optionally reverse-DNS, domain age /
   newly-registered-domain, fingerprint naming, and IP reputation — see
-  `docs/enrichment.md`), decides whether packets are needed, and emits the **final**
-  finding. Optionally records findings in ClickHouse.
+  `docs/enrichment.md`), and emits the **final** finding. A confirmed threat (an IDS
+  signature, threat-intel hit, or known-bad file hash) is **delivered to your SIEM
+  immediately** — if packets are also worth fetching, the capture loop *enriches* that
+  finding later with the evidence; it never withholds delivery waiting on capture, so a
+  confirmed threat reaches you even when the optional forensics overlay isn't deployed.
+  Every capture-bound finding is finalized on the capture result, a refusal, or a
+  timeout — nothing is left dangling. Optionally records findings in ClickHouse.
 - **findings-forwarder** — the exit. Delivers final findings to your SIEM through a
   pluggable adapter (Devo, Splunk, Elasticsearch/OpenSearch, syslog/CEF, webhook, or a
-  file), or several at once. See `docs/siem-integrations.md`.
+  file), or several at once. Delivery is durable: each sink retries then dead-letters on
+  a SIEM outage (never a silent drop), offsets commit only after delivery (at-least-once),
+  and duplicates are dropped by finding id. See `docs/siem-integrations.md`.
 - **correlation-service** — links related findings together (reads ClickHouse).
 - **asset-service** — keeps an inventory of hosts and whether they're internal or
   external, which several detectors use for context.
@@ -153,8 +160,10 @@ and publishes candidates when something looks wrong.
 ### Optional: on-demand packet forensics (the Zeek loop)
 Most detection needs only telemetry. Sometimes you want the actual packets — to prove
 a finding or carve a file. Cernity fetches packets *only when it's worth it*, and only
-for the one connection involved:
-- **finding-service** decides a finding needs packets and sends a **capture request**.
+for the one connection involved. This loop **enriches** a finding (attaching evidence);
+for a confirmed threat the finding is already on your SIEM before the capture runs:
+- **finding-service** decides a finding warrants packets and sends a **capture request**
+  carrying the sensor identity and the exact value to capture.
 - **capture-orchestrator** — *central.* Checks safety limits (is the sensor healthy,
   are we within budget) and, if allowed, sends an **arm** instruction to the sensor.
 - **capture-agent** — *on the sensor.* Receives the arm instruction over the bus (no

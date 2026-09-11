@@ -33,6 +33,24 @@ resources:
   requests: { cpu: "250m", memory: "256Mi" }
   limits:   { cpu: "1",    memory: "512Mi" }
 
+# ---- container hardening (F03) ----------------------------------------------
+# Parity with the Compose deployments: run as non-root, drop all caps, no privilege
+# escalation, read-only root filesystem (a writable emptyDir /tmp is mounted for the
+# services that need scratch space). Applied to every Cernity Deployment pod/container.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534            # nobody
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  capabilities:
+    drop: ["ALL"]
+
 # ---- detector workers --------------------------------------------------------
 # Each entry becomes a Deployment; hpa.enabled adds a HorizontalPodAutoscaler.
 # CPU-based HPA is the built-in default. For scaling on Kafka consumer-group lag

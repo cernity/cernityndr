@@ -76,6 +76,52 @@ def test_inmemory_ttl_expiry():
     assert s.counter_get("c:t", "b") == 0, "expired counter cleared"
 
 
+def test_set_members_age_individually_under_continuous_writes():
+    # F05: an old member must expire on its OWN window even while new members keep the
+    # key busy. The audit's leak: whole-key TTL refreshed on every write, so the set
+    # (prevalence/spray/scan/known-dst baseline) grows without bound and never ages.
+    clk = [1000.0]
+    s = st.InMemoryStore(clock=lambda: clk[0])
+    s.set_add("pv:t:dst", "old-src", ttl=600)
+    for i in range(8):                              # continuous new members every 100s
+        clk[0] += 100
+        s.set_add("pv:t:dst", f"src{i}", ttl=600)
+    assert not s.set_contains("pv:t:dst", "old-src"), "old member survived past its window"
+    assert s.set_len("pv:t:dst") <= 7, "set cardinality not bounded to the window"
+
+
+def test_counter_bounded_under_continuous_writes():
+    # F05: a windowed counter must not carry a previous window's counts just because
+    # new writes keep refreshing the key (ssh/icmp brute counters).
+    clk = [1000.0]
+    s = st.InMemoryStore(clock=lambda: clk[0])
+    for _ in range(11):                             # 11 writes across 1000s, window 600s
+        s.counter_add("ssh:t:a|b", "n", 1, ttl=600)
+        clk[0] += 100
+    assert s.counter_get("ssh:t:a|b", "n") <= 7, "counter accumulated past its window"
+
+
+def test_redis_set_and_counter_age_by_window():
+    # F05 on the PRODUCTION backend: per-member set aging + tumbling counter, proven with
+    # a real short TTL. Skipped when no Redis is configured (the offline gate stays fast).
+    url = os.environ.get("NDR_TEST_REDIS_URL")
+    if not url:
+        print("  (redis aging test skipped: no NDR_TEST_REDIS_URL)")
+        return
+    r = st.RedisStore(url)
+    r._r.flushdb()
+    r.set_add("agez", "old", ttl=1)
+    r.counter_add("cagez", "n", 3, ttl=1)
+    time.sleep(2.3)   # past both the member score (now+ttl) and the counter TTL (int(ttl)+1)
+    r.set_add("agez", "new", ttl=60)                 # continuous write keeps the key busy
+    assert r.set_members("agez") == ["new"], "redis: old set member did not age out"
+    assert not r.set_contains("agez", "old")
+    assert r.set_len("agez") == 1
+    got = r.counter_add("cagez", "n", 1, ttl=60)     # window rolled -> fresh, not 4
+    assert got == 1, f"redis: counter did not tumble ({got})"
+    print("ok  redis set+counter age by window")
+
+
 def test_inmemory_restart_survival_is_backend_property():
     # the in-memory store does NOT survive a handle drop (that is why redis exists);
     # this documents the contract: a fresh InMemoryStore starts empty.

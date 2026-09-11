@@ -66,16 +66,30 @@ services:
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       SENSOR_ID: ${NDR_SENSOR:-sensor-1}
+      # Authenticated bus (F11): the agent reaches the CENTRAL external listener
+      # (SASL/SCRAM over TLS) with the SAME produce-only sensor credential as the
+      # shipper — never a superuser. Set NDR_BUS_SASL_MECHANISM= (empty) for a
+      # plaintext demo bus.
+      NDR_BUS_SASL_MECHANISM: ${NDR_BUS_SASL_MECHANISM-SCRAM-SHA-512}
+      NDR_BUS_SASL_USER: ${CERNITY_BUS_USER:-cernity-sensor}
+      NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
+      NDR_BUS_TLS_CA: /certs/ca.crt
       SURICATA_SOCKET: /var/run/suricata/suricata-command.socket
       PCAP_DIR: /var/log/suricata/ndr-capture
       RING_DIR: /var/log/suricata/ndr-ring
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-cernity}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-cernitydemo}
+      # Least-privilege object-store credential (F11): a MinIO key scoped to
+      # PutObject on ndr-pcap/ndr-files only — NOT the MinIO root key. Create it on
+      # the central MinIO first (see docs/getting-started.md); the demo default is
+      # unprivileged-in-name-only and must be replaced for production.
+      AWS_ACCESS_KEY_ID: ${CERNITY_MINIO_CAPTURE_USER:-cernity}
+      AWS_SECRET_ACCESS_KEY: ${CERNITY_MINIO_CAPTURE_PASSWORD:-cernitydemo}
       PCAP_BUCKET: ndr-pcap
       FILES_BUCKET: ndr-files
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
+      # the CA that signed the bus's server cert (copied from the central host)
+      - ${CERNITY_BUS_CA:-./ca.crt}:/certs/ca.crt:ro
       # Suricata's command socket + pcap output dir (read-write for capture)
       - ${SURICATA_RUN_DIR:-/var/run/suricata}:/var/run/suricata
       - ${SURICATA_LOG_DIR:-/var/log/suricata}:/var/log/suricata

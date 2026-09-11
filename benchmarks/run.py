@@ -58,18 +58,57 @@ def determinism_hash(*paths) -> str:
     return h.hexdigest()[:16]
 
 
-def os_search(endpoint, index, size=10000) -> list:
-    """Fetch documents from an OpenSearch index (best-effort; empty on error)."""
-    url = f"{endpoint}/{index}/_search?size={size}"
-    body = json.dumps({"query": {"match_all": {}}}).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            hits = json.loads(r.read()).get("hits", {}).get("hits", [])
-        return [h.get("_source", {}) for h in hits]
-    except Exception as e:                       # noqa: BLE001 - report the gap, don't crash
-        print(f"  ! OpenSearch query {index} failed: {e}", file=sys.stderr)
-        return []
+def _http_fetch(endpoint, index, body):
+    url = f"{endpoint}/{index}/_search"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read()).get("hits", {}).get("hits", [])
+
+
+def os_search(endpoint, index, page=10000, fetch=None, strict=True) -> list:
+    """ALL documents from an index, paginating past the 10k max_result_window via
+    search_after (F10: the old `size=10000` SILENTLY TRUNCATED at 10k, so any arm with more
+    than 10k docs scored wrong). On a query/engine error, RAISE in strict mode — the
+    benchmark must fail loudly, never report a silent empty arm as '0 detections'."""
+    fetch = fetch or _http_fetch
+    out, after = [], None
+    while True:
+        body = {"size": page, "sort": [{"_doc": "asc"}], "query": {"match_all": {}}}
+        if after is not None:
+            body["search_after"] = after
+        try:
+            hits = fetch(endpoint, index, body)
+        except Exception as e:                       # noqa: BLE001
+            if strict:
+                raise RuntimeError(f"OpenSearch query '{index}' failed: {e}") from e
+            print(f"  ! OpenSearch query {index} failed (non-strict): {e}", file=sys.stderr)
+            return out
+        if not hits:
+            break
+        out += [h.get("_source", {}) for h in hits]
+        after = hits[-1].get("sort")
+        if len(hits) < page or not after:
+            break
+    return out
+
+
+def wait_for_ingest(endpoint, indices, min_docs=1, tries=30, delay=2.0,
+                    count=None, sleep=None) -> None:
+    """Poll until every arm index has SETTLED (>= min_docs and stable across two polls),
+    else RAISE (F10). A run that never ingested/delivered fails loudly here instead of
+    silently scoring an empty arm — 'wait for ingestion/delivery', not just the engine."""
+    import time as _t
+    count = count or (lambda idx: len(os_search(endpoint, idx, strict=False)))
+    sleep = sleep or _t.sleep
+    prev = {i: -1 for i in indices}
+    for _ in range(tries):
+        cur = {i: count(i) for i in indices}
+        if all(cur[i] >= min_docs and cur[i] == prev[i] for i in indices):
+            return
+        prev = cur
+        sleep(delay)
+    raise RuntimeError(f"ingestion did not settle after {tries} tries: {prev} (need >= {min_docs})")
 
 
 def compose(*args):
@@ -101,10 +140,12 @@ def run_full(scenario: str, out_dir: str) -> str:
     compose("up", "-d", "--build")
     print("[2] waiting for offline engines to finish + arms to ship (see compose logs)")
     subprocess.run(["docker", "wait", "cernity-bench-suricata"], check=False)
-    # ships + Cernity settle; run.py polls OpenSearch until counts stabilise (omitted here).
-    print("[3] querying both arms from OpenSearch")
+    print("[2b] waiting for ingestion/delivery to settle across all arms")
+    wait_for_ingest(endpoint, ["arm-a-suricata", "arm-b-findings-*", "arm-c-zeek"])
+    print("[3] querying all arms from OpenSearch (fail-loud, paginated)")
     arm_a = os_search(endpoint, "arm-a-suricata")
     arm_b = os_search(endpoint, "arm-b-findings-*")
+    arm_c = os_search(endpoint, "arm-c-zeek")               # Zeek-notice reference arm (F10)
     gran = labels.get("granularity", "host")
     truth = set(labels["malicious"])
     arms_raw = {
@@ -113,6 +154,9 @@ def run_full(scenario: str, out_dir: str) -> str:
                           "delivered": _count_alerts(arm_a)},
         "cernity_siem": {"flagged": extract.flagged_from_findings(arm_b, gran),
                          "raw_events": len(arm_a), "alerts": len(arm_b), "delivered": len(arm_b)},
+        # Zeek reference arm: notices are alert-shaped, so reuse flagged_from_alerts.
+        "zeek_reference": {"flagged": extract.flagged_from_alerts(arm_c, gran),
+                           "raw_events": len(arm_c), "alerts": len(arm_c), "delivered": len(arm_c)},
     }
     meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),
             "granularity": f"per-{gran}",
@@ -132,7 +176,13 @@ def _count_alerts(docs):
 
 
 def _eve_paths():
-    return []   # populated when reading from a mounted volume in a real run
+    """Real engine output files to hash for the determinism proof (F10: was [] so the
+    hash was over nothing). Set BENCH_EVE_DIR to the mounted volume holding the
+    Suricata/Zeek EVE outputs; every file under it is hashed."""
+    d = os.environ.get("BENCH_EVE_DIR")
+    if not d or not os.path.isdir(d):
+        return []
+    return [os.path.join(root, f) for root, _dirs, files in os.walk(d) for f in sorted(files)]
 
 
 def _write(results: dict, out_dir: str) -> str:

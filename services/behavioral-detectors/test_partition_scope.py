@@ -264,6 +264,23 @@ def test_index_warmup_then_appears():
     assert "bc:4:homelab:10.0.0.9|203.0.113.9" in app._scoped_keys("bc:", {4})
 
 
+def test_cdn_ip_does_not_suppress_domain_beacon_accumulation():
+    # F06: a beacon to a specific DOMAIN is signal even when the IP is a CDN
+    # (domain-fronting C2). The old code gated the FQDN-beacon window behind the CDN-IP
+    # noise filter, so a Cloudflare-fronted C2 was never accumulated. Now the domain
+    # window fills regardless of the CDN IP, while the raw-IP beacon stays noise-gated.
+    st = _fresh()
+    app._i2d_cache.clear()
+    cdn, src, dom = "104.16.1.1", "10.0.0.5", "evil.example.com"   # 104.16. is a CDN prefix
+    assert app.det.beacon_noise_dst(cdn)                            # the IP alone IS noise
+    st.kv_set(f"i2d:homelab:{cdn}", [dom, time.time()], 600)       # this dst resolved to a domain
+    app._handle({"event_type": "flow", "src_ip": src, "dest_ip": cdn,
+                 "flow": {"bytes_toserver": 200, "bytes_toclient": 200}}, _P(), time.time(), part=0)
+    app._flush_pending()
+    assert st.window_range(f"bf:0:homelab:{src}|{dom}", 0), "domain-beacon suppressed by CDN gate"
+    assert st.window_range(f"bc:0:homelab:{src}|{cdn}", 0) == [], "raw-IP beacon to a CDN should stay noise-gated"
+
+
 if __name__ == "__main__":
     for _n, _f in sorted(globals().items()):
         if _n.startswith("test_") and callable(_f):

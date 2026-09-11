@@ -6,13 +6,20 @@ traffic appears.
 """
 from __future__ import annotations
 
-PRIVATE_PREFIXES = ("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
-                    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-                    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")
+import ipaddress
 
 
 def is_internal(ip: str) -> bool:
-    return bool(ip) and any(ip.startswith(p) for p in PRIVATE_PREFIXES)
+    """RFC1918 (IPv4) or ULA/link-local (IPv6). Uses `ipaddress` so east-west detection
+    is not blind to IPv6 (F06): fc00::/7 (ULA) and fe80::/10 (link-local) are internal,
+    globally-routable v6 is external — parity with the IPv4 private ranges."""
+    if not ip:
+        return False
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a.is_private or a.is_link_local
 
 
 # admin / remote-exec ports that carry lateral movement (T1021).
@@ -71,6 +78,25 @@ def dcerpc_lateral(interface_uuid: str) -> tuple[bool, str]:
     if u in LATERAL_DCERPC_UUIDS:
         return True, LATERAL_DCERPC_UUIDS[u]
     return False, ""
+
+
+def dcerpc_uuids(dcerpc) -> list:
+    """Interface UUIDs from a Suricata dcerpc object across versions (F06): the current
+    `interfaces` array of {uuid,...} (the shape real EVE emits — the old scalar read
+    produced zero findings), plus the older scalar `interface_uuid`/`interface`. Also
+    used for DCERPC-over-SMB (the nested `smb.dcerpc`). Deduped, in order."""
+    if not isinstance(dcerpc, dict):
+        return []
+    out = []
+    for it in dcerpc.get("interfaces") or []:
+        u = it.get("uuid") if isinstance(it, dict) else it
+        if u and u not in out:
+            out.append(u)
+    for k in ("interface_uuid", "interface"):
+        v = dcerpc.get(k)
+        if v and v not in out:
+            out.append(v)
+    return out
 
 
 def spray_score(distinct_failed_principals: set, min_principals: int = 10) -> tuple[bool, int]:

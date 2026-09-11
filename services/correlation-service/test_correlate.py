@@ -154,6 +154,37 @@ def test_corroboration_output_never_re_corroborates_or_inflates():
     assert c.should_incident(fs, now=1000) == c.should_incident([fs[2], fs[3]], now=1000)
 
 
+def test_slips_threat_intel_is_not_ml_corroboration():
+    # F12: slips_intel (a SLIPS blocklist/threat-intel lookup) + a heuristic on the same
+    # category is NOT ML×heuristic agreement — two non-ML sources are not ML backing.
+    fs = [_f("i", "slips_intel", "c2", 6, 1000), _f("b", "beacon", "c2", 7, 1000)]
+    assert c.find_corroborations(fs) == []
+    # a genuine SLIPS ML module + the independent heuristic DOES corroborate.
+    fs2 = [_f("m", "slips_ml", "c2", 6, 1000), _f("b", "beacon", "c2", 7, 1000)]
+    assert len(c.find_corroborations(fs2)) == 1
+
+
+def test_entity_key_is_tenant_scoped_and_stable():
+    # F08: the correlation/partition key is stable per entity, so one host's history
+    # never splits across replicas.
+    assert c.entity_key("acme", "ip:10.0.0.5") == c.entity_key("acme", "ip:10.0.0.5")
+    # and it is tenant-scoped: the SAME ip under two tenants is two distinct entities,
+    # so their histories can never be mixed by a shared store.
+    assert c.entity_key("acme", "ip:10.0.0.5") != c.entity_key("globex", "ip:10.0.0.5")
+
+
+def test_entity_key_ignores_spoofed_message_tenant():
+    # F08: the key is built from the AUTHENTICATED tenant (arg), never a client-supplied
+    # field — so a raw record carrying a forged `tenant` cannot cross tenants.
+    trusted = "acme"
+    spoofed_a = {"tenant": "globex", "entities": "[]"}
+    spoofed_b = {"tenant_id": "evilcorp", "entities": "[]"}
+    ka = c.entity_key(trusted, "ip:10.0.0.5")     # trusted arg, spoofed fields unused
+    kb = c.entity_key(trusted, "ip:10.0.0.5")
+    assert ka == kb                                # same trusted tenant -> same entity
+    assert spoofed_a.get("tenant") not in ka and spoofed_b.get("tenant_id") not in ka
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

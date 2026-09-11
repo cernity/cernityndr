@@ -46,4 +46,7 @@ rpk security user create "$CERNITY_BUS_USER" -p "$CERNITY_BUS_PASSWORD" \
   && echo "Cernity bus: created SCRAM user '$CERNITY_BUS_USER'" >&2 \
   || echo "Cernity bus: SCRAM user '$CERNITY_BUS_USER' already exists" >&2
 rpk cluster config set superusers "['$CERNITY_BUS_USER']" -X admin.hosts="$ADMIN" >/dev/null 2>&1 || true
+# Detectors/shippers rely on topics appearing on first produce (as with the stock
+# flag-based start); the custom config path needs this set explicitly.
+rpk cluster config set auto_create_topics_enabled true -X admin.hosts="$ADMIN" >/dev/null 2>&1 || true
 wait "$RP"

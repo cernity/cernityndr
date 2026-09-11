@@ -27,11 +27,16 @@ sensor keeps inspecting packets at line rate instead of competing for resources.
 ## Cernity turns Suricata into a full NDR
 
 Suricata is a world-class **IDS and edge sensor** — but on its own it isn't a full
-**Network Detection and Response** platform: an IDS has no memory of what a host did over
-the last ten minutes, no central analytics, no findings lifecycle, no enrichment, and no
-response path. **Cernity is the add-on that supplies exactly those missing NDR
-capabilities.** Suricata inspects; Cernity remembers, analyzes, enriches, prioritizes, and
-delivers finished findings to your SIEM.
+**Network Detection and Response** platform. Its stateful facilities (flow state, flowbits,
+cross-flow tracking) are edge- and rule-scoped; it isn't built for **central, cross-host,
+long-window behavioral analytics**, a findings lifecycle, enrichment, or a response path.
+**Cernity is the add-on that supplies those NDR capabilities.** Suricata inspects; Cernity
+remembers across the fleet, analyzes, enriches, prioritizes, and delivers findings to your SIEM.
+
+> **Maturity note:** an [independent audit](docs/cernity-independent-audit.md) verified the core
+> analytics path and found real gaps (confirmed-threat finalization, per-sensor trust boundary,
+> some deployment paths). See the [audit response](docs/audit-response.md) for verified-today vs.
+> the v0.4 roadmap.
 
 | NDR capability | What Suricata gives | What Cernity adds |
 |---|---|---|
@@ -195,6 +200,7 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Documentation
 
 - [**Getting started**](docs/getting-started.md) — add Cernity to your Suricata sensor + wire your SIEM, step by step
+- [**Executive summary**](docs/executive-summary.md) — what Cernity is, the problem it solves, and how, in one read
 - [**How Cernity works**](docs/how-it-works.md) — the whole system in plain language, every piece explained
 - [How Cernity completes Suricata into an NDR](docs/ndr-coverage.md) — each NDR capability area and how it's covered
 - [Suricata vs Zeek logging parity](docs/suricata-zeek-parity.md) — how Suricata EVE covers what Zeek logs, and the honest gaps

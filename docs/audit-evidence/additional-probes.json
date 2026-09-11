@@ -1,0 +1,6 @@
+{
+  "ja3": "TypeError(\"unhashable type: 'dict'\")",
+  "suppressed_schema_errors": [
+    "'SUPPRESSED' is not one of ['NONE', 'QUEUED', 'SENT']"
+  ]
+}

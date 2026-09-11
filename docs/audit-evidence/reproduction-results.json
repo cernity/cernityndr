@@ -1,0 +1,39 @@
+{
+  "confirmed_signature": {
+    "route": "capture",
+    "state": "CAPTURE_REQUESTED"
+  },
+  "capture_request_agent_validation": [
+    false,
+    "empty value"
+  ],
+  "window_after_601_seconds": {
+    "counter": 101,
+    "members": [
+      "new",
+      "old"
+    ]
+  },
+  "documented_rpc_pipe_candidates": 0,
+  "cdn_beacon_windows": {
+    "ip": [],
+    "domain": []
+  },
+  "forwarder_accepts_candidate": 1,
+  "duplicate_builds_identical_no_admission_state": true,
+  "forwarder_env_keys": [
+    "CERNITY_SINK",
+    "CERNITY_SINK_FILE",
+    "LOG_LEVEL",
+    "REDPANDA_BOOTSTRAP"
+  ],
+  "central_state_backend": "memory",
+  "ids_candidate_schema_errors": [
+    "'first_seen' is a required property",
+    "'last_seen' is a required property"
+  ],
+  "ids_ids_different_process_seeds": [
+    "idsig-1-2500307666",
+    "idsig-1-9750056365"
+  ]
+}

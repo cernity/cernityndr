@@ -1,0 +1,5 @@
+{
+  "unauthenticated": "UnrecognizedBrokerVersion",
+  "authenticated": "connected",
+  "sensor_can_publish_final": "yes"
+}

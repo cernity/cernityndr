@@ -1,0 +1,29 @@
+{
+  "ndr.capture.request.v1": [
+    {
+      "finding_id": "audit-signature",
+      "entities": "[{\"type\":\"ip\",\"role\":\"src\",\"value\":\"192.0.2.10\"}]"
+    },
+    {
+      "finding_id": "audit-signature",
+      "entities": "[{\"type\":\"ip\",\"role\":\"src\",\"value\":\"192.0.2.10\"}]"
+    },
+    {
+      "finding_id": "audit-threat-intel",
+      "entities": "[{\"type\":\"ip\",\"role\":\"src\",\"value\":\"192.0.2.10\"}]"
+    },
+    {
+      "finding_id": "audit-threat-intel",
+      "entities": "[{\"type\":\"ip\",\"role\":\"src\",\"value\":\"192.0.2.10\"}]"
+    }
+  ],
+  "ndr.enrichment.result.v1": [
+    {
+      "finding_id": "audit-signature",
+      "status": "ok",
+      "evidence_refs": [
+        "audit://evidence"
+      ]
+    }
+  ]
+}

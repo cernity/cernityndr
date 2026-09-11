@@ -125,7 +125,10 @@ and publishes candidates when something looks wrong.
   spreading between machines: SMB/RDP/DCE-RPC/Kerberos fan-out, internal scanning,
   **password spraying** (one source failing auth across many accounts), **AS-REP
   roasting**, **ransomware over SMB** (a write-heavy file flood across many shares),
-  and **remote-exec lateral movement** (PsExec/WMI/scheduled-task named pipes).
+  **remote-exec lateral movement** (PsExec/WMI/scheduled-task named pipes), and
+  **LLMNR/mDNS poisoning** (a Responder-style host answering many names it doesn't own).
+  These need east-west Windows/AD traffic to fire, so they stay quiet on a flat network
+  with none — to see them work, replay the bundled attack fixture (below).
 - **anomaly-detector** — statistical outliers over the flow telemetry.
 - **coverage-detector** — a health signal: is the sensor actually mirroring the traffic
   we expect to see? Silence can mean a blind spot, not safety.

@@ -62,6 +62,16 @@ def test_detections_from_findings_parses_roles_and_id():
     assert d[0]["entities"] == [{"value": "10.0.0.5", "role": "src"}]
 
 
+def test_detections_from_findings_includes_domain_entities():
+    # an FQDN-beacon finding implicates a DOMAIN, not just an ip — both must be matchable.
+    docs = [{"category": "c2", "entities": json.dumps([
+        {"type": "ip", "role": "src", "value": "10.0.0.5"},
+        {"type": "domain", "role": "c2", "value": "evil.example"},
+        {"type": "rotating_ips", "value": 4}])}]
+    vals = {e["value"] for e in x.detections_from_findings(docs)[0]["entities"]}
+    assert vals == {"10.0.0.5", "evil.example"}
+
+
 def test_build_results_composes_accuracy_and_noise():
     meta = {"scenario": "t", "granularity": "per-host"}
     arms = {

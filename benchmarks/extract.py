@@ -77,14 +77,18 @@ def _alert_behavior(d) -> str | None:
     return cat or None
 
 
-def _ip_entities(raw):
-    """[{value, role}] for the ip-typed entities in a finding's `entities` (a JSON string)."""
+_MATCH_ENTITY_TYPES = ("ip", "domain", "community_id")
+
+
+def _finding_entities(raw):
+    """[{value, role}] for the matchable entities in a finding's `entities` (a JSON string):
+    ip, domain (FQDN-beacon implicates a domain, not an ip), and community_id."""
     try:
         ents = json.loads(raw) if isinstance(raw, str) else (raw or [])
     except (ValueError, TypeError):
         ents = []
     return [{"value": e.get("value"), "role": e.get("role")}
-            for e in ents if e.get("type") == "ip" and e.get("value")]
+            for e in ents if e.get("type") in _MATCH_ENTITY_TYPES and e.get("value")]
 
 
 def _endpoint_entities(d):
@@ -100,7 +104,7 @@ def detections_from_alerts(docs):
 
 def detections_from_findings(docs):
     """Cernity finding docs -> episode detections (entities already carry roles)."""
-    return [{"entities": _ip_entities(d.get("entities")), "behavior": d.get("category"),
+    return [{"entities": _finding_entities(d.get("entities")), "behavior": d.get("category"),
              "finding_id": d.get("finding_id"), "tenant": d.get("tenant", "default")}
             for d in docs]
 

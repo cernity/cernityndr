@@ -1,0 +1,18 @@
+{
+  "dataset": "synthetic-fqdn-beacon (built-in, S03)",
+  "granularity": "host",
+  "malicious": ["10.0.0.5"],
+  "episodes": [
+    {"id": "fqdn-beacon-1", "label": "malicious", "behavior": "c2",
+     "entities": [{"value": "10.0.0.5", "role": "initiator"},
+                  {"value": "evil.example", "role": "target"}]}
+  ],
+  "honesty": [
+    "S03: one callback domain (evil.example) rotating its A-record across 4 IPs; the beacon is regular when aggregated BY DOMAIN via the detector's ip->domain cache (built from DNS answers). Tests domain aggregation and selectivity.",
+    "The finding implicates the DOMAIN entity (fqdn-beacon), so the scorer matches on the domain value; requires DNS answers in the capture."
+  ],
+  "caveats": [
+    "Synthetic; a single rotating-domain host is not a prevalence sample.",
+    "Documentation-range IPs; no real infrastructure contacted."
+  ]
+}

@@ -25,8 +25,9 @@
       "behavior": "c2",
       "control": "synthetic-benign",
       "set": "development",
-      "status": "built",
-      "question": "domain aggregation works and stays selective"
+      "status": "validated",
+      "question": "domain aggregation works and stays selective",
+      "note": "detector aggregates to the registered domain (evil.example); finding also carries src ip so the episode matches"
     },
     "S04": {
       "name": "internal scan + lateral fan-out",
@@ -68,12 +69,13 @@
     },
     "S08": {
       "name": "repeated copies of a signature episode (dedup)",
-      "scenario": "synthetic-beacon",
+      "scenario": "synthetic-dedup",
       "behavior": "c2",
       "control": "synthetic-benign",
       "set": "development",
-      "status": "built",
-      "question": "dedup reduces repetition without hiding a new incident"
+      "status": "validated",
+      "question": "dedup reduces repetition without hiding a new incident",
+      "note": "two distinct C2 beacons: both surface (recall 2/2), 40 connections -> ~4 findings (dedup reduces repetition without hiding the 2nd incident); behavioural-beacon dedup, not signature"
     },
     "S09": {
       "name": "scan -> lateral -> callbacks (correlation)",

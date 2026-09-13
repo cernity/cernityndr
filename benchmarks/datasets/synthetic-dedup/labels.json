@@ -1,0 +1,19 @@
+{
+  "dataset": "synthetic-dedup (built-in, S08)",
+  "granularity": "host",
+  "malicious": ["10.0.0.5"],
+  "episodes": [
+    {"id": "dedup-c2-a", "label": "malicious", "behavior": "c2",
+     "entities": [{"value": "10.0.0.5", "role": "initiator"}, {"value": "203.0.113.66", "role": "target"}]},
+    {"id": "dedup-c2-b", "label": "malicious", "behavior": "c2",
+     "entities": [{"value": "10.0.0.5", "role": "initiator"}, {"value": "198.51.100.77", "role": "target"}]}
+  ],
+  "honesty": [
+    "S08 (dedup intent): one host beacons to TWO distinct C2s, ~20 near-identical callbacks each. Success = both incidents surfaced (recall 2/2) while each beacon collapses its ~20 repeated connections to roughly one finding — repetition reduced without hiding the second incident. This uses the behavioural beacon path (per-(src,dst) dedup), not a Suricata signature; it tests the dedup INTENT of S06 in the plan matrix.",
+    "Analyst-item count per episode (relevant_items vs episodes) is the dedup evidence: many connections, few findings."
+  ],
+  "caveats": [
+    "Synthetic; two synthetic incidents are not a prevalence sample.",
+    "Both C2s are documentation-range addresses; no real infrastructure is contacted."
+  ]
+}

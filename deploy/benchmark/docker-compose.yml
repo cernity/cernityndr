@@ -108,8 +108,10 @@ services:
       # Paced replay by default (§5): honour the pcap's recorded inter-arrival timing instead
       # of bursting, so event-time and processing-clock stay aligned. Set CERNITY_FEED_PACED=0
       # for a fast burst smoke. Scenarios use a compressed real timespan so paced runs stay short.
+      # CERNITY_FEED_MAX_GAP is UNSET by default (true timing); setting it is a labelled idle-gap
+      # compression that is NOT timing-equivalent.
       CERNITY_FEED_PACED: ${CERNITY_FEED_PACED-1}
-      CERNITY_FEED_MAX_GAP: ${CERNITY_FEED_MAX_GAP-10}
+      CERNITY_FEED_MAX_GAP: ${CERNITY_FEED_MAX_GAP-}
       # Authenticate as the produce-only SENSOR principal when the bus is secured. The
       # shared CERNITY_BUS_CENTRAL_MECHANISM toggle (empty in the insecure recipe) turns
       # SASL off for the feeder too; a secure run leaves it unset -> SCRAM-SHA-512.

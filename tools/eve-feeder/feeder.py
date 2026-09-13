@@ -70,19 +70,25 @@ def reanchor(events, now=None, anchor="end"):
     return events
 
 
-def paced_offsets(events, speed=1.0):
+def paced_offsets(events, speed=1.0, max_gap=None):
     """Wall-clock offset in seconds (from the first timestamped event) at which each event
-    should be sent for paced replay (M1.6/§5): the feeder honours the recorded inter-arrival
-    timing instead of bursting, so event-time and processing-clock stay aligned. `speed` >1
-    compresses the schedule (a labelled acceleration, validated separately per §5). Events with
-    no timestamp inherit the previous offset. Assumes events are ascending by timestamp."""
-    offs, base, last = [], None, 0.0
+    should be sent for paced replay (M1.6/§5). Default: the TRUE recorded inter-arrival timing,
+    so event-time and processing-clock stay aligned. `speed`>1 compresses the whole schedule
+    uniformly (a labelled acceleration). `max_gap`, if set, caps each inter-event IDLE gap — a
+    SEPARATE, explicitly-labelled transformation that BREAKS timing-equivalence; leave it unset
+    for accuracy. Untimestamped events inherit the previous offset; out-of-order deltas clamp to
+    0. Assumes events are ascending by timestamp."""
+    offs, prev_t, cum = [], None, 0.0
     for e in events:
         t = _parse(e.get("timestamp"))
         if t is not None:
-            base = base if base is not None else t
-            last = (t - base).total_seconds() / (speed or 1.0)
-        offs.append(last)
+            if prev_t is not None:
+                delta = max(0.0, (t - prev_t).total_seconds())
+                if max_gap is not None:
+                    delta = min(delta, max_gap)
+                cum += delta / (speed or 1.0)
+            prev_t = t
+        offs.append(cum)
     return offs
 
 
@@ -100,15 +106,19 @@ def main(path):
                       **_security_kwargs())
     n = 0
     if paced:
-        # Honour recorded inter-arrival timing (§5). max_gap bounds any long idle stretch so a
-        # sparse fixture does not stall the run; speed>1 compresses (labelled acceleration).
-        offsets = paced_offsets(events, float(os.environ.get("CERNITY_FEED_SPEED", "1") or "1"))
-        max_gap = float(os.environ.get("CERNITY_FEED_MAX_GAP", "10"))
+        # Honour recorded inter-arrival timing (§5). CERNITY_FEED_MAX_GAP (if set) is a LABELLED
+        # idle-gap compression applied to the SCHEDULE — it is not timing-equivalent; unset =
+        # true timing. speed>1 compresses uniformly (also labelled).
+        _mg = os.environ.get("CERNITY_FEED_MAX_GAP", "").strip()
+        offsets = paced_offsets(events, float(os.environ.get("CERNITY_FEED_SPEED", "1") or "1"),
+                                float(_mg) if _mg else None)
         start = time.monotonic()
         for ev, off in zip(events, offsets):
-            delay = min(off - (time.monotonic() - start), max_gap)
-            if delay > 0:
-                time.sleep(delay)
+            while True:                       # wait to the FULL scheduled deadline, never a cap
+                remaining = off - (time.monotonic() - start)
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 1.0))   # interruptible 1s increments; keep waiting
             topic, key = route(ev)
             p.send(topic, key=key, value=ev)
             n += 1

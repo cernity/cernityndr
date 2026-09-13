@@ -17,6 +17,20 @@ def test_paced_offsets_untimestamped_inherits_previous():
     assert paced_offsets(evs) == [0.0, 0.0, 4.0]
 
 
+def test_paced_offsets_max_gap_caps_idle_but_default_is_true_timing():
+    evs = [{"timestamp": "2026-01-01T00:00:00+00:00"},
+           {"timestamp": "2026-01-01T00:01:00+00:00"},   # 60s gap
+           {"timestamp": "2026-01-01T00:01:05+00:00"}]   # +5s
+    assert paced_offsets(evs) == [0.0, 60.0, 65.0]                 # default: true timing, no cap
+    assert paced_offsets(evs, max_gap=10) == [0.0, 10.0, 15.0]     # labelled idle-gap compression
+
+
+def test_paced_offsets_clamps_out_of_order_delta():
+    evs = [{"timestamp": "2026-01-01T00:00:10+00:00"},
+           {"timestamp": "2026-01-01T00:00:05+00:00"}]   # earlier than previous
+    assert paced_offsets(evs) == [0.0, 0.0]                        # negative delta clamps to 0
+
+
 def test_reanchor_anchor_start_vs_end():
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     def mk():

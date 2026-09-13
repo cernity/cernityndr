@@ -1,0 +1,13 @@
+{
+  "dataset": "synthetic-benign (built-in)",
+  "granularity": "host",
+  "malicious": [],
+  "honesty": [
+    "Benign-only workload (S10): ordinary DNS + HTTP on standard ports, no attack and no malicious host. Both arms should complete with zero relevant detections. This validates valid-empty completion and the empty-output semantics, NOT detection accuracy.",
+    "Zero findings here is the CORRECT outcome, not a pipeline failure."
+  ],
+  "caveats": [
+    "Synthetic, hand-built benign scenario for the M1.4/§9 empty-output-semantics gate.",
+    "Offline replay measures completion and analyst-volume behaviour, not throughput."
+  ]
+}

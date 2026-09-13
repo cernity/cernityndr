@@ -93,22 +93,33 @@ def os_search(endpoint, index, page=10000, fetch=None, strict=True) -> list:
     return out
 
 
-def wait_for_ingest(endpoint, indices, min_docs=1, tries=30, delay=2.0,
-                    count=None, sleep=None) -> None:
-    """Poll until every arm index has SETTLED (>= min_docs and stable across two polls),
-    else RAISE (F10). A run that never ingested/delivered fails loudly here instead of
-    silently scoring an empty arm — 'wait for ingestion/delivery', not just the engine."""
+def wait_for_completion(endpoint, required, optional=(), tries=30, delay=2.0,
+                        count=None, sleep=None) -> dict:
+    """Wait until the arms have SETTLED, then return their doc counts (M1.4/§9 empty-output
+    semantics). `required` arms (the baseline telemetry) must reach >=1 AND be stable across
+    two polls — an empty baseline means telemetry never shipped, i.e. a broken run, so RAISE.
+    `optional` arms (Cernity findings, Zeek notices) need only be STABLE: 0 is a VALID result
+    (a benign scenario, or a real miss), not a failure — but only because the caller has
+    already waited for the offline producers to exit, so 'empty' cannot mean 'still
+    ingesting'. A run that never settles (counts still changing, or the baseline never
+    arrives) RAISES rather than being scored as zero detections.
+
+    Residual (§9.5): this verifies production + stability, not per-sink delivery HEALTH; a
+    forwarder that silently dead-lettered every finding would still read as valid-empty here.
+    Confirming sink delivery/DLQ is the next completion gate."""
     import time as _t
     count = count or (lambda idx: len(os_search(endpoint, idx, strict=False)))
     sleep = sleep or _t.sleep
-    prev = {i: -1 for i in indices}
+    idx = list(required) + [i for i in optional if i not in required]
+    prev = {i: -1 for i in idx}
     for _ in range(tries):
-        cur = {i: count(i) for i in indices}
-        if all(cur[i] >= min_docs and cur[i] == prev[i] for i in indices):
-            return
+        cur = {i: count(i) for i in idx}
+        if all(cur[i] == prev[i] for i in idx) and all(cur[i] >= 1 for i in required):
+            return cur
         prev = cur
         sleep(delay)
-    raise RuntimeError(f"ingestion did not settle after {tries} tries: {prev} (need >= {min_docs})")
+    raise RuntimeError(f"run did not settle after {tries} tries: {prev} "
+                       f"(need {list(required)} >= 1 and every arm stable)")
 
 
 def compose(*args):
@@ -138,18 +149,20 @@ def run_full(scenario: str, out_dir: str) -> str:
     endpoint = os.environ.get("BENCH_OPENSEARCH", "http://localhost:9200")
     print(f"[1] bringing up benchmark stack for '{scenario}'")
     compose("up", "-d", "--build")
-    print("[2] waiting for offline engines to finish + arms to ship (see compose logs)")
-    subprocess.run(["docker", "wait", "cernity-bench-suricata"], check=False)
-    print("[2b] waiting for ingestion/delivery to settle across the scored arms")
-    # arm-a (baseline flow) and arm-b (Cernity delivery) MUST settle — an empty one there
-    # means a broken pipeline, not a real result, so keep fail-loud. arm-c (Zeek notices)
-    # is a reference and may legitimately be empty (a pcap that raises zero notices), so it
-    # is not gated here and is queried non-strict below.
-    wait_for_ingest(endpoint, ["arm-a-suricata", "arm-b-findings-*"])
-    print("[3] querying all arms from OpenSearch (fail-loud, paginated)")
+    print("[2] waiting for all offline producers to finish (so 'empty' can't mean 'still producing')")
+    for _c in ("cernity-bench-suricata", "cernity-bench-zeek", "cernity-bench-arm-b-feeder"):
+        subprocess.run(["docker", "wait", _c], check=False)
+    print("[2b] waiting for the arms to settle (baseline required; findings/notices may be validly empty)")
+    # arm-a (baseline telemetry) MUST arrive and settle — empty there is a broken run. arm-b
+    # (findings) and arm-c (notices) may be legitimately empty (benign scenario or a real miss)
+    # now that the producers have finished, so they settle at any value and are queried
+    # non-strict below. Never scores a still-ingesting run as zero (wait_for_completion RAISES).
+    wait_for_completion(endpoint, required=["arm-a-suricata"],
+                        optional=["arm-b-findings-*", "arm-c-zeek"])
+    print("[3] querying all arms from OpenSearch (paginated; findings/notices empty-tolerant)")
     arm_a = os_search(endpoint, "arm-a-suricata")
-    arm_b = os_search(endpoint, "arm-b-findings-*")
-    arm_c = os_search(endpoint, "arm-c-zeek", strict=False)  # Zeek-notice reference; empty-tolerant
+    arm_b = os_search(endpoint, "arm-b-findings-*", strict=False)  # findings may be validly empty
+    arm_c = os_search(endpoint, "arm-c-zeek", strict=False)        # Zeek-notice reference; empty-tolerant
     gran = labels.get("granularity", "host")
     truth = set(labels["malicious"])
     arms_raw = {

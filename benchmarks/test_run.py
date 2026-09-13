@@ -35,22 +35,42 @@ def test_os_search_strict_raises_on_query_error():
     assert run.os_search("http://x", "idx", fetch=boom, strict=False) == []
 
 
-def test_wait_for_ingest_settles_then_returns():
-    seq = {"a": [0, 3, 3], "b": [1, 2, 2]}          # counts stabilise on the 3rd poll
+def test_wait_for_completion_returns_counts_with_valid_empty_optional():
+    # baseline 'a' arrives and stabilises; optional 'b' stays empty -> a VALID completion
+    # (benign scenario / real miss), returning the counts rather than raising.
+    seq = {"a": [0, 3, 3], "b": [0, 0, 0]}
     calls = {"a": 0, "b": 0}
 
     def count(idx):
         v = seq[idx][min(calls[idx], len(seq[idx]) - 1)]
         calls[idx] += 1
         return v
-    run.wait_for_ingest("http://x", ["a", "b"], min_docs=1, tries=5, count=count, sleep=lambda _s: None)
+    got = run.wait_for_completion("http://x", required=["a"], optional=["b"],
+                                  tries=5, count=count, sleep=lambda _s: None)
+    assert got == {"a": 3, "b": 0}
 
 
-def test_wait_for_ingest_raises_when_nothing_arrives():
+def test_wait_for_completion_raises_when_baseline_never_arrives():
+    # an empty baseline means telemetry never shipped: a broken run, not zero detections.
     try:
-        run.wait_for_ingest("http://x", ["a"], min_docs=1, tries=3,
-                            count=lambda _i: 0, sleep=lambda _s: None)
-        assert False, "must fail loudly when ingestion never settles"
+        run.wait_for_completion("http://x", required=["a"], optional=["b"], tries=3,
+                                count=lambda _i: 0, sleep=lambda _s: None)
+        assert False, "empty baseline must raise"
+    except RuntimeError:
+        pass
+
+
+def test_wait_for_completion_raises_when_never_stable():
+    # counts still changing (still ingesting) must RAISE, never be scored as a settled zero.
+    n = {"a": 0}
+
+    def count(_i):
+        n["a"] += 1
+        return n["a"]
+    try:
+        run.wait_for_completion("http://x", required=["a"], tries=3,
+                                count=count, sleep=lambda _s: None)
+        assert False, "a never-settling run must raise"
     except RuntimeError:
         pass
 

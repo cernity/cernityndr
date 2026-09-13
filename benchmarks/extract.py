@@ -142,12 +142,25 @@ def detections_from_alerts(docs):
             for d in docs if d.get("event_type") == "alert"]
 
 
+def _revision(d):
+    """An explicit revision/version counter if the finding exposes one, else None. Cernity's finding
+    contract has no revision field yet, so revision selection falls back to last_seen recency +
+    lifecycle state (documented equivalent ordering, §25.3); this reads one if it ever appears."""
+    for k in ("revision", "version"):
+        v = d.get(k)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return None
+
+
 def detections_from_findings(docs):
     """Cernity finding docs -> episode detections (entities already carry roles). Observation
-    interval from the contract's first_seen/last_seen (§25.3)."""
+    interval from the contract's first_seen/last_seen; revision key + lifecycle state carried for
+    deadline-aware revision selection (§25.3)."""
     return [{"entities": _finding_entities(d.get("entities")), "behavior": d.get("category"),
              "finding_id": d.get("finding_id"), "tenant": _tenant(d),
-             "interval": _interval(d.get("first_seen"), d.get("last_seen"))}
+             "interval": _interval(d.get("first_seen"), d.get("last_seen")),
+             "revision": _revision(d), "state": d.get("state")}
             for d in docs]
 
 

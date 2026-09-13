@@ -580,10 +580,14 @@ def _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=0.0):
     truth_eps = labels.get("episodes")
     if truth_eps:
         import episodes as _epmod
+        # deadline=None: the latest revision per logical finding is selected deterministically
+        # (order-independent), but deadline-GATING of late revisions is deferred until the product
+        # exposes reliable delivery timing (§25.2/§25.3) — recency is only a proxy for delivery.
+        deadline = labels.get("eval_deadline")
         results["episode_scoring"] = {
-            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps, replay_offset=replay_offset),
-            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps, replay_offset=replay_offset),
-            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps, replay_offset=replay_offset),
+            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps, replay_offset=replay_offset, deadline=deadline),
+            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps, replay_offset=replay_offset, deadline=deadline),
+            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps, replay_offset=replay_offset, deadline=deadline),
         }
         results["replay_offset_seconds"] = replay_offset
     return results

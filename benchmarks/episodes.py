@@ -130,19 +130,61 @@ def matches(det, ep, tol=0.0):
     return match_verdict(det, ep, tol) == "match"
 
 
-def _dedup(detections):
-    """Collapse same-logical-finding revisions (by finding_id) to one analyst item; keep every
-    item that has no id. Preserves order."""
-    seen, out = set(), []
+# Lifecycle states ranked so a FINAL revision supersedes an interim one at equal recency (§25.3).
+_STATE_RANK = {"final": 3, "confirmed": 3, "updated": 2, "enriched": 2, "open": 1, "pending": 0}
+
+
+def _revision_rank(det):
+    """Deterministic ordering key to select the LATEST revision of one logical finding (§25.3).
+    Explicit revision/version counter dominates; else the documented equivalent — evidence recency
+    (last_seen == interval end) then lifecycle state. Never depends on input/file order."""
+    r = det.get("revision")
+    iv = det.get("interval") or {}
+    recency = float(iv.get("end") or 0.0)
+    state = _STATE_RANK.get(str(det.get("state") or "").lower(), 0)
+    sev = det.get("severity") or 0
+    return (1, float(r)) if isinstance(r, (int, float)) else (0, recency, state, sev)
+
+
+def _eligible_time(det):
+    """The time by which this revision's evidence was available, for deadline gating. Uses last_seen
+    recency (interval end) as the documented proxy — true delivery time is not reliably exposed by
+    the product yet (§25.2), so a deadline claim on it is an approximation, not a delivery receipt."""
+    iv = det.get("interval") or {}
+    return iv.get("end")
+
+
+def _select_revisions(detections, deadline=None):
+    """Collapse same-logical-finding revisions to ONE analyst item, choosing the latest by
+    `_revision_rank` (order-independent), NOT by file position (§25.3). Items with no finding_id are
+    each their own item. When `deadline` is set, a revision whose eligible time is AFTER it is LATE:
+    it cannot be the selected (deadline-visible) revision and is preserved separately, so late
+    evidence never improves deadline recall. Returns (kept, superseded_count, late)."""
+    groups, singles = {}, []
     for d in detections:
         fid = d.get("finding_id")
-        if fid is not None:
-            key = (d.get("tenant") or "default", fid)     # scope identity by tenant (§20.1)
-            if key in seen:
-                continue
-            seen.add(key)
-        out.append(d)
-    return out
+        if fid is None:
+            singles.append(d)
+            continue
+        groups.setdefault((d.get("tenant") or "default", fid), []).append(d)
+    kept, superseded, late = list(singles), 0, []
+    for revs in groups.values():
+        if deadline is not None:
+            eligible = [r for r in revs if (_eligible_time(r) is None or _eligible_time(r) <= deadline)]
+            late += [r for r in revs if _eligible_time(r) is not None and _eligible_time(r) > deadline]
+        else:
+            eligible = revs
+        if not eligible:                               # every revision arrived after the deadline
+            continue
+        winner = max(eligible, key=_revision_rank)
+        kept.append(winner)
+        superseded += len(eligible) - 1
+    return kept, superseded, late
+
+
+def _dedup(detections):
+    """Back-compat: the selected (latest, deadline-agnostic) revision per logical finding."""
+    return _select_revisions(detections)[0]
 
 
 def shift_interval(interval, offset):
@@ -155,13 +197,14 @@ def shift_interval(interval, offset):
     return {"start": interval["start"] + offset, "end": interval["end"] + offset}
 
 
-def score(detections, episodes, tol=0.0, replay_offset=0.0):
+def score(detections, episodes, tol=0.0, replay_offset=0.0, deadline=None):
     """Episode-level recall + analyst-item precision (§7). `detections` and `episodes` are dicts
-    with `entities`(+role), optional `behavior`/`category`, `interval`, `tenant`, `finding_id`.
-    `replay_offset` maps each episode's ORIGINAL-clock interval onto the replay clock the delivered
-    detections carry (§25.3); the original bounds are retained on the input, only a shifted copy is
-    compared."""
-    detections = _dedup(detections)
+    with `entities`(+role), optional `behavior`/`category`, `interval`, `tenant`, `finding_id`,
+    `revision`/`state`. `replay_offset` maps each episode's ORIGINAL-clock interval onto the replay
+    clock the delivered detections carry (§25.3); the original bounds are retained, only a shifted
+    copy is compared. `deadline` (replay clock) selects the latest revision VISIBLE by then: a
+    revision arriving after it is late and cannot improve deadline recall (§25.3)."""
+    detections, superseded, late = _select_revisions(detections, deadline)
     if replay_offset:
         episodes = [dict(e, interval=shift_interval(e.get("interval"), replay_offset)) for e in episodes]
     mal = [e for e in episodes if e.get("label") == "malicious"]
@@ -209,4 +252,6 @@ def score(detections, episodes, tol=0.0, replay_offset=0.0):
         "analyst_precision": round(precision, 4), "f1": round(f1, 4),
         "surfaced_ids": surfaced,
         "missed_ids": missed,
+        "superseded_revisions": superseded,            # §25.3: earlier revisions collapsed into the item
+        "late_items": len(late),                       # arrived after the deadline; not scored for recall
     }

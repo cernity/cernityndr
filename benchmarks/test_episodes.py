@@ -173,6 +173,50 @@ def test_match_requires_narrows_the_discriminator():
     assert ep.score([d], [scan])["episode_recall"] == 1.0
 
 
+# §25.3: revision selection must be deterministic (never by file order) and deadline-aware.
+def _rev(fid, t, **kw):
+    # instant interval at t: t is both the recency key and the observation time
+    d = {"entities": [{"value": "10.0.0.5", "role": "src"}, {"value": "203.0.113.66", "role": "dst"}],
+         "behavior": "c2", "finding_id": fid, "interval": {"start": t, "end": t}}
+    d.update(kw)
+    return d
+
+
+def test_latest_revision_selected_regardless_of_input_order():
+    lo = _rev("f1", 100.0, severity=4)          # earlier evidence
+    hi = _rev("f1", 500.0, severity=8)           # later revision of the SAME finding
+    for order in ([lo, hi], [hi, lo]):           # reordering export rows must not change the result
+        r = ep.score(order, [BEACON])
+        assert r["analyst_items"] == 1 and r["superseded_revisions"] == 1
+        assert r["relevant_items"] == 1          # one logical item, latest revision
+    # explicit revision counter dominates recency
+    assert ep._revision_rank(_rev("f", 0.0, revision=2)) > ep._revision_rank(_rev("f", 999.0))
+
+
+def test_state_breaks_ties_at_equal_recency():
+    interim = _rev("f1", 100.0, state="open")
+    final = _rev("f1", 100.0, state="final")
+    assert ep._revision_rank(final) > ep._revision_rank(interim)
+
+
+def test_late_revision_does_not_improve_deadline_recall():
+    ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
+    early = _rev("f1", 40.0)                      # within the window, eligible by the deadline
+    late = _rev("f1", 900.0)                      # a later revision arriving after the deadline
+    # deadline excludes the late revision; the eligible in-window one still surfaces the episode
+    r = ep.score([early, late], [ep_t], deadline=100.0)
+    assert r["episode_recall"] == 1.0 and r["late_items"] == 1 and r["superseded_revisions"] == 0
+    # with NO deadline the late (out-of-window) revision wins the selection -> not in window -> miss
+    r2 = ep.score([early, late], [ep_t])
+    assert r2["episode_recall"] == 0.0 and r2["superseded_revisions"] == 1
+
+
+def test_all_revisions_after_deadline_leaves_no_item():
+    ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
+    r = ep.score([_rev("f1", 900.0), _rev("f1", 950.0)], [ep_t], deadline=100.0)
+    assert r["late_items"] == 2 and r["analyst_items"] == 0 and r["episode_recall"] == 0.0
+
+
 def test_incomplete_detection_is_graceful():
     assert ep.score([{"entities": []}, {}], [BEACON])["episode_recall"] == 0.0
 

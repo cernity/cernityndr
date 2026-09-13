@@ -84,6 +84,34 @@ def test_sha256_matches_hashlib():
         os.unlink(path)
 
 
+def test_classify_completion_reconciled():
+    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100})
+    assert c["state"] == "reconciled" and c["unresolved"] == []
+
+
+def test_classify_completion_invalid_when_a_producer_fails():
+    c = run.classify_completion({"suricata-offline": 1}, {"g1": 0}, {"arm-a-suricata": 100})
+    assert c["state"] == "invalid"
+
+
+def test_classify_completion_inconclusive_cases():
+    assert run.classify_completion({"s": 0}, {"g": 5}, {"arm-a-suricata": 100})["state"] == "inconclusive"   # lag
+    assert run.classify_completion({"s": 0}, {"g": 0}, {"arm-a-suricata": 0})["state"] == "inconclusive"     # baseline empty
+    assert run.classify_completion({"s": 0}, {}, {"arm-a-suricata": 100})["state"] == "inconclusive"         # drain unverified
+
+
+def test_wait_for_drain_returns_when_lag_stable_zero():
+    seq = [{"g": 3}, {"g": 0}, {"g": 0}]
+    i = {"n": 0}
+
+    def lag_fn():
+        v = seq[min(i["n"], len(seq) - 1)]
+        i["n"] += 1
+        return v
+    assert run.wait_for_drain("p", tries=5, sleep=lambda _s: None, lag_fn=lag_fn) == {"g": 0}
+
+
 def test_preflight_aborts_on_foreign_container():
     # a fixed container name already present (a real deployment) must abort, never attach (§3)
     try:

@@ -231,6 +231,100 @@ def manifest_drift(current_images, pinned_manifest):
             for s in sorted(set(cur) | set(pin)) if cur.get(s) != pin.get(s)]
 
 
+PRODUCERS = ("suricata-offline", "zeek-offline", "arm-b-feeder")
+# The pipeline consumer groups whose drain proves the produced input was consumed (R2/§21.2).
+PIPELINE_GROUPS = ("ndr-behavioral-detectors", "ndr-ids-alerts", "ndr-finding-service",
+                   "cernity-findings-forwarder", "ndr-dns-detector", "ndr-http-detector",
+                   "ndr-protocol-detectors", "ndr-anomaly-detector", "ndr-coverage-detector",
+                   "ndr-threat-intel", "ndr-east-west")
+
+
+def _redpanda_cid(project):
+    out = subprocess.run(["docker", "compose", "-p", project, "-f", COMPOSE, "ps", "-q", "redpanda"],
+                         capture_output=True, text=True).stdout.split()
+    return out[0] if out else ""
+
+
+def wait_for_producer_exits(producers=PRODUCERS):
+    """docker wait each offline producer and RECORD its exit status (R2). A non-zero exit means
+    the producer failed — the run is invalid, not a valid-empty result (producer termination is
+    not producer success)."""
+    exits = {}
+    for svc in producers:
+        # -aq (not -q): a producer that already exited must still be found so a FAILED fast
+        # producer is not silently skipped.
+        out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "ps", "-aq", svc],
+                             capture_output=True, text=True).stdout.split()
+        if not out:
+            continue
+        rc = subprocess.run(["docker", "wait", out[0]], capture_output=True, text=True).stdout.split()
+        exits[svc] = int(rc[-1]) if rc and rc[-1].lstrip("-").isdigit() else None
+    return exits
+
+
+def consumer_group_lag(project, groups=PIPELINE_GROUPS):
+    """Total lag per pipeline consumer group via rpk in the redpanda container (R2 drain). Lag 0
+    across all groups = the pipeline consumed the produced input. Empty (rpk unavailable, e.g. a
+    SASL bus without creds here) => caller treats drain as unverified."""
+    cid = _redpanda_cid(project)
+    lag = {}
+    if not cid:
+        return lag
+    for g in groups:
+        out = subprocess.run(["docker", "exec", cid, "rpk", "group", "describe", g],
+                             capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if line.strip().startswith("TOTAL-LAG"):
+                try:
+                    lag[g] = int(line.split()[-1])
+                except (ValueError, IndexError):
+                    pass
+                break
+    return lag
+
+
+def wait_for_drain(project, tries=25, delay=3.0, sleep=None, lag_fn=None):
+    """Poll consumer-group lag until every pipeline group has caught up (total lag 0) and is
+    stable across two polls, else return the last observed lag for the caller to classify as
+    inconclusive (§21.2 bus drain — never scores a run whose pipeline has not consumed the input)."""
+    import time as _t
+    sleep = sleep or _t.sleep
+    lag_fn = lag_fn or (lambda: consumer_group_lag(project))
+    prev = None
+    for _ in range(tries):
+        lag = lag_fn()
+        if lag and all(v == 0 for v in lag.values()) and lag == prev:
+            return lag
+        prev = lag
+        sleep(delay)
+    return prev or {}
+
+
+def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",)):
+    """Explicit run state (R2/§21.2). invalid: a producer exited non-zero. inconclusive: the
+    pipeline never drained (or drain unverifiable) or a required baseline arm is empty. reconciled:
+    producers succeeded, the bus drained, and the baseline arrived — so an empty findings arm is a
+    VALID miss/benign, not a failure. Completion means all accepted work is accounted for, not that
+    every work item succeeded. Pure/testable."""
+    unresolved = []
+    failed = {s: c for s, c in producer_exits.items() if c not in (0, None)}
+    if failed:
+        unresolved.append(f"producer non-zero exit: {failed}")
+    undrained = {g: v for g, v in group_lag.items() if v}
+    if undrained:
+        unresolved.append(f"consumer lag not drained: {undrained}")
+    if not group_lag:
+        unresolved.append("consumer drain unverified (no lag readings)")
+    empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
+    if empty_baseline:
+        unresolved.append(f"baseline arm empty: {empty_baseline}")
+    state = ("invalid" if failed
+             else "inconclusive" if (undrained or empty_baseline or not group_lag)
+             else "reconciled")
+    return {"state": state, "producer_exits": producer_exits,
+            "consumer_group_lag": group_lag, "unresolved": unresolved}
+
+
 def run_from_docs(spec: dict, out_dir: str) -> str:
     """No-infra path: `spec` carries meta, truth, and each arm's raw docs + counts."""
     gran = spec.get("meta", {}).get("granularity", "host")
@@ -283,18 +377,26 @@ def run_full(scenario: str, out_dir: str) -> str:
             raise SystemExit(f"benchmark abort: running images drift from pinned manifest "
                              f"{os.path.basename(_pin)}: {json.dumps(_drift)} — the run does not "
                              f"match the pinned artifacts (M0.4).")
-    print("[2] waiting for all offline producers to finish (so 'empty' can't mean 'still producing')")
-    for _svc in ("suricata-offline", "zeek-offline", "arm-b-feeder"):
-        _cid = svc_container(_svc)
-        if _cid:
-            subprocess.run(["docker", "wait", _cid], check=False)
-    print("[2b] waiting for the arms to settle (baseline required; findings/notices may be validly empty)")
-    # arm-a (baseline telemetry) MUST arrive and settle — empty there is a broken run. arm-b
-    # (findings) and arm-c (notices) may be legitimately empty (benign scenario or a real miss)
-    # now that the producers have finished, so they settle at any value and are queried
-    # non-strict below. Never scores a still-ingesting run as zero (wait_for_completion RAISES).
-    wait_for_completion(endpoint, required=["arm-a-suricata"],
-                        optional=["arm-b-findings-*", "arm-c-zeek"])
+    print("[2] R2 completion: waiting for producers to exit + checking their exit status")
+    producer_exits = wait_for_producer_exits()
+    print("[2a] R2 completion: reconciling consumer-group drain (pipeline consumed the input)")
+    group_lag = wait_for_drain(PROJECT)
+    print("[2b] waiting for the arms to settle")
+    try:
+        arm_counts = wait_for_completion(endpoint, required=["arm-a-suricata"],
+                                         optional=["arm-b-findings-*", "arm-c-zeek"])
+    except RuntimeError:
+        arm_counts = {}                    # never settled -> classified inconclusive below
+    completion = classify_completion(producer_exits, group_lag, arm_counts)
+    if completion["state"] != "reconciled":
+        # A run that did not reconcile is NOT scored (§9/R2): a producer failed, the pipeline
+        # never drained, or the baseline never arrived. Write a failure report with the
+        # unresolved-work inventory and stop — never convert an unverified run into zero.
+        _write({"meta": {"scenario": scenario, "dataset": labels.get("dataset", scenario)},
+                "completion": completion, "arms": {},
+                "honesty": [], "caveats": [f"run not reconciled ({completion['state']}); not scored (R2/§9)"]},
+               out_dir)
+        raise SystemExit(f"benchmark not reconciled ({completion['state']}): {completion['unresolved']}")
     print("[3] querying all arms from OpenSearch (paginated; findings/notices empty-tolerant)")
     arm_a = os_search(endpoint, "arm-a-suricata")
     arm_b = os_search(endpoint, "arm-b-findings-*", strict=False)  # findings may be validly empty
@@ -332,6 +434,7 @@ def run_full(scenario: str, out_dir: str) -> str:
             "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
             "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
         }
+    results["completion"] = completion                             # R2: reconciled + evidence
     results["exports"] = export_arms(endpoint, out_dir, PROJECT)   # M3: complete raw export
     return _write(results, out_dir)
 

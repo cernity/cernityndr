@@ -302,17 +302,21 @@ def wait_for_drain(project, tries=25, delay=3.0, sleep=None, lag_fn=None):
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
                         expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS):
-    """Explicit run state (R2/§21.2, §24.2 repair). The run is reconciled ONLY when the COMPLETE
-    expected inventory reports a valid outcome — an absent, null, or unparsable status can never be
-    reconciled (it is unknown, not success):
-      invalid      — an expected producer exited non-zero (a definite product/harness failure).
-      inconclusive — an expected producer is missing/null/unparsable; an expected consumer group is
-                     missing/unparsable/not-drained; drain is unverifiable (no readings at all); or a
-                     required baseline arm is empty. Attribution is impossible; not a valid zero.
-      reconciled   — every expected producer exited 0 AND every expected group drained to 0 AND the
-                     baseline arrived. An empty findings arm is then a VALID miss/benign.
-    A zero-lag group proves offset progress, not timer-driven detection / pending captures / async
-    publication / sink writes (§24.2) — those are tracked as residual, not waived here. Pure/testable."""
+    """Explicit run state (R2/§21.2, §24.2 + §26/§25.2 repair). A valid outcome requires the COMPLETE
+    expected inventory to report — an absent, null, or unparsable status is unknown, never success:
+      invalid        — an expected producer exited non-zero (a definite product/harness failure).
+      inconclusive   — an expected producer is missing/null/unparsable; an expected consumer group is
+                       missing/unparsable/not-drained; drain is unverifiable (no readings at all); or a
+                       required baseline arm is empty. Attribution is impossible; not a valid zero.
+      inputs_drained — every expected producer exited 0 AND every expected group drained to 0 AND the
+                       baseline arrived. This proves the produced input was CONSUMED and the baseline
+                       shipped; an empty findings arm is then a valid miss/benign. It is deliberately
+                       NOT called `reconciled`: a zero-lag group is offset progress, not proof of
+                       timer-driven detection / pending-capture / async-publication / per-sink
+                       disposition. Full `reconciled` is reserved for when those downstream acks are
+                       collected (§25.2) — not yet emitted, so `inputs_drained` is the current best.
+    The run is scoreable at `inputs_drained`; the report must label it as inputs-drained (not full
+    reconciliation) so the missing downstream evidence stays visible. Pure/testable."""
     unresolved = []
     # Producers: the full expected set must each report a valid exit. non-zero => invalid;
     # missing / None / unparsable => unknown (cannot reconcile).
@@ -341,7 +345,7 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
     state = ("invalid" if failed
-             else "reconciled" if not unresolved
+             else "inputs_drained" if not unresolved
              else "inconclusive")
     return {"state": state, "producer_exits": producer_exits,
             "consumer_group_lag": group_lag, "unresolved": unresolved}
@@ -410,15 +414,16 @@ def run_full(scenario: str, out_dir: str) -> str:
     except RuntimeError:
         arm_counts = {}                    # never settled -> classified inconclusive below
     completion = classify_completion(producer_exits, group_lag, arm_counts)
-    if completion["state"] != "reconciled":
-        # A run that did not reconcile is NOT scored (§9/R2): a producer failed, the pipeline
-        # never drained, or the baseline never arrived. Write a failure report with the
+    SCOREABLE = ("inputs_drained", "reconciled")   # §25.2: reconciled requires downstream acks (future)
+    if completion["state"] not in SCOREABLE:
+        # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,
+        # the pipeline never drained, or the baseline never arrived. Write a failure report with the
         # unresolved-work inventory and stop — never convert an unverified run into zero.
         _write({"meta": {"scenario": scenario, "dataset": labels.get("dataset", scenario)},
                 "completion": completion, "arms": {},
-                "honesty": [], "caveats": [f"run not reconciled ({completion['state']}); not scored (R2/§9)"]},
+                "honesty": [], "caveats": [f"inputs not drained ({completion['state']}); not scored (R2/§9)"]},
                out_dir)
-        raise SystemExit(f"benchmark not reconciled ({completion['state']}): {completion['unresolved']}")
+        raise SystemExit(f"benchmark inputs not drained ({completion['state']}): {completion['unresolved']}")
     print("[3] exporting the immutable snapshot, then scoring FROM it (R4)")
     exported, _export_counts = export_arms(endpoint, out_dir, PROJECT)
     arm_a = exported["arm-a-suricata"]           # scored docs ARE the exported files (§20.3)
@@ -431,8 +436,13 @@ def run_full(scenario: str, out_dir: str) -> str:
             "zeek_version": os.environ.get("BENCH_ZEEK_VER", "zeek/zeek:latest"),
             "etopen": os.environ.get("BENCH_ETOPEN", "(pin in README)"),
             "cernity_version": os.environ.get("BENCH_CERNITY_VER", "dev")}
-    results = _score_arms(arm_a, arm_b, arm_c, labels, meta)       # R4: score the exported snapshot
-    results["completion"] = completion                             # R2: reconciled + evidence
+    results = _score_arms(arm_a, arm_b, arm_c, labels, meta,       # R4: score the exported snapshot
+                          replay_offset=_replay_offset(out_dir))  # §25.3: map truth -> replay clock
+    results["completion"] = completion                             # R2: state + evidence inventory
+    if completion["state"] == "inputs_drained":                    # §25.2: be explicit about what is proven
+        results.setdefault("caveats", []).append(
+            "completion=inputs_drained: inputs consumed + baseline shipped; downstream detector "
+            "evaluation / pending-capture / per-sink disposition not yet verified (§25.2)")
     results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
     return _write(results, out_dir)
 
@@ -511,15 +521,37 @@ def export_arms(endpoint, out_dir, project=None):
             with open(os.path.join(outdir, "source-eve.jsonl"), "w") as f:
                 f.write(out)
             counts["source-eve.jsonl"] = sum(1 for _l in out.splitlines() if _l.strip())
+            # The single reanchor offset the feeder recorded (§25.3): maps episode truth -> replay clock.
+            rep = subprocess.run(["docker", "run", "--rm", "-v", f"{vol}:/eve:ro", "alpine",
+                                  "sh", "-c", "cat /eve/replay.json 2>/dev/null"],
+                                 capture_output=True, text=True, timeout=60).stdout
+            if rep.strip():
+                with open(os.path.join(outdir, "replay.json"), "w") as f:
+                    f.write(rep)
         except Exception:                        # noqa: BLE001
             pass
     return docs_by, counts
 
 
-def _score_arms(arm_a, arm_b, arm_c, labels, meta):
+def _replay_offset(out_dir):
+    """The recorded reanchor offset (seconds) from a run's export, or 0.0 (untimed comparison) when
+    none was recorded — an old export or a no-anchor run. §25.3."""
+    rep = _read_jsonl_or_json(os.path.join(out_dir, "output", "replay.json"))
+    return float(rep.get("replay_offset_seconds", 0.0)) if isinstance(rep, dict) else 0.0
+
+
+def _read_jsonl_or_json(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=0.0):
     """Compose the report from the three arms' documents + frozen labels (R4). The SAME function
     scores a live run (fed the exported snapshot) and a file-only recompute, so a report is
-    reproducible from out/<scenario>/output/*.jsonl. Pure over its inputs."""
+    reproducible from out/<scenario>/output/*.jsonl. `replay_offset` maps episode truth onto the
+    replay clock the delivered detections carry (§25.3). Pure over its inputs."""
     gran = labels.get("granularity", "host")
     truth = set(labels.get("malicious", []))
     arms_raw = {
@@ -538,10 +570,11 @@ def _score_arms(arm_a, arm_b, arm_c, labels, meta):
     if truth_eps:
         import episodes as _epmod
         results["episode_scoring"] = {
-            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps),
-            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
-            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
+            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps, replay_offset=replay_offset),
+            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps, replay_offset=replay_offset),
+            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps, replay_offset=replay_offset),
         }
+        results["replay_offset_seconds"] = replay_offset
     return results
 
 
@@ -562,7 +595,7 @@ def score_from_export(out_dir, scenario):
     arm_c = _read_jsonl(os.path.join(od, "zeek-notices.jsonl"))
     meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),
             "granularity": f"per-{labels.get('granularity', 'host')}", "source": "file-only recompute"}
-    return _score_arms(arm_a, arm_b, arm_c, labels, meta)
+    return _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=_replay_offset(out_dir))
 
 
 def _write(results: dict, out_dir: str) -> str:

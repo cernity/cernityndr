@@ -45,11 +45,22 @@ def test_reanchor_anchor_start_vs_end():
     def mk():
         return [{"timestamp": "2026-01-01T00:00:00+00:00"},
                 {"timestamp": "2026-01-01T00:01:00+00:00"}]     # 60s apart
-    end = reanchor(mk(), now=now, anchor="end")
+    end, _ = reanchor(mk(), now=now, anchor="end")
     assert _parse(end[-1]["timestamp"]) == now                  # newest at now (burst)
-    start = reanchor(mk(), now=now, anchor="start")
+    start, _ = reanchor(mk(), now=now, anchor="start")
     assert _parse(start[0]["timestamp"]) == now                 # oldest at now (paced)
     assert (_parse(end[-1]["timestamp"]) - _parse(end[0]["timestamp"])).total_seconds() == 60
+
+
+def test_reanchor_returns_the_applied_shift_for_replay_mapping():
+    # §25.3: the shift the offline scorer needs to map episode truth onto the replay clock.
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    evs = [{"timestamp": "2026-01-01T00:00:00+00:00"}]
+    _, shift = reanchor(evs, now=now, anchor="start")
+    expected = (now - datetime(2026, 1, 1, tzinfo=timezone.utc)).total_seconds()
+    assert shift == expected and shift > 0
+    # no timestamped events -> no shift (not an error)
+    assert reanchor([{"x": 1}], now=now)[1] == 0.0
 
 
 def test_security_none_is_plaintext():

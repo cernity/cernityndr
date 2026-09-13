@@ -93,7 +93,7 @@ _G = ("g1", "g2")
 def test_classify_completion_reconciled():
     c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
                                 {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G)
-    assert c["state"] == "reconciled" and c["unresolved"] == []
+    assert c["state"] == "inputs_drained" and c["unresolved"] == []   # §25.2: not "reconciled" (no downstream acks yet)
 
 
 def test_classify_completion_invalid_when_a_producer_fails():

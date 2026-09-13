@@ -7,12 +7,38 @@ infrastructure. `flagged_from_*` pull the set of entities each arm implicates;
 """
 from __future__ import annotations
 import json
+from datetime import datetime
 
 import scorer
 
 
 def _ips(*vals):
     return [v for v in vals if v]
+
+
+def _epoch(v):
+    """A timestamp field -> epoch seconds (float), or None. Accepts RFC3339 UTC strings (the
+    finding/flow contract format, incl. a trailing 'Z') and numeric epochs. Unparsable -> None so a
+    missing/malformed time stays absent (the scorer then treats a time-bounded episode as ambiguous,
+    never silently in-window)."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _interval(start, end=None):
+    """A detection interval {start,end} in epoch seconds from two time fields, or None when start is
+    absent/unparsable. A single instant (no end) collapses to start==end."""
+    s = _epoch(start)
+    if s is None:
+        return None
+    e = _epoch(end)
+    return {"start": s, "end": e if e is not None else s}
 
 
 def flagged_from_alerts(docs, granularity: str = "host") -> set:
@@ -95,24 +121,41 @@ def _endpoint_entities(d):
     return [{"value": d[k], "role": r} for k, r in (("src_ip", "src"), ("dest_ip", "dst")) if d.get(k)]
 
 
+def _tenant(d):
+    """Authenticated tenant identity from the record's ACTUAL schema (§26 Major-2). The finding/flow
+    contracts key everything by `tenant_id` (a partition invariant); a bare `tenant` is a legacy
+    fallback. Reading only `tenant` collapsed every real finding to "default" and defeated the
+    tenant-scoped matcher/dedup — so prefer `tenant_id`, then `tenant`, then default."""
+    return d.get("tenant_id") or d.get("tenant") or "default"
+
+
+def _alert_interval(d):
+    flow = d.get("flow") or {}
+    return _interval(flow.get("start") or d.get("timestamp"), flow.get("end"))
+
+
 def detections_from_alerts(docs):
-    """Suricata alert docs -> episode detections (initiator=src_ip, target=dest_ip)."""
+    """Suricata alert docs -> episode detections (initiator=src_ip, target=dest_ip). Observation
+    interval from flow.start/flow.end (beacon time), else the EVE timestamp (§25.3)."""
     return [{"entities": _endpoint_entities(d), "behavior": _alert_behavior(d),
-             "tenant": d.get("tenant", "default")}
+             "tenant": _tenant(d), "interval": _alert_interval(d)}
             for d in docs if d.get("event_type") == "alert"]
 
 
 def detections_from_findings(docs):
-    """Cernity finding docs -> episode detections (entities already carry roles)."""
+    """Cernity finding docs -> episode detections (entities already carry roles). Observation
+    interval from the contract's first_seen/last_seen (§25.3)."""
     return [{"entities": _finding_entities(d.get("entities")), "behavior": d.get("category"),
-             "finding_id": d.get("finding_id"), "tenant": d.get("tenant", "default")}
+             "finding_id": d.get("finding_id"), "tenant": _tenant(d),
+             "interval": _interval(d.get("first_seen"), d.get("last_seen"))}
             for d in docs]
 
 
 def detections_from_notices(docs):
     """Zeek notice docs -> episode detections (shipper normalized src/dst -> src_ip/dest_ip)."""
     return [{"entities": _endpoint_entities(d), "behavior": (d.get("note") or None),
-             "tenant": d.get("tenant", "default")} for d in docs]
+             "tenant": _tenant(d), "interval": _interval(d.get("ts") or d.get("timestamp"))}
+            for d in docs]
 
 
 def build_results(meta: dict, arms_raw: dict, truth, honesty=None, caveats=None) -> dict:

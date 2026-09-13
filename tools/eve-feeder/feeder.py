@@ -59,15 +59,17 @@ def _event_time(e):
 
 def reanchor(events, now=None, anchor="end"):
     """Shift event times uniformly so a reference event sits at `now`, preserving relative
-    spacing. Reference + spacing use the EFFECTIVE event time (flow.start for flows); both the
-    EVE timestamp and flow.start are shifted by the same amount. anchor='end' (default) puts the
-    NEWEST event at now (burst replay keeps a fixture inside the detectors' rolling window);
-    anchor='start' puts the OLDEST at now (paced replay). Events without a time are left as-is."""
+    spacing, and RETURN the applied shift in seconds so the offline scorer can map episode truth
+    onto the same replay clock (§25.3). Reference + spacing use the EFFECTIVE event time (flow.start
+    for flows); both the EVE timestamp and flow.start are shifted by the same amount. anchor='end'
+    (default) puts the NEWEST event at now (burst replay keeps a fixture inside the detectors'
+    rolling window); anchor='start' puts the OLDEST at now (paced replay). Events without a time are
+    left as-is. Returns (events, shift_seconds)."""
     now = now or datetime.now(timezone.utc)
     stamped = [(_event_time(e), e) for e in events]
     times = [t for t, _ in stamped if t]
     if not times:
-        return events
+        return events, 0.0
     shift = now - (min(times) if anchor == "start" else max(times))
     for t, e in stamped:
         if t is None:
@@ -77,7 +79,7 @@ def reanchor(events, now=None, anchor="end"):
         f = e.get("flow")
         if isinstance(f, dict) and _parse(f.get("start")):
             f["start"] = (_parse(f["start"]) + shift).isoformat()
-    return events
+    return events, shift.total_seconds()
 
 
 def paced_offsets(events, speed=1.0, max_gap=None):
@@ -102,15 +104,32 @@ def paced_offsets(events, speed=1.0, max_gap=None):
     return offs
 
 
-def main(path):
+def _record_replay(shift, anchor):
+    """Persist the single applied reanchor shift so offline scoring maps episode truth onto the
+    replay clock (§25.3). Written only when CERNITY_FEED_REPLAY_OUT names a writable path."""
+    out = os.environ.get("CERNITY_FEED_REPLAY_OUT", "").strip()
+    if not out:
+        return
+    try:
+        with open(out, "w") as f:
+            json.dump({"replay_offset_seconds": shift, "anchor": anchor,
+                       "recorded_at": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError as e:
+        print(f"! could not record replay offset to {out}: {e}")
+
+
+def main(*paths):
     import time
     from kafka import KafkaProducer
-    events = [json.loads(l) for l in open(path) if l.strip()]
+    # Merge ALL streams (alerts + NSM) and reanchor ONCE (§25.3): separate per-file reanchoring gave
+    # each stream a different shift, so no single offset mapped the run. One sorted stream, one shift.
+    events = [json.loads(l) for p in paths for l in open(p) if l.strip()]
     paced = os.environ.get("CERNITY_FEED_PACED", "").strip().lower() not in ("", "0", "false", "no")
     if paced:
         events.sort(key=lambda e: _event_time(e) or datetime.min.replace(tzinfo=timezone.utc))
     if not os.environ.get("CERNITY_FEED_NO_ANCHOR"):
-        events = reanchor(events, anchor="start" if paced else "end")
+        events, shift = reanchor(events, anchor="start" if paced else "end")
+        _record_replay(shift, "start" if paced else "end")
     p = KafkaProducer(bootstrap_servers=os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092"),
                       value_serializer=lambda v: json.dumps(v).encode(),
                       **_security_kwargs())
@@ -142,4 +161,4 @@ def main(path):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "fixtures/beacon-eve.jsonl")
+    main(*(sys.argv[1:] or ["fixtures/beacon-eve.jsonl"]))

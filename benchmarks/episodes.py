@@ -145,10 +145,25 @@ def _dedup(detections):
     return out
 
 
-def score(detections, episodes, tol=0.0):
+def shift_interval(interval, offset):
+    """Map an interval onto the replay clock by `offset` seconds (§25.3). The offline feeder
+    reanchors every event by a single recorded shift; episode truth is authored in the ORIGINAL
+    clock, so mapping it forward by that same shift makes overlap with delivered detection times
+    meaningful. None-safe (untimed truth stays untimed)."""
+    if not interval or not offset:
+        return interval
+    return {"start": interval["start"] + offset, "end": interval["end"] + offset}
+
+
+def score(detections, episodes, tol=0.0, replay_offset=0.0):
     """Episode-level recall + analyst-item precision (§7). `detections` and `episodes` are dicts
-    with `entities`(+role), optional `behavior`/`category`, `interval`, `tenant`, `finding_id`."""
+    with `entities`(+role), optional `behavior`/`category`, `interval`, `tenant`, `finding_id`.
+    `replay_offset` maps each episode's ORIGINAL-clock interval onto the replay clock the delivered
+    detections carry (§25.3); the original bounds are retained on the input, only a shifted copy is
+    compared."""
     detections = _dedup(detections)
+    if replay_offset:
+        episodes = [dict(e, interval=shift_interval(e.get("interval"), replay_offset)) for e in episodes]
     mal = [e for e in episodes if e.get("label") == "malicious"]
     unknown = [e for e in episodes if e.get("label") == "unknown"]
 

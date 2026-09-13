@@ -116,9 +116,12 @@ services:
     image: python:3.12-slim
     <<: *hardening-infra
     working_dir: /feeder
-    entrypoint: ["sh", "-c", "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]
+    # One merged invocation (alerts + NSM) so the streams are reanchored ONCE and a single replay
+    # offset is recorded to /eve/replay.json for offline temporal scoring (§25.3).
+    entrypoint: ["sh", "-c", "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && python feeder.py /eve/eve-alerts.json /eve/eve-nsm.json"]
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      CERNITY_FEED_REPLAY_OUT: /eve/replay.json
       # Paced replay by default (§5): honour the pcap's recorded inter-arrival timing instead
       # of bursting, so event-time and processing-clock stay aligned. Set CERNITY_FEED_PACED=0
       # for a fast burst smoke. Scenarios use a compressed real timespan so paced runs stay short.
@@ -134,7 +137,7 @@ services:
       NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
     volumes:
       - ../../tools/eve-feeder:/feeder:ro
-      - cernity-bench-eve:/eve:ro
+      - cernity-bench-eve:/eve            # writable: feeder records replay.json here (§25.3)
     depends_on:
       redpanda: {condition: service_healthy}
     restart: "no"

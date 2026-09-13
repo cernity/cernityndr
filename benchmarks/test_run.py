@@ -50,6 +50,24 @@ def test_wait_for_completion_returns_counts_with_valid_empty_optional():
     assert got == {"a": 3, "b": 0}
 
 
+def test_wait_for_completion_grace_and_min_stable_wait_out_a_batched_sink_write():
+    # §25.2 under-count guard: 'b' reads 0 twice (forwarder's batched OpenSearch write in flight)
+    # then delivers 5 and holds. grace + min_stable=3 must NOT settle at the transient 0.
+    seq = {"a": [4, 4, 4, 4, 4], "b": [0, 0, 5, 5, 5]}
+    calls = {"a": 0, "b": 0}
+
+    def count(idx):
+        v = seq[idx][min(calls[idx], len(seq[idx]) - 1)]
+        calls[idx] += 1
+        return v
+    graced = {"n": 0}
+    got = run.wait_for_completion("http://x", required=["a"], optional=["b"], tries=8,
+                                  count=count, sleep=lambda _s: graced.__setitem__("n", graced["n"] + 1),
+                                  grace=20, min_stable=3)
+    assert got == {"a": 4, "b": 5}, "settled on the transient empty sink instead of the delivered count"
+    assert graced["n"] >= 1, "grace wait was not applied before the first poll"
+
+
 def test_wait_for_completion_raises_when_baseline_never_arrives():
     # an empty baseline means telemetry never shipped: a broken run, not zero detections.
     try:

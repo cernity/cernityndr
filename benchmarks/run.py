@@ -100,32 +100,38 @@ def os_search(endpoint, index, page=10000, fetch=None, strict=True) -> list:
 
 
 def wait_for_completion(endpoint, required, optional=(), tries=30, delay=2.0,
-                        count=None, sleep=None) -> dict:
+                        count=None, sleep=None, min_stable=2, grace=0.0) -> dict:
     """Wait until the arms have SETTLED, then return their doc counts (M1.4/§9 empty-output
-    semantics). `required` arms (the baseline telemetry) must reach >=1 AND be stable across
-    two polls — an empty baseline means telemetry never shipped, i.e. a broken run, so RAISE.
-    `optional` arms (Cernity findings, Zeek notices) need only be STABLE: 0 is a VALID result
-    (a benign scenario, or a real miss), not a failure — but only because the caller has
-    already waited for the offline producers to exit, so 'empty' cannot mean 'still
-    ingesting'. A run that never settles (counts still changing, or the baseline never
-    arrives) RAISES rather than being scored as zero detections.
+    semantics). `required` arms (the baseline telemetry) must reach >=1 AND be stable — an empty
+    baseline means telemetry never shipped, i.e. a broken run, so RAISE. `optional` arms (Cernity
+    findings, Zeek notices) need only be STABLE: 0 is a VALID result (a benign scenario, or a real
+    miss), not a failure — but only because the caller has already waited for the offline producers
+    to exit, so 'empty' cannot mean 'still ingesting'. A run that never settles RAISES.
 
-    Residual (§9.5): this verifies production + stability, not per-sink delivery HEALTH; a
-    forwarder that silently dead-lettered every finding would still read as valid-empty here.
-    Confirming sink delivery/DLQ is the next completion gate."""
+    `grace` waits before the first poll and `min_stable` requires that many CONSECUTIVE equal reads
+    before settling — together they stop the optional sink arms from settling at a transient 0 while
+    the findings-forwarder's BATCHED OpenSearch write is still in flight after the bus has drained
+    (§25.2, the under-count seen in a live run). This is a race-reducer, NOT proof of delivery.
+
+    Residual (§25.2, part-blocked): this verifies production + stability, not per-sink delivery
+    HEALTH; a forwarder that silently dead-lettered every finding would still read as valid-empty.
+    Proving delivery needs a service-side per-sink receipt/DLQ signal (not harness-verifiable)."""
     import time as _t
     count = count or (lambda idx: len(os_search(endpoint, idx, strict=False)))
     sleep = sleep or _t.sleep
     idx = list(required) + [i for i in optional if i not in required]
-    prev = {i: -1 for i in idx}
+    if grace:
+        sleep(grace)                       # let a batched sink flush land before trusting an empty arm
+    prev, stable = {i: -1 for i in idx}, 0
     for _ in range(tries):
         cur = {i: count(i) for i in idx}
-        if all(cur[i] == prev[i] for i in idx) and all(cur[i] >= 1 for i in required):
+        stable = stable + 1 if cur == prev else 1
+        if stable >= min_stable and all(cur[i] >= 1 for i in required):
             return cur
         prev = cur
         sleep(delay)
     raise RuntimeError(f"run did not settle after {tries} tries: {prev} "
-                       f"(need {list(required)} >= 1 and every arm stable)")
+                       f"(need {list(required)} >= 1 and every arm stable x{min_stable})")
 
 
 def compose(*args):
@@ -407,10 +413,15 @@ def run_full(scenario: str, out_dir: str) -> str:
     producer_exits = wait_for_producer_exits()
     print("[2a] R2 completion: reconciling consumer-group drain (pipeline consumed the input)")
     group_lag = wait_for_drain(PROJECT)
-    print("[2b] waiting for the arms to settle")
+    print("[2b] waiting for the arms to settle (sink grace so a batched forwarder write is not raced)")
     try:
+        # §25.2: after drain, allow the forwarder's batched OpenSearch write to land before trusting
+        # an empty findings arm, and require a longer consecutive-stable window. BENCH_SINK_GRACE
+        # (seconds) tunes the grace to the deployment's forwarder flush interval; a race-reducer.
         arm_counts = wait_for_completion(endpoint, required=["arm-a-suricata"],
-                                         optional=["arm-b-findings-*", "arm-c-zeek"])
+                                         optional=["arm-b-findings-*", "arm-c-zeek"],
+                                         grace=float(os.environ.get("BENCH_SINK_GRACE", "20") or 0),
+                                         min_stable=3)
     except RuntimeError:
         arm_counts = {}                    # never settled -> classified inconclusive below
     completion = classify_completion(producer_exits, group_lag, arm_counts)

@@ -154,32 +154,63 @@ def _eligible_time(det):
     return iv.get("end")
 
 
+def _payload_key(det):
+    """The scored semantics of a detection — its entities (value+canonical role) and behaviour.
+    Two revisions with the SAME rank but a DIFFERENT payload key are a genuine conflict, not a
+    duplicate (§28-B): we must not pick one by input order or by which scores better."""
+    ents = tuple(sorted((e.get("value"), _norm_role(e.get("role"))) for e in det.get("entities", [])))
+    return (ents, (det.get("behavior") or det.get("category") or "").lower())
+
+
+def _eligibility(det, deadline):
+    """Deadline eligibility of a record's evidence (§28 Major-4). No deadline -> everything is
+    eligible. With a deadline the basis is OBSERVATION recency (last_seen), a documented proxy, NOT
+    confirmed delivery: an available time after the deadline is 'late'; a MISSING time is 'unknown'
+    (never silently on-time — missing availability is unknown eligibility, not eligible)."""
+    if deadline is None:
+        return "eligible"
+    t = _eligible_time(det)
+    if t is None:
+        return "unknown"
+    return "eligible" if t <= deadline else "late"
+
+
 def _select_revisions(detections, deadline=None):
     """Collapse same-logical-finding revisions to ONE analyst item, choosing the latest by
     `_revision_rank` (order-independent), NOT by file position (§25.3). Items with no finding_id are
-    each their own item. When `deadline` is set, a revision whose eligible time is AFTER it is LATE:
-    it cannot be the selected (deadline-visible) revision and is preserved separately, so late
-    evidence never improves deadline recall. Returns (kept, superseded_count, late)."""
+    each their own item but are STILL deadline-gated (§28 Major-4). A revision after the deadline is
+    late; one with no available time is unknown; both are preserved, never credited as on-time. A
+    same-rank set with different scored payloads is an unresolved conflict, never picked by order
+    (§28-B). Returns (kept, superseded, late, conflicts, unknown)."""
     groups, singles = {}, []
     for d in detections:
         fid = d.get("finding_id")
-        if fid is None:
-            singles.append(d)
-            continue
-        groups.setdefault((d.get("tenant") or "default", fid), []).append(d)
-    kept, superseded, late = list(singles), 0, []
+        (singles if fid is None else groups.setdefault((d.get("tenant") or "default", fid), [])).append(d)
+    kept, superseded, late, conflicts, unknown = [], 0, [], [], []
+    for d in singles:                                  # finding_id-less items are deadline-gated too
+        e = _eligibility(d, deadline)
+        (kept if e == "eligible" else late if e == "late" else unknown).append(d)
     for revs in groups.values():
-        if deadline is not None:
-            eligible = [r for r in revs if (_eligible_time(r) is None or _eligible_time(r) <= deadline)]
-            late += [r for r in revs if _eligible_time(r) is not None and _eligible_time(r) > deadline]
-        else:
-            eligible = revs
-        if not eligible:                               # every revision arrived after the deadline
+        by = {"eligible": [], "late": [], "unknown": []}
+        for r in revs:
+            by[_eligibility(r, deadline)].append(r)
+        late += by["late"]
+        unknown += by["unknown"]
+        eligible = by["eligible"]
+        if not eligible:                               # nothing eligible by the deadline
             continue
-        winner = max(eligible, key=_revision_rank)
-        kept.append(winner)
-        superseded += len(eligible) - 1
-    return kept, superseded, late
+        top_rank = max(_revision_rank(r) for r in eligible)
+        top = [r for r in eligible if _revision_rank(r) == top_rank]
+        superseded += len(eligible) - len(top)         # strictly lower-rank revisions are superseded
+        distinct = {_payload_key(r): r for r in top}   # collapse identical top-rank retransmissions
+        if len(distinct) == 1:
+            kept.append(top[0])
+            superseded += len(top) - 1
+        else:
+            # same rank, different scored payload, no authoritative tiebreak -> unresolved CONFLICT.
+            # Never pick by input order or by which payload scores better (§28-B).
+            conflicts.append(list(distinct.values()))
+    return kept, superseded, late, conflicts, unknown
 
 
 def _dedup(detections):
@@ -204,7 +235,7 @@ def score(detections, episodes, tol=0.0, replay_offset=0.0, deadline=None):
     clock the delivered detections carry (§25.3); the original bounds are retained, only a shifted
     copy is compared. `deadline` (replay clock) selects the latest revision VISIBLE by then: a
     revision arriving after it is late and cannot improve deadline recall (§25.3)."""
-    detections, superseded, late = _select_revisions(detections, deadline)
+    detections, superseded, late, conflicts, unknown_elig = _select_revisions(detections, deadline)
     if replay_offset:
         episodes = [dict(e, interval=shift_interval(e.get("interval"), replay_offset)) for e in episodes]
     mal = [e for e in episodes if e.get("label") == "malicious"]
@@ -254,4 +285,9 @@ def score(detections, episodes, tol=0.0, replay_offset=0.0, deadline=None):
         "missed_ids": missed,
         "superseded_revisions": superseded,            # §25.3: earlier revisions collapsed into the item
         "late_items": len(late),                       # arrived after the deadline; not scored for recall
+        "unknown_eligibility_items": len(unknown_elig),  # §28 M4: no available time -> unknown, not on-time
+        "version_conflicts": len(conflicts),           # §28-B: same-rank, different payload, unresolved
+        # §28 M4: a deadline here is scored on OBSERVATION recency (last_seen), a proxy — NOT confirmed
+        # analyst-visible delivery. Any deadline result is observation-basis until delivery metadata exists.
+        "deadline_basis": None if deadline is None else "observation-recency (proxy, not delivery)",
     }

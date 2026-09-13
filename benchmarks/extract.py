@@ -143,14 +143,12 @@ def detections_from_alerts(docs):
 
 
 def _revision(d):
-    """An explicit revision/version counter if the finding exposes one, else None. Cernity's finding
-    contract has no revision field yet, so revision selection falls back to last_seen recency +
-    lifecycle state (documented equivalent ordering, §25.3); this reads one if it ever appears."""
-    for k in ("revision", "version"):
-        v = d.get(k)
-        if isinstance(v, (int, float)):
-            return float(v)
-    return None
+    """An explicit finding REVISION counter if the contract exposes one, else None. Deliberately
+    does NOT treat a generic `version` field as a revision (§28 Major-4): equating them needs a
+    schema-specific definition Cernity's finding contract does not yet provide. Absent an explicit
+    `revision`, selection falls back to last_seen recency + lifecycle state (documented equivalent)."""
+    v = d.get("revision")
+    return float(v) if isinstance(v, (int, float)) else None
 
 
 def detections_from_findings(docs):

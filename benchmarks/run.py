@@ -451,8 +451,19 @@ def run_full(scenario: str, out_dir: str) -> str:
     # topology/images/inputs, and only release the producers once preflight passes — so a drifted
     # image / bad input / reused output aborts BEFORE any data is produced. A pinned run must NOT
     # rebuild (`--build` yields fresh, non-reproducible local image IDs); unpinned builds from source.
+    # Load the pin BEFORE mutating any output, and refuse pin/output aliasing regardless of
+    # overwrite so a run can never destroy its own reference (§28 Major-2).
+    _pin = os.environ.get("BENCH_PIN_MANIFEST")
+    if _pin and os.path.abspath(_pin).startswith(os.path.abspath(out_dir) + os.sep):
+        raise SystemExit(f"benchmark abort: pinned manifest {_pin} lives inside the output dir "
+                         f"{out_dir} (aliasing) — a run would overwrite its own reference (§28).")
+    _pinned = _load(_pin) if _pin else None
     _infra = [s for s in _all_services() if s not in PRODUCER_SERVICES]
-    compose("up", "-d", *([] if os.environ.get("BENCH_PIN_MANIFEST") else ["--build"]), *_infra)
+    compose("up", "-d", *([] if _pin else ["--build"]), *_infra)
+    # CREATE (do not start) the producers so their image identities/mounts are captured and verified
+    # before release — Suricata+rules and the feeder are essential artifacts (§28 Major-1). ps -aq
+    # (used by running_images) includes created-but-unstarted containers.
+    compose("create", *PRODUCER_SERVICES)
     apply_index_template(endpoint)             # M3: type the arm fields before ingestion (best-effort)
     print("[1b] recording provenance manifest (M0.3) + run-spec preflight (M0.4/§25.1)")
     _bench = os.path.dirname(COMPOSE)
@@ -465,20 +476,21 @@ def run_full(scenario: str, out_dir: str) -> str:
         "zeek_local": os.path.join(_bench, "zeek", "local.zeek"),
         "arm_a_fluentbit": os.path.join(_bench, "arm-a", "fluent-bit.conf"),
         "arm_c_fluentbit": os.path.join(_bench, "zeek", "fluent-bit.conf")})
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "manifest.json"), "w") as _mf:
-        json.dump(manifest, _mf, indent=2, sort_keys=True)
-    _pin = os.environ.get("BENCH_PIN_MANIFEST")
-    if _pin:
-        _pinned = _load(_pin)
+    if _pinned is not None:
         _drift = manifest_drift(manifest["images"], _pinned)
-        _input_drift = {k: v for k, v in manifest.get("inputs", {}).items()
-                        if _pinned.get("inputs", {}).get(k, {}).get("sha256") not in (None, v.get("sha256"))}
+        # Verify the COMPLETE mandatory input set the pin declares: a required input MISSING from the
+        # current run (not just changed) is a failure, never silently dropped (§28 Major-2).
+        _cur_in, _pin_in = manifest.get("inputs", {}), _pinned.get("inputs", {})
+        _input_drift = {k: {"pinned": pv.get("sha256"), "current": _cur_in.get(k, {}).get("sha256")}
+                        for k, pv in _pin_in.items() if _cur_in.get(k, {}).get("sha256") != pv.get("sha256")}
         if _drift or _input_drift:
             compose("down", "-v", "--remove-orphans")
             raise SystemExit(f"benchmark abort: run drifts from pinned manifest "
                              f"{os.path.basename(_pin)}: images={json.dumps(_drift)} "
                              f"inputs={json.dumps(_input_drift)} — does not match pinned artifacts (M0.4).")
+    os.makedirs(out_dir, exist_ok=True)        # write evidence only AFTER the pin check passes
+    with open(os.path.join(out_dir, "manifest.json"), "w") as _mf:
+        json.dump(manifest, _mf, indent=2, sort_keys=True)
     # The pipeline (detectors/forwarder/shippers/bus/store) must be up to RECEIVE production; verify
     # that before releasing producers, else findings are lost to the offset race. dashboards is not
     # essential to scoring, so it is not required.
@@ -488,8 +500,8 @@ def run_full(scenario: str, out_dir: str) -> str:
     preflight_run_spec(spec, running_services=_running_services(), output_exists=False, overwrite=overwrite)
     with open(os.path.join(out_dir, "run-spec.json"), "w") as _sf:
         json.dump(spec, _sf, indent=2, sort_keys=True)
-    print("[1c] preflight passed — releasing offline producers")
-    compose("up", "-d", *PRODUCER_SERVICES)
+    print("[1c] preflight passed — starting the held offline producers")
+    compose("start", *PRODUCER_SERVICES)          # release the already-created, already-verified producers
     print("[2] R2 completion: waiting for producers to exit + checking their exit status")
     producer_exits = wait_for_producer_exits()
     print("[2a] R2 completion: reconciling consumer-group drain (pipeline consumed the input)")
@@ -536,13 +548,9 @@ def run_full(scenario: str, out_dir: str) -> str:
             "completion=inputs_drained: inputs consumed + baseline shipped; downstream detector "
             "evaluation / pending-capture / per-sink disposition not yet verified (§25.2)")
     results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
-    results["run_id"] = run_id                                     # §25.1: link the result to its spec
-    _spec_path = os.path.join(out_dir, "run-spec.json")            # archive the effective spec + mapping
-    if os.path.isfile(_spec_path):
-        _spec = _load(_spec_path)
-        _spec["replay_mapping"] = {"replay_offset_seconds": results.get("replay_offset_seconds", 0.0)}
-        with open(_spec_path, "w") as _sf:
-            json.dump(_spec, _sf, indent=2, sort_keys=True)
+    results["run_id"] = run_id                                     # §25.1: link the result to its (immutable) spec
+    # The frozen run-spec is NOT mutated post-run (§28 Major-2): the measured replay mapping is a
+    # runtime OBSERVATION, recorded in the result (report.json) + output/replay.json, linked by run_id.
     return _write(results, out_dir)
 
 

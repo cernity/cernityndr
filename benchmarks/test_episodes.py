@@ -199,6 +199,34 @@ def test_state_breaks_ties_at_equal_recency():
     assert ep._revision_rank(final) > ep._revision_rank(interim)
 
 
+def test_same_rank_conflicting_payloads_are_flagged_not_picked_by_order():
+    # §28-B: two records, same (tenant, finding_id) and identical rank, DIFFERENT behavior. The
+    # winner must not depend on input order — it is an unresolved version conflict, scored as neither.
+    c2 = _rev("f1", 100.0)                        # behavior c2 (default in _rev)
+    recon = _rev("f1", 100.0); recon["behavior"] = "recon"
+    for order in ([c2, recon], [recon, c2]):
+        r = ep.score(order, [BEACON])
+        assert r["version_conflicts"] == 1
+        assert r["relevant_items"] == 0 and r["false_items"] == 0   # not adjudicated either way
+        assert r["episode_recall"] == 0.0                            # conflict does not credit recall
+
+
+def test_identical_retransmission_at_same_rank_collapses_without_conflict():
+    a = _rev("f1", 100.0)
+    b = _rev("f1", 100.0)                         # byte-equal payload + rank -> a duplicate, not a conflict
+    r = ep.score([a, b], [BEACON])
+    assert r["version_conflicts"] == 0 and r["analyst_items"] == 1 and r["superseded_revisions"] == 1
+
+
+def test_conflicting_explicit_revisions_at_same_number_are_a_conflict():
+    a = _rev("f1", 0.0, revision=3)
+    b = _rev("f1", 0.0, revision=3); b["behavior"] = "recon"
+    assert ep.score([a, b], [BEACON])["version_conflicts"] == 1
+    # a higher explicit revision with a single payload resolves cleanly (no conflict)
+    hi = _rev("f1", 0.0, revision=5)
+    assert ep.score([a, hi], [BEACON])["version_conflicts"] == 0
+
+
 def test_late_revision_does_not_improve_deadline_recall():
     ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
     early = _rev("f1", 40.0)                      # within the window, eligible by the deadline
@@ -215,6 +243,25 @@ def test_all_revisions_after_deadline_leaves_no_item():
     ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
     r = ep.score([_rev("f1", 900.0), _rev("f1", 950.0)], [ep_t], deadline=100.0)
     assert r["late_items"] == 2 and r["analyst_items"] == 0 and r["episode_recall"] == 0.0
+
+
+# §28 Major-4: missing availability is UNKNOWN eligibility, never silently on-time; the deadline
+# result is observation-basis; finding_id-less records are gated too.
+def test_missing_time_under_deadline_is_unknown_not_on_time():
+    ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
+    d = {"entities": [{"value": "10.0.0.5", "role": "src"}, {"value": "203.0.113.66", "role": "dst"}],
+         "behavior": "c2", "finding_id": "f1"}                     # no interval -> no available time
+    r = ep.score([d], [ep_t], deadline=100.0)
+    assert r["unknown_eligibility_items"] == 1 and r["episode_recall"] == 0.0 and r["analyst_items"] == 0
+    assert r["deadline_basis"] and "observation" in r["deadline_basis"]
+
+
+def test_finding_id_less_record_is_deadline_gated():
+    ep_t = dict(BEACON, interval={"start": 0.0, "end": 50.0})
+    late = {"entities": [{"value": "10.0.0.5", "role": "src"}, {"value": "203.0.113.66", "role": "dst"}],
+            "behavior": "c2", "interval": {"start": 900.0, "end": 900.0}}   # no finding_id, after deadline
+    r = ep.score([late], [ep_t], deadline=100.0)
+    assert r["late_items"] == 1 and r["analyst_items"] == 0        # not bypassed just because it lacks an id
 
 
 def test_incomplete_detection_is_graceful():

@@ -45,7 +45,12 @@ echo "$SENSOR_USER" > bus_user.txt
 printf '%s' "$SENSOR_PASS" > bus_password.txt
 printf '%s' "$CENTRAL_PASS" > bus_central_password.txt
 printf '%s' "$ADMIN_PASS" > bus_admin_password.txt
-chmod 600 ca.key broker.key bus_password.txt bus_central_password.txt bus_admin_password.txt
+# broker.crt/broker.key/ca.crt are bind-mounted into the redpanda container, which runs as a
+# non-host uid and must be able to read them, so they are world-readable. ca.key (the CA
+# signing key) and the SCRAM password files are NOT mounted into redpanda — the passwords
+# reach it via env — so they stay owner-only. Keep the secrets dir itself off untrusted hosts.
+chmod 644 broker.crt broker.key ca.crt
+chmod 600 ca.key bus_password.txt bus_central_password.txt bus_admin_password.txt
 
 cat <<MSG
 

@@ -111,6 +111,12 @@ services:
     entrypoint: ["sh", "-c", "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      # Authenticate as the produce-only SENSOR principal when the bus is secured. The
+      # shared CERNITY_BUS_CENTRAL_MECHANISM toggle (empty in the insecure recipe) turns
+      # SASL off for the feeder too; a secure run leaves it unset -> SCRAM-SHA-512.
+      NDR_BUS_SASL_MECHANISM: ${CERNITY_BUS_CENTRAL_MECHANISM-SCRAM-SHA-512}
+      NDR_BUS_SASL_USER: ${CERNITY_BUS_USER:-cernity-sensor}
+      NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
     volumes:
       - ../../tools/eve-feeder:/feeder:ro
       - cernity-bench-eve:/eve:ro

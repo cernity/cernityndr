@@ -20,6 +20,28 @@ def route(event):
     return topic, key
 
 
+def _security_kwargs(env=os.environ):
+    """SASL/SCRAM producer auth when the bus is secured (mirrors shared/ndr_runtime, but
+    the feeder ships as a standalone tool without that module). The feeder is the SENSOR
+    principal — produce-only on suricata.* — so it uses NDR_BUS_SASL_USER/PASSWORD =
+    cernity-sensor. Mechanism-gated: an empty/unset NDR_BUS_SASL_MECHANISM means the
+    plaintext (insecure/local) bus, so return nothing. A CA -> SASL_SSL (remote/TLS);
+    none -> SASL_PLAINTEXT (internal Docker net). A mechanism without user+password raises
+    so a half-configured secure bus fails loudly instead of silently going plaintext."""
+    mech = env.get("NDR_BUS_SASL_MECHANISM")
+    if not mech:
+        return {}
+    user, pw = env.get("NDR_BUS_SASL_USER"), env.get("NDR_BUS_SASL_PASSWORD")
+    if not (user and pw):
+        raise SystemExit("feeder: NDR_BUS_SASL_MECHANISM set but NDR_BUS_SASL_USER/PASSWORD missing")
+    ca = env.get("NDR_BUS_TLS_CA")
+    kw = {"security_protocol": "SASL_SSL" if ca else "SASL_PLAINTEXT",
+          "sasl_mechanism": mech, "sasl_plain_username": user, "sasl_plain_password": pw}
+    if ca:
+        kw["ssl_cafile"] = ca
+    return kw
+
+
 def _parse(ts):
     try:
         return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -51,7 +73,8 @@ def main(path):
     if not os.environ.get("CERNITY_FEED_NO_ANCHOR"):
         events = reanchor(events)
     p = KafkaProducer(bootstrap_servers=os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092"),
-                      value_serializer=lambda v: json.dumps(v).encode())
+                      value_serializer=lambda v: json.dumps(v).encode(),
+                      **_security_kwargs())
     n = 0
     for ev in events:
         topic, key = route(ev)

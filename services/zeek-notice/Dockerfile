@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # shared runtime (plan 003 U6 rollout)
 COPY shared/ndr_runtime.py shared/metrics.py ./
 COPY services/zeek-notice/promote_notice.py services/zeek-notice/app.py services/zeek-notice/test_promote_notice.py ./
+COPY contracts/finding.schema.json ./contracts/finding.schema.json
 RUN python test_promote_notice.py
 USER nobody
 ENTRYPOINT ["python", "app.py"]

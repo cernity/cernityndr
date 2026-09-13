@@ -69,12 +69,26 @@ def test_major_signature_severity_promotes_even_if_numeric_soft():
     assert p.category_for(a) == "malware"
 
 
+def _finding_schema_required():
+    """Required fields from contracts/finding.schema.json, located whether the test runs
+    from the repo (contracts/ several levels up) or inside the flat build image (contracts/
+    copied next to the module by the Dockerfile). CERNITY_FINDING_SCHEMA overrides both."""
+    import json, os, pathlib
+    here = pathlib.Path(__file__).resolve()
+    candidates = ([pathlib.Path(os.environ["CERNITY_FINDING_SCHEMA"])]
+                  if os.environ.get("CERNITY_FINDING_SCHEMA") else [])
+    candidates += [parent / "contracts" / "finding.schema.json" for parent in here.parents]
+    for c in candidates:
+        if c.is_file():
+            return json.loads(c.read_text())["required"]
+    raise FileNotFoundError(
+        f"finding.schema.json not found (looked in {[str(c) for c in candidates]})")
+
+
 def test_candidate_is_schema_complete():
     # F13: every schema-required field is present (first_seen/last_seen were missing, so
     # every ids-signature candidate was rejected by finding.schema.json).
-    import json, pathlib
-    req = json.loads((pathlib.Path(__file__).parents[2] / "contracts"
-                      / "finding.schema.json").read_text())["required"]
+    req = _finding_schema_required()
     c = p.to_candidate(SPAMHAUS)
     assert all(k in c for k in req), [k for k in req if k not in c]
 

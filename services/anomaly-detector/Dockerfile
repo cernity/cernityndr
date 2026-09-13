@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # shared runtime (plan 003 U5/U6)
 COPY shared/ndr_runtime.py shared/metrics.py ./
 COPY services/anomaly-detector/anomaly.py services/anomaly-detector/app.py services/anomaly-detector/test_anomaly.py ./
+COPY contracts/finding.schema.json ./contracts/finding.schema.json
 RUN python test_anomaly.py
 USER nobody
 ENTRYPOINT ["python", "app.py"]

@@ -32,9 +32,12 @@ def test_ignores_non_anomaly():
 def test_candidate_is_schema_complete_and_deterministic():
     # F13: schema-required first_seen/last_seen present (were missing). F07 cross-process
     # id stability is proven by the shared _stable() pattern (see ids-alerts subprocess test).
-    import json, pathlib
-    req = json.loads((pathlib.Path(__file__).parents[2] / "contracts"
-                      / "finding.schema.json").read_text())["required"]
+    import json, os, pathlib
+    _here = pathlib.Path(__file__).resolve()
+    _cands = ([pathlib.Path(os.environ["CERNITY_FINDING_SCHEMA"])]
+              if os.environ.get("CERNITY_FINDING_SCHEMA") else [])
+    _cands += [pp / "contracts" / "finding.schema.json" for pp in _here.parents]
+    req = json.loads(next(c for c in _cands if c.is_file()).read_text())["required"]
     c = a.to_candidate(APPLAYER)
     assert all(k in c for k in req), [k for k in req if k not in c]
     assert c["finding_id"] == a.to_candidate(APPLAYER)["finding_id"]

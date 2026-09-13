@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # shared runtime (plan 003 U6 rollout)
 COPY shared/ndr_runtime.py shared/metrics.py ./
 COPY services/file-threat/filematch.py services/file-threat/app.py services/file-threat/test_filematch.py ./
+COPY contracts/finding.schema.json ./contracts/finding.schema.json
 RUN python test_filematch.py
 USER nobody
 ENTRYPOINT ["python", "app.py"]

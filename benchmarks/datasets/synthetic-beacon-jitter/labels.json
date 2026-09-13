@@ -1,0 +1,18 @@
+{
+  "dataset": "synthetic-beacon-jitter (built-in, S02)",
+  "granularity": "host",
+  "malicious": ["10.0.0.5"],
+  "episodes": [
+    {"id": "beacon-jitter-1", "label": "malicious", "behavior": "c2",
+     "entities": [{"value": "10.0.0.5", "role": "initiator"},
+                  {"value": "203.0.113.66", "role": "target"}]}
+  ],
+  "honesty": [
+    "S02: the callback interval jitters (uniform 3-7s) instead of a fixed period, testing that beaconing sensitivity survives jitter. Same behavioural gap as S01 — no signature, so raw Suricata does not alert.",
+    "A single synthetic host is not a prevalence sample; real precision/recall need a labelled corpus."
+  ],
+  "caveats": [
+    "Synthetic, hand-built jittered-beacon scenario.",
+    "Offline replay measures detection + analyst-volume, not throughput."
+  ]
+}

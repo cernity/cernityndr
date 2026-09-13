@@ -1,0 +1,116 @@
+{
+  "_comment": "Project-owned scenario suite (M4/\u00a76/\u00a711). Each scenario has a deterministic generator (seeded), an episode-labelled truth (entities+roles+behavior), and a matched benign control. `set` splits development (tune/build) from holdout (frozen effectiveness eval) \u2014 never tune on holdout. `status` is honest about what is validated vs pending: `validated`=detector fires + finding delivered on a real run; `built`=generator+truth ship, detection not yet confirmed; `needs-corpus`=requires an external labelled PCAP (prevalence); `needs-live`=requires the Mode-2 live-capture lab; `needs-ad`=requires an AD/Windows east-west lab. All attack rows are HYPOTHESES to test, not guaranteed detections (\u00a76).",
+  "scenarios": {
+    "S01": {
+      "name": "periodic callbacks (beacon)",
+      "scenario": "synthetic-beacon",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "validated",
+      "question": "beacon detection adds signal without flagging every periodic service"
+    },
+    "S02": {
+      "name": "jittered callbacks",
+      "scenario": "synthetic-beacon-jitter",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "validated",
+      "question": "sensitivity persists across preregistered jitter ranges"
+    },
+    "S03": {
+      "name": "one callback domain, rotating destinations (FQDN beacon)",
+      "scenario": "synthetic-fqdn-beacon",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "built",
+      "question": "domain aggregation works and stays selective"
+    },
+    "S04": {
+      "name": "internal scan + lateral fan-out",
+      "scenario": "synthetic-scan",
+      "behavior": "recon",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "validated",
+      "question": "related events consolidated; contextual limits exposed",
+      "note": "two episodes (recon scan + lateral fan-out) on 10.0.0.8 \u2014 detectors emit discovery + lateral (\u00a77 multiple-episodes-per-host)"
+    },
+    "S05": {
+      "name": "many small outbound transfers (cumulative exfil)",
+      "scenario": "synthetic-exfil",
+      "behavior": "exfil",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "needs-corpus",
+      "question": "cumulative exfil distinguished from normal transfer"
+    },
+    "S06": {
+      "name": "encoded subdomains under one parent (DNS tunnel)",
+      "scenario": "synthetic-dns-tunnel",
+      "behavior": "exfil",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "validated",
+      "question": "tunneling sensitivity balanced against DNS false positives"
+    },
+    "S07": {
+      "name": "signature-triggering lab traffic",
+      "scenario": "synthetic-beacon",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "validated",
+      "question": "a valid Suricata detection is preserved through Cernity",
+      "note": "uses a local demonstration rule (deploy/benchmark/suricata/local.rules); pipeline-preservation, not malware accuracy"
+    },
+    "S08": {
+      "name": "repeated copies of a signature episode (dedup)",
+      "scenario": "synthetic-beacon",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "built",
+      "question": "dedup reduces repetition without hiding a new incident"
+    },
+    "S09": {
+      "name": "scan -> lateral -> callbacks (correlation)",
+      "scenario": "synthetic-killchain",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "holdout",
+      "status": "needs-corpus",
+      "question": "correlation adds a justified incident narrative"
+    },
+    "S10": {
+      "name": "benign-only mixed workload",
+      "scenario": "synthetic-benign",
+      "behavior": null,
+      "control": null,
+      "set": "development",
+      "status": "validated",
+      "question": "both arms correctly finish with no relevant detections"
+    },
+    "S11": {
+      "name": "short/sparse/encrypted/unsupported",
+      "scenario": "synthetic-sparse",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "holdout",
+      "status": "built",
+      "question": "the report admits misses and unavailable evidence"
+    },
+    "S12": {
+      "name": "duplicate/reordered telemetry, sink outage (resilience)",
+      "scenario": "synthetic-beacon",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "needs-live",
+      "question": "loss, duplication, evidence changes, and recovery are visible",
+      "note": "fault injection (M5) \u2014 kill a sink mid-run, replay duplicates; not a pure offline generator"
+    }
+  }
+}

@@ -18,12 +18,14 @@ episode; false = matched none; items that match only an `unknown` episode are UN
 """
 from __future__ import annotations
 
-# Behaviour classes a detection category may satisfy for an episode. Unmapped -> exact match.
+# Behaviour CLASS (episode) -> the detector CATEGORIES that satisfy it (a taxonomy, not tuning:
+# a class is the analyst-level behaviour, the categories are the specific detector techniques).
+# Unmapped class -> exact match. Reconciled against the categories the detectors actually emit.
 _COMPAT = {
     "c2": {"c2", "beacon", "beaconing", "malware", "trojan"},
-    "recon": {"recon", "scan", "portscan"},
-    "exfil": {"exfil", "exfiltration"},
-    "lateral": {"lateral", "lateral_movement"},
+    "recon": {"recon", "scan", "portscan", "strobe", "discovery", "internal_scan"},
+    "exfil": {"exfil", "exfiltration", "dns_tunnel", "dns_exploded", "large_transfer"},
+    "lateral": {"lateral", "lateral_movement", "rdp_fanout", "smb_fanout"},
     "malware": {"malware", "c2", "trojan"},
 }
 

@@ -100,6 +100,14 @@ def test_unknown_episode_match_is_unscored_not_false():
     assert r["unscored_items"] == 1 and r["false_items"] == 0 and r["relevant_items"] == 0
 
 
+def test_behavior_class_subsumes_detector_technique():
+    # an 'exfil' episode is surfaced by a dns_tunnel detector category (technique -> class)
+    exfil_ep = {"id": "x", "label": "malicious", "behavior": "exfil",
+                "entities": [{"value": "10.0.0.9", "role": "initiator"}]}
+    d = _det([("10.0.0.9", "src")], behavior="dns_tunnel")
+    assert ep.score([d], [exfil_ep])["episode_recall"] == 1.0
+
+
 def test_behavior_incompatible_detection_does_not_surface():
     d = _det([("10.0.0.5", "src")], behavior="recon")          # wrong behaviour for a c2 episode
     assert ep.score([d], [BEACON])["episode_recall"] == 0.0

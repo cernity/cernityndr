@@ -1,0 +1,17 @@
+{
+  "dataset": "synthetic-dns-tunnel (built-in, S06)",
+  "granularity": "host",
+  "malicious": ["10.0.0.9"],
+  "episodes": [
+    {"id": "dns-tunnel-1", "label": "malicious", "behavior": "exfil",
+     "entities": [{"value": "10.0.0.9", "role": "initiator"}]}
+  ],
+  "honesty": [
+    "S06: one host emits many long, high-entropy encoded subdomains under a single parent (DNS-tunnel exfiltration) against a benign lookup backdrop. Tests tunnel sensitivity vs DNS false positives.",
+    "Behaviour label is 'exfil'; if the detector emits a different category the episode behaviour or the scorer _COMPAT map must be reconciled (recorded in the run)."
+  ],
+  "caveats": [
+    "Synthetic, hand-built DNS-tunnel scenario; a single host is not a prevalence sample.",
+    "Offline replay measures detection + analyst-volume, not throughput."
+  ]
+}

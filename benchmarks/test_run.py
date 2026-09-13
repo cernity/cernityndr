@@ -60,6 +60,20 @@ def test_wait_for_completion_raises_when_baseline_never_arrives():
         pass
 
 
+def test_preflight_aborts_on_foreign_container():
+    # a fixed container name already present (a real deployment) must abort, never attach (§3)
+    try:
+        run.preflight_no_foreign_containers(names=["cernity-redpanda"], exists=lambda _n: True)
+        assert False, "must abort on collision"
+    except SystemExit as e:
+        assert "cernity-redpanda" in str(e)
+
+
+def test_preflight_passes_when_no_collision():
+    run.preflight_no_foreign_containers(names=["cernity-redpanda", "cernity-finding-service"],
+                                        exists=lambda _n: False)   # no raise
+
+
 def test_wait_for_completion_raises_when_never_stable():
     # counts still changing (still ingesting) must RAISE, never be scored as a settled zero.
     n = {"a": 0}

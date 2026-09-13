@@ -28,7 +28,6 @@ services:
   # Shared SIEM for BOTH arms (single node, security disabled — test only).
   opensearch:
     image: opensearchproject/opensearch:latest
-    container_name: cernity-bench-opensearch
     <<: *hardening-infra
     environment:
       - discovery.type=single-node
@@ -48,7 +47,6 @@ services:
   # Offline Suricata over the PCAP -> split EVE on a shared volume (both arms read it).
   suricata-offline:
     image: jasonish/suricata:latest
-    container_name: cernity-bench-suricata
     <<: *hardening-infra
     entrypoint: ["suricata", "-c", "/etc/suricata/suricata.yaml",
                  "-r", "${BENCH_PCAP:-/pcaps/scenario.pcap}", "-l", "/eve", "-v"]
@@ -62,7 +60,6 @@ services:
   # Offline Zeek over the SAME PCAP -> JSON logs (reference arm).
   zeek-offline:
     image: zeek/zeek:latest
-    container_name: cernity-bench-zeek
     <<: *hardening-infra
     entrypoint: ["sh", "-c",
                  "cd /zeek-logs && zeek -r ${BENCH_PCAP:-/pcaps/scenario.pcap} -C /etc/zeek/local.zeek"]
@@ -77,7 +74,6 @@ services:
   # EVE the offline run produced; no Cernity in this path.
   arm-a-shipper:
     image: fluent/fluent-bit:latest
-    container_name: cernity-bench-arm-a
     <<: *hardening-infra
     volumes:
       - ./arm-a/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
@@ -91,7 +87,6 @@ services:
   # notices the offline Zeek run produced. Empty (zero notices) is a valid result.
   zeek-shipper:
     image: fluent/fluent-bit:latest
-    container_name: cernity-bench-arm-c
     <<: *hardening-infra
     volumes:
       - ./zeek/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
@@ -105,7 +100,6 @@ services:
   # turns it into findings; findings-forwarder is pointed at this OpenSearch below.
   arm-b-feeder:
     image: python:3.12-slim
-    container_name: cernity-bench-arm-b-feeder
     <<: *hardening-infra
     working_dir: /feeder
     entrypoint: ["sh", "-c", "pip install --no-cache-dir kafka-python-ng >/dev/null && sleep 8 && python feeder.py /eve/eve-alerts.json && python feeder.py /eve/eve-nsm.json"]

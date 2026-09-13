@@ -28,6 +28,12 @@ import report
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATASETS = os.path.join(HERE, "datasets")
 COMPOSE = os.path.join(HERE, "..", "deploy", "benchmark", "docker-compose.yml")
+# Dedicated, run-scoped Compose project (M1.1/§3): the network, volumes, state and the
+# (auto-named) bench-own containers are namespaced under this and isolated from a production
+# 'central' deployment. Override BENCH_PROJECT to keep separate isolations apart. NOTE: the
+# INCLUDED central services still carry fixed container_names, so two runs would collide there
+# until those are templated — the preflight below aborts on exactly that collision.
+PROJECT = os.environ.get("BENCH_PROJECT", "cernity-bench")
 
 DEFAULT_HONESTY = [
     "On a direct signature IOC hit, Cernity adds little raw detection over Suricata beyond "
@@ -123,7 +129,40 @@ def wait_for_completion(endpoint, required, optional=(), tries=30, delay=2.0,
 
 
 def compose(*args):
-    subprocess.run(["docker", "compose", "-f", COMPOSE, *args], check=True)
+    subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, *args], check=True)
+
+
+def _fixed_container_names():
+    """The explicit container_name values in the resolved compose (the included central
+    services still set them). The preflight uses these so the benchmark ABORTS on a real
+    collision instead of attaching to / clobbering an existing deployment (§3)."""
+    out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "config", "--format", "json"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return []
+    cfg = json.loads(out.stdout or "{}")
+    return [s["container_name"] for s in cfg.get("services", {}).values() if s.get("container_name")]
+
+
+def preflight_no_foreign_containers(names=None, exists=None):
+    """After tearing down THIS project's own state, any surviving fixed name belongs to a
+    foreign deployment — abort rather than collide (§3 'abort on collisions, never attach')."""
+    names = _fixed_container_names() if names is None else names
+    exists = exists or (lambda n: subprocess.run(["docker", "inspect", n],
+                                                  capture_output=True).returncode == 0)
+    clash = [n for n in names if exists(n)]
+    if clash:
+        raise SystemExit(
+            "benchmark abort: container(s) " + ", ".join(clash) + " already exist — a Cernity "
+            "deployment is running here and the benchmark's fixed names would collide. Run on an "
+            "isolated host or tear that deployment down first (M1.1/§3).")
+
+
+def svc_container(service):
+    """Resolve a bench service to its project-scoped, auto-named container id."""
+    out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "ps", "-q", service],
+                         capture_output=True, text=True)
+    return out.stdout.strip()
 
 
 def run_from_docs(spec: dict, out_dir: str) -> str:
@@ -148,10 +187,14 @@ def run_full(scenario: str, out_dir: str) -> str:
     labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
     endpoint = os.environ.get("BENCH_OPENSEARCH", "http://localhost:9200")
     print(f"[1] bringing up benchmark stack for '{scenario}'")
+    compose("down", "-v", "--remove-orphans")     # clean THIS project's state (empty-state, §3)
+    preflight_no_foreign_containers()             # abort if a real deployment would collide (§3)
     compose("up", "-d", "--build")
     print("[2] waiting for all offline producers to finish (so 'empty' can't mean 'still producing')")
-    for _c in ("cernity-bench-suricata", "cernity-bench-zeek", "cernity-bench-arm-b-feeder"):
-        subprocess.run(["docker", "wait", _c], check=False)
+    for _svc in ("suricata-offline", "zeek-offline", "arm-b-feeder"):
+        _cid = svc_container(_svc)
+        if _cid:
+            subprocess.run(["docker", "wait", _cid], check=False)
     print("[2b] waiting for the arms to settle (baseline required; findings/notices may be validly empty)")
     # arm-a (baseline telemetry) MUST arrive and settle — empty there is a broken run. arm-b
     # (findings) and arm-c (notices) may be legitimately empty (benign scenario or a real miss)

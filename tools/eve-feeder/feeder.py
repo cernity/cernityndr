@@ -49,24 +49,34 @@ def _parse(ts):
         return None
 
 
+def _event_time(e):
+    """Effective event time for ordering / pacing / anchoring: flow.start for flow records (the
+    connection time). The EVE 'timestamp' is the flush time, which offline Suricata sets
+    identically for every open flow at EOF — using it destroys inter-arrival timing (a beacon
+    collapses to one instant). dns/other events have no flow.start and fall back to timestamp."""
+    return _parse((e.get("flow") or {}).get("start") or e.get("timestamp"))
+
+
 def reanchor(events, now=None, anchor="end"):
-    """Shift every event timestamp uniformly so a reference event sits at `now`, preserving
-    relative spacing. anchor='end' (default) puts the NEWEST event at now — burst replay keeps
-    a recorded fixture inside the detectors' rolling window whenever it is replayed.
-    anchor='start' puts the OLDEST at now, so paced replay sends each event at its real offset
-    from the start. Events without a parseable timestamp are left untouched."""
+    """Shift event times uniformly so a reference event sits at `now`, preserving relative
+    spacing. Reference + spacing use the EFFECTIVE event time (flow.start for flows); both the
+    EVE timestamp and flow.start are shifted by the same amount. anchor='end' (default) puts the
+    NEWEST event at now (burst replay keeps a fixture inside the detectors' rolling window);
+    anchor='start' puts the OLDEST at now (paced replay). Events without a time are left as-is."""
     now = now or datetime.now(timezone.utc)
-    stamped = [(_parse(e.get("timestamp")), e) for e in events]
+    stamped = [(_event_time(e), e) for e in events]
     times = [t for t, _ in stamped if t]
     if not times:
         return events
     shift = now - (min(times) if anchor == "start" else max(times))
     for t, e in stamped:
-        if t:
-            e["timestamp"] = (t + shift).isoformat()
-            f = e.get("flow")
-            if isinstance(f, dict) and _parse(f.get("start")):
-                f["start"] = (_parse(f["start"]) + shift).isoformat()
+        if t is None:
+            continue
+        if _parse(e.get("timestamp")):
+            e["timestamp"] = (_parse(e["timestamp"]) + shift).isoformat()
+        f = e.get("flow")
+        if isinstance(f, dict) and _parse(f.get("start")):
+            f["start"] = (_parse(f["start"]) + shift).isoformat()
     return events
 
 
@@ -80,7 +90,7 @@ def paced_offsets(events, speed=1.0, max_gap=None):
     0. Assumes events are ascending by timestamp."""
     offs, prev_t, cum = [], None, 0.0
     for e in events:
-        t = _parse(e.get("timestamp"))
+        t = _event_time(e)          # flow.start for flows; timestamp otherwise
         if t is not None:
             if prev_t is not None:
                 delta = max(0.0, (t - prev_t).total_seconds())
@@ -98,7 +108,7 @@ def main(path):
     events = [json.loads(l) for l in open(path) if l.strip()]
     paced = os.environ.get("CERNITY_FEED_PACED", "").strip().lower() not in ("", "0", "false", "no")
     if paced:
-        events.sort(key=lambda e: _parse(e.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
+        events.sort(key=lambda e: _event_time(e) or datetime.min.replace(tzinfo=timezone.utc))
     if not os.environ.get("CERNITY_FEED_NO_ANCHOR"):
         events = reanchor(events, anchor="start" if paced else "end")
     p = KafkaProducer(bootstrap_servers=os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092"),

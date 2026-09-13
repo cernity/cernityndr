@@ -25,6 +25,15 @@ def test_paced_offsets_max_gap_caps_idle_but_default_is_true_timing():
     assert paced_offsets(evs, max_gap=10) == [0.0, 10.0, 15.0]     # labelled idle-gap compression
 
 
+def test_paced_offsets_prefers_flow_start_for_flow_records():
+    # Offline Suricata flushes every flow at EOF with ONE identical timestamp; the real 5s
+    # spacing survives only in flow.start. Keying on timestamp collapses to [0,0,0]; the fix
+    # (use flow.start for flows) recovers the true pacing.
+    flows = [{"event_type": "flow", "timestamp": "2026-01-01T00:00:00+00:00",
+              "flow": {"start": f"2026-01-01T00:00:{s:02d}+00:00"}} for s in (0, 5, 10)]
+    assert paced_offsets(flows) == [0.0, 5.0, 10.0]
+
+
 def test_paced_offsets_clamps_out_of_order_delta():
     evs = [{"timestamp": "2026-01-01T00:00:10+00:00"},
            {"timestamp": "2026-01-01T00:00:05+00:00"}]   # earlier than previous

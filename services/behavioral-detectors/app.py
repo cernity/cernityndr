@@ -89,7 +89,12 @@ def _ndpi_risks(n):
 
 
 def _event_epoch(e) -> float:
-    ts = e.get("timestamp") or (e.get("flow") or {}).get("start")
+    # For a flow record prefer flow.start (when the connection happened) over the EVE
+    # 'timestamp' (when Suricata emitted/flushed the record). Offline Suricata flushes every
+    # open flow at EOF with one identical timestamp, which collapses beacon periodicity; the
+    # real inter-arrival timing survives only in flow.start. dns/other events have no
+    # flow.start and fall back to timestamp.
+    ts = (e.get("flow") or {}).get("start") or e.get("timestamp")
     if ts:
         try:
             return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()

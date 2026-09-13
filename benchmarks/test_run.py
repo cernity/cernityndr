@@ -60,6 +60,30 @@ def test_wait_for_completion_raises_when_baseline_never_arrives():
         pass
 
 
+def test_manifest_drift_flags_changed_and_missing_only():
+    cur = {"redpanda": {"image_id": "sha256:aaa"}, "finding-service": {"image_id": "sha256:bbb"}}
+    pin = {"images": {"redpanda": {"image_id": "sha256:aaa"},          # matches -> not flagged
+                      "finding-service": {"image_id": "sha256:OLD"},   # changed
+                      "forwarder": {"image_id": "sha256:ccc"}}}        # absent in current
+    assert {d["service"] for d in run.manifest_drift(cur, pin)} == {"finding-service", "forwarder"}
+
+
+def test_manifest_drift_empty_when_identical():
+    imgs = {"a": {"image_id": "1"}, "b": {"image_id": "2"}}
+    assert run.manifest_drift(imgs, {"images": imgs}) == []
+
+
+def test_sha256_matches_hashlib():
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(b"cernity-benchmark")
+        path = f.name
+    try:
+        import hashlib
+        assert run._sha256(path) == hashlib.sha256(b"cernity-benchmark").hexdigest()
+    finally:
+        os.unlink(path)
+
+
 def test_preflight_aborts_on_foreign_container():
     # a fixed container name already present (a real deployment) must abort, never attach (§3)
     try:

@@ -165,6 +165,72 @@ def svc_container(service):
     return out.stdout.strip()
 
 
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def git_provenance():
+    """Source revision + dirty flag of the checkout under test (M0.3)."""
+    def _g(*args):
+        r = subprocess.run(["git", *args], cwd=HERE, capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+    rev = _g("rev-parse", "HEAD")
+    dirty = _g("status", "--porcelain")
+    return {"revision": rev, "dirty": None if dirty is None else bool(dirty)}
+
+
+def running_images(project):
+    """service -> {image_ref, image_id, repo_digests} for the project's containers (M0.3). The
+    local image_id (content id) and the registry repo_digests are recorded separately because
+    they are NOT interchangeable — a pulled tag and a local build can share neither."""
+    ids = subprocess.run(["docker", "compose", "-p", project, "-f", COMPOSE, "ps", "-aq"],
+                         capture_output=True, text=True).stdout.split()
+    out = {}
+    for cid in ids:
+        info = subprocess.run(
+            ["docker", "inspect", cid, "--format",
+             '{{index .Config.Labels "com.docker.compose.service"}}\t{{.Config.Image}}\t{{.Image}}'],
+            capture_output=True, text=True).stdout.strip()
+        if not info:
+            continue
+        parts = (info.split("\t") + ["", "", ""])[:3]
+        svc, ref, image_id = parts
+        rd = subprocess.run(["docker", "inspect", image_id, "--format", "{{json .RepoDigests}}"],
+                            capture_output=True, text=True).stdout.strip()
+        try:
+            repo_digests = json.loads(rd) if rd else []
+        except ValueError:
+            repo_digests = []
+        out[svc] = {"image_ref": ref, "image_id": image_id, "repo_digests": repo_digests}
+    return out
+
+
+def build_manifest(scenario, project, input_paths):
+    """Provenance manifest (M0.3): source revision, per-service image identity, and input
+    hashes, so a run's exact artifacts are recorded and a re-run can be checked against them."""
+    import datetime as _dt
+    inputs = {}
+    for label, p in (input_paths or {}).items():
+        if p and os.path.isfile(p):
+            inputs[label] = {"file": os.path.basename(p), "sha256": _sha256(p)}
+    return {"scenario": scenario, "project": project,
+            "created": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "git": git_provenance(), "images": running_images(project), "inputs": inputs}
+
+
+def manifest_drift(current_images, pinned_manifest):
+    """Services whose running image_id differs from a pinned manifest, or are present on only
+    one side (M0.4). Empty list = the run matches the pinned artifacts; pure/testable."""
+    cur = {s: v.get("image_id") for s, v in (current_images or {}).items()}
+    pin = {s: v.get("image_id") for s, v in ((pinned_manifest or {}).get("images") or {}).items()}
+    return [{"service": s, "running": cur.get(s), "pinned": pin.get(s)}
+            for s in sorted(set(cur) | set(pin)) if cur.get(s) != pin.get(s)]
+
+
 def run_from_docs(spec: dict, out_dir: str) -> str:
     """No-infra path: `spec` carries meta, truth, and each arm's raw docs + counts."""
     gran = spec.get("meta", {}).get("granularity", "host")
@@ -189,7 +255,33 @@ def run_full(scenario: str, out_dir: str) -> str:
     print(f"[1] bringing up benchmark stack for '{scenario}'")
     compose("down", "-v", "--remove-orphans")     # clean THIS project's state (empty-state, §3)
     preflight_no_foreign_containers()             # abort if a real deployment would collide (§3)
-    compose("up", "-d", "--build")
+    # A pinned run must NOT rebuild: `--build` yields fresh, non-reproducible local image IDs
+    # each time (observed: a rebuild drifts nearly every service from the prior manifest), so a
+    # pin can only be honoured by reusing the images already present (built once / loaded by
+    # digest). Unpinned runs build from source as before.
+    compose("up", "-d", *([] if os.environ.get("BENCH_PIN_MANIFEST") else ["--build"]))
+    print("[1b] recording provenance manifest (M0.3) + checking artifact drift (M0.4)")
+    _bench = os.path.dirname(COMPOSE)
+    _pcap = os.environ.get("BENCH_PCAP", "")
+    _pcap_dir = os.environ.get("BENCH_PCAP_DIR")
+    manifest = build_manifest(scenario, PROJECT, {
+        "pcap": os.path.join(_pcap_dir, os.path.basename(_pcap)) if _pcap_dir and _pcap else None,
+        "labels": os.path.join(DATASETS, scenario, "labels.json"),
+        "suricata_yaml": os.path.join(_bench, "suricata", "suricata.yaml"),
+        "zeek_local": os.path.join(_bench, "zeek", "local.zeek"),
+        "arm_a_fluentbit": os.path.join(_bench, "arm-a", "fluent-bit.conf"),
+        "arm_c_fluentbit": os.path.join(_bench, "zeek", "fluent-bit.conf")})
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "manifest.json"), "w") as _mf:
+        json.dump(manifest, _mf, indent=2, sort_keys=True)
+    _pin = os.environ.get("BENCH_PIN_MANIFEST")
+    if _pin:
+        _drift = manifest_drift(manifest["images"], _load(_pin))
+        if _drift:
+            compose("down", "-v", "--remove-orphans")
+            raise SystemExit(f"benchmark abort: running images drift from pinned manifest "
+                             f"{os.path.basename(_pin)}: {json.dumps(_drift)} — the run does not "
+                             f"match the pinned artifacts (M0.4).")
     print("[2] waiting for all offline producers to finish (so 'empty' can't mean 'still producing')")
     for _svc in ("suricata-offline", "zeek-offline", "arm-b-feeder"):
         _cid = svc_container(_svc)

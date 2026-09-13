@@ -77,23 +77,36 @@ class DurableSink:
         fresh = [f for f in findings if f.get("finding_id") not in self._seen]
         if not fresh:
             return
+        # Per-item delivery contract (§handoff stage 2): the inner adapter RETURNS the findings that
+        # were NOT durably accepted (empty/None = all accepted); a raised exception means the whole
+        # attempt is unresolved. A partial-failure response (e.g. an ES bulk 200 with per-item errors)
+        # therefore does NOT count the failed items as delivered. Only the still-unresolved subset is
+        # retried, then dead-lettered — retries and duplicates never inflate the delivered total.
+        pending = fresh
         for attempt in range(self._retries + 1):
             try:
-                self.inner.emit_batch(fresh)
-                self._mark(fresh)                   # delivered: don't re-send on replay
-                self.delivered += len(fresh)        # Rec-D receipt accounting
+                failed = self.inner.emit_batch(pending) or []
+                err = "per-item rejection"
+            except Exception as e:                  # noqa: BLE001
+                failed, err = list(pending), e
+            fail_ids = {id(f) for f in failed}
+            accepted = [f for f in pending if id(f) not in fail_ids]
+            if accepted:
+                self._mark(accepted)                # delivered: don't re-send on replay
+                self.delivered += len(accepted)     # Rec-D: only truly accepted items
+            if not failed:
                 self._on_health(True)
                 return
-            except Exception as e:                  # noqa: BLE001
-                if attempt >= self._retries:
-                    self._dlq(fresh, e)             # dead-lettered = durably handled
-                    self._mark(fresh)
-                    self.dead_lettered += len(fresh)
-                    self._on_health(False)          # backend down -> readiness false (F15)
-                    return
-                log.warning("%s: delivery failed (attempt %d/%d), retrying: %s",
-                            self.name, attempt + 1, self._retries, e)
-                self._sleep(self._backoff * (2 ** attempt))
+            pending = failed
+            if attempt >= self._retries:
+                self._dlq(pending, err)             # dead-lettered = durably handled, never dropped
+                self._mark(pending)
+                self.dead_lettered += len(pending)
+                self._on_health(False)              # backend down / rejected -> readiness false (F15)
+                return
+            log.warning("%s: %d finding(s) unresolved (attempt %d/%d), retrying: %s",
+                        self.name, len(pending), attempt + 1, self._retries, err)
+            self._sleep(self._backoff * (2 ** attempt))
 
     def receipt(self):
         """Per-sink delivery disposition for the accountable completion receipt (Rec-D): how many
@@ -167,10 +180,32 @@ class ElasticsearchAdapter:
         req = urllib.request.Request(self.endpoint + "/_bulk", data=body, method="POST", headers=headers)
         with urllib.request.urlopen(req, context=self.ctx, timeout=20) as r:
             res = json.load(r)
-        if res.get("errors"):
-            log.warning("bulk index had errors -> %s", idx)
+        failed = self._failed_items(findings, res)
+        if failed:
+            log.warning("bulk index: %d/%d item(s) failed -> %s", len(failed), len(findings), idx)
         else:
             log.info("indexed %d finding(s) -> %s", len(findings), idx)
+        return failed
+
+    @staticmethod
+    def _failed_items(findings, res):
+        """Per-item contract: a 2xx bulk response can still reject individual documents. Return the
+        findings whose item errored / did not land 2xx so the caller retries only those and never
+        counts them as delivered. Items are in request order (ES/OS guarantee). A malformed response
+        (errors set but items missing/short) can't be reconciled per-item -> treat all as failed
+        rather than silently accepted."""
+        if not res.get("errors"):
+            return []
+        items = res.get("items", [])
+        if len(items) < len(findings):
+            return list(findings)
+        failed = []
+        for f, item in zip(findings, items):
+            outcome = (item.get("index") or item.get("create") or item.get("update") or {})
+            status = outcome.get("status", 0)
+            if outcome.get("error") or not (200 <= status < 300):
+                failed.append(f)
+        return failed
 
 
 class SplunkAdapter:

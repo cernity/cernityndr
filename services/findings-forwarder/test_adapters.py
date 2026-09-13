@@ -27,6 +27,21 @@ def test_es_doc_normalizes_dates():
     assert d["@timestamp"] == "2026-09-09T03:05:00"
 
 
+def test_es_failed_items_maps_per_item_bulk_outcomes():
+    # §stage2: a 2xx bulk response with per-item errors must surface exactly the failed findings.
+    fs = [{"finding_id": "a"}, {"finding_id": "b"}, {"finding_id": "c"}]
+    ok = {"errors": False, "items": [{"index": {"status": 201}}] * 3}
+    assert ElasticsearchAdapter._failed_items(fs, ok) == []                     # all landed
+    mixed = {"errors": True, "items": [{"index": {"status": 201}},
+                                       {"index": {"status": 429, "error": {"type": "es_rejected"}}},
+                                       {"index": {"status": 200}}]}
+    assert [f["finding_id"] for f in ElasticsearchAdapter._failed_items(fs, mixed)] == ["b"]
+    allbad = {"errors": True, "items": [{"index": {"status": 503}}] * 3}
+    assert len(ElasticsearchAdapter._failed_items(fs, allbad)) == 3             # none delivered
+    short = {"errors": True, "items": [{"index": {"status": 201}}]}             # malformed/short
+    assert len(ElasticsearchAdapter._failed_items(fs, short)) == 3             # unmapped -> all failed
+
+
 def test_splunk_hec_body():
     os.environ.update(SPLUNK_HEC_URL="https://splunk:8088/services/collector", SPLUNK_HEC_TOKEN="t")
     body = SplunkAdapter()._body([F]).decode()

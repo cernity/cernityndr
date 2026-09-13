@@ -25,6 +25,20 @@ class FlakySink:
         self.delivered.extend(f["finding_id"] for f in findings)
 
 
+class PartialSink:
+    """Per-item contract: returns the findings whose id is in `reject` as failed (not delivered),
+    delivers the rest. `heal_after` lets a rejected id start succeeding after N calls (recovery)."""
+    def __init__(self, reject=(), heal_after=None):
+        self.reject, self.heal_after, self.calls, self.delivered = set(reject), heal_after, 0, []
+
+    def emit_batch(self, findings):
+        self.calls += 1
+        rejecting = self.reject if (self.heal_after is None or self.calls <= self.heal_after) else set()
+        ok = [f for f in findings if f["finding_id"] not in rejecting]
+        self.delivered.extend(f["finding_id"] for f in ok)
+        return [f for f in findings if f["finding_id"] in rejecting]
+
+
 def _sink(inner, **kw):
     kw.setdefault("sleep", lambda _s: None)      # no real backoff sleep in tests
     kw.setdefault("backoff", 0)
@@ -77,6 +91,26 @@ def test_receipt_counts_delivered_and_dead_lettered():
         s2 = _sink(FlakySink(fail_times=99), retries=1, dlq_dir=d)
         s2.emit_batch([{"finding_id": "c"}])
         assert s2.receipt()["dead_lettered"] == 1 and s2.receipt()["delivered"] == 0
+
+
+def test_partial_rejection_counts_only_accepted_and_dead_letters_the_rest():
+    # §stage2: a partial-failure response must not count the failed item as delivered.
+    with tempfile.TemporaryDirectory() as d:
+        inner = PartialSink(reject=["b"])                   # b never accepted
+        s = _sink(inner, retries=1, dlq_dir=d)
+        s.emit_batch([{"finding_id": "a"}, {"finding_id": "b"}])
+        assert inner.delivered == ["a"]                     # only a landed
+        assert s.receipt() == {"name": "test", "delivered": 1, "dead_lettered": 1}
+        rows = [json.loads(l) for l in open(os.path.join(d, "dlq-test.jsonl"))]
+        assert [r["finding"]["finding_id"] for r in rows] == ["b"]   # b dead-lettered, not lost
+
+
+def test_recoverable_partial_failure_eventually_delivers_all():
+    inner = PartialSink(reject=["b"], heal_after=1)         # b rejected once, then accepted
+    s = _sink(inner, retries=3)
+    s.emit_batch([{"finding_id": "a"}, {"finding_id": "b"}])
+    assert sorted(inner.delivered) == ["a", "b"]
+    assert s.receipt() == {"name": "test", "delivered": 2, "dead_lettered": 0}   # each counted once
 
 
 def test_receipt_does_not_double_count_replays():

@@ -87,6 +87,20 @@ services:
     restart: "no"
     logging: *cernity-logging
 
+  # Arm C: Zeek notice.log -> OpenSearch (index arm-c-zeek). Reference arm; ships the
+  # notices the offline Zeek run produced. Empty (zero notices) is a valid result.
+  zeek-shipper:
+    image: fluent/fluent-bit:latest
+    container_name: cernity-bench-arm-c
+    <<: *hardening-infra
+    volumes:
+      - ./zeek/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - cernity-bench-zeek:/zeek-logs:ro
+    depends_on:
+      opensearch: {condition: service_healthy}
+    restart: "no"
+    logging: *cernity-logging
+
   # Arm B: the SAME EVE -> Cernity bus (feeder), so the central stack (from the include)
   # turns it into findings; findings-forwarder is pointed at this OpenSearch below.
   arm-b-feeder:
@@ -105,11 +119,14 @@ services:
     restart: "no"
     logging: *cernity-logging
 
-# NOTE: point findings-forwarder (from the central include) at this OpenSearch by
-# setting these in .env before `up` — Arm B lands in the ndr-findings (arm-b) index:
-#   CERNITY_SINK=opensearch
-#   ES_ENDPOINT=http://opensearch:9200
-#   ES_INDEX_PREFIX=arm-b-findings
+  # Arm B sink: point the central findings-forwarder (from the include) at THIS
+  # OpenSearch so Arm B lands in arm-b-findings-* — no manual .env needed (U9).
+  # Compose merges these env keys over the central service's defaults.
+  findings-forwarder:
+    environment:
+      CERNITY_SINK: opensearch
+      ES_ENDPOINT: http://opensearch:9200
+      ES_INDEX_PREFIX: arm-b-findings
 
 volumes:
   cernity-bench-eve: {}

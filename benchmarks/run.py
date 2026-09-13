@@ -140,12 +140,16 @@ def run_full(scenario: str, out_dir: str) -> str:
     compose("up", "-d", "--build")
     print("[2] waiting for offline engines to finish + arms to ship (see compose logs)")
     subprocess.run(["docker", "wait", "cernity-bench-suricata"], check=False)
-    print("[2b] waiting for ingestion/delivery to settle across all arms")
-    wait_for_ingest(endpoint, ["arm-a-suricata", "arm-b-findings-*", "arm-c-zeek"])
+    print("[2b] waiting for ingestion/delivery to settle across the scored arms")
+    # arm-a (baseline flow) and arm-b (Cernity delivery) MUST settle — an empty one there
+    # means a broken pipeline, not a real result, so keep fail-loud. arm-c (Zeek notices)
+    # is a reference and may legitimately be empty (a pcap that raises zero notices), so it
+    # is not gated here and is queried non-strict below.
+    wait_for_ingest(endpoint, ["arm-a-suricata", "arm-b-findings-*"])
     print("[3] querying all arms from OpenSearch (fail-loud, paginated)")
     arm_a = os_search(endpoint, "arm-a-suricata")
     arm_b = os_search(endpoint, "arm-b-findings-*")
-    arm_c = os_search(endpoint, "arm-c-zeek")               # Zeek-notice reference arm (F10)
+    arm_c = os_search(endpoint, "arm-c-zeek", strict=False)  # Zeek-notice reference; empty-tolerant
     gran = labels.get("granularity", "host")
     truth = set(labels["malicious"])
     arms_raw = {

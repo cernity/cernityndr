@@ -128,6 +128,35 @@ def test_classify_completion_inconclusive_cases():
     assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {}, {"arm-a-suricata": 100}) == "inconclusive"                 # drain unverified
 
 
+def _clean(sink_receipt=None):
+    return run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                   {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                   sink_receipt=sink_receipt)
+
+
+def test_reconciled_only_with_an_accountable_sink_receipt():
+    # Rec-D: a clean run with NO receipt is inputs_drained; an accountable receipt upgrades it.
+    assert _clean()["state"] == "inputs_drained"
+    receipt = {"consumed": 10, "suppressed": 2, "delivered_live": 8,
+               "sinks": [{"name": "opensearch", "delivered": 8, "dead_lettered": 0}]}
+    c = _clean(receipt)
+    assert c["state"] == "reconciled" and c["delivery"]["dead_lettered"] == 0
+
+
+def test_dead_letters_still_reconcile_as_a_recorded_negative_outcome():
+    receipt = {"consumed": 8, "suppressed": 0, "delivered_live": 8,
+               "sinks": [{"name": "splunk", "delivered": 5, "dead_lettered": 3}]}
+    c = _clean(receipt)
+    assert c["state"] == "reconciled" and c["delivery"]["dead_lettered"] == 3   # accounted, surfaced
+
+
+def test_inconsistent_receipt_does_not_reconcile():
+    # sink accounts for fewer than the live consumed count -> not accountable -> stays inputs_drained
+    receipt = {"consumed": 10, "suppressed": 0, "delivered_live": 10,
+               "sinks": [{"name": "es", "delivered": 4, "dead_lettered": 0}]}
+    assert _clean(receipt)["state"] == "inputs_drained"
+
+
 def test_classify_completion_rejects_incomplete_or_unknown_inventory():
     # §24.2 adversarial battery: the reproduced false reconciliations must now be inconclusive.
     def cc(pe, gl):

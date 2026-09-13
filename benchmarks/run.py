@@ -367,23 +367,63 @@ def wait_for_drain(project, tries=25, delay=3.0, sleep=None, lag_fn=None):
     return prev or {}
 
 
+def read_sink_receipt(project, topic="ndr.sink.receipt.v1", limit=1000, timeout=12):
+    """The latest findings-forwarder delivery receipt (Rec-D), read from the bus via rpk. Reads from
+    the start and keeps the last valid JSON record; rpk tails after end-of-topic, so a bounded
+    timeout stops it and we parse whatever was printed. None if the topic/receipt is absent."""
+    cid = _redpanda_cid(project)
+    if not cid:
+        return None
+    p = subprocess.Popen(["docker", "exec", cid, "rpk", "topic", "consume", topic,
+                          "-o", "start", "-n", str(limit), "-f", "%v\n"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, _ = p.communicate()
+    last = None
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                last = json.loads(line)
+            except ValueError:
+                pass
+    return last
+
+
+def _receipt_accounted(receipt):
+    """A findings-forwarder sink receipt (Rec-D) is 'accounted' when every consumed finding is
+    accounted for downstream — each sink's delivered + dead_lettered equals the live (non-suppressed)
+    consumed count, with at least one sink reporting. dead_lettered>0 is a recorded delivery FAILURE
+    (a valid negative product result), not a gap: the work is still accounted, so it does not block
+    reconciliation — it is surfaced separately."""
+    if not receipt or not receipt.get("sinks"):
+        return False
+    live = receipt.get("delivered_live")
+    if live is None:
+        return False
+    return all(s.get("delivered", 0) + s.get("dead_lettered", 0) == live for s in receipt["sinks"])
+
+
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
-                        expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS):
-    """Explicit run state (R2/§21.2, §24.2 + §26/§25.2 repair). A valid outcome requires the COMPLETE
+                        expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None):
+    """Explicit run state (R2/§21.2, §24.2 + §25.2/Rec-D). A valid outcome requires the COMPLETE
     expected inventory to report — an absent, null, or unparsable status is unknown, never success:
       invalid        — an expected producer exited non-zero (a definite product/harness failure).
       inconclusive   — an expected producer is missing/null/unparsable; an expected consumer group is
                        missing/unparsable/not-drained; drain is unverifiable (no readings at all); or a
                        required baseline arm is empty. Attribution is impossible; not a valid zero.
-      inputs_drained — every expected producer exited 0 AND every expected group drained to 0 AND the
-                       baseline arrived. This proves the produced input was CONSUMED and the baseline
-                       shipped; an empty findings arm is then a valid miss/benign. It is deliberately
-                       NOT called `reconciled`: a zero-lag group is offset progress, not proof of
-                       timer-driven detection / pending-capture / async-publication / per-sink
-                       disposition. Full `reconciled` is reserved for when those downstream acks are
-                       collected (§25.2) — not yet emitted, so `inputs_drained` is the current best.
-    The run is scoreable at `inputs_drained`; the report must label it as inputs-drained (not full
-    reconciliation) so the missing downstream evidence stays visible. Pure/testable."""
+      inputs_drained — every expected producer exited 0, every expected group drained to 0, and the
+                       baseline arrived, but NO accountable sink receipt confirmed downstream
+                       disposition. Proves the input was CONSUMED, not that every finding reached its
+                       sink — a zero-lag group is offset progress, not delivery.
+      reconciled     — inputs_drained AND a forwarder sink receipt accounts for every consumed finding
+                       (delivered + intentionally suppressed + dead-lettered), so all accepted work is
+                       accounted for (Rec-D). dead_lettered>0 is a recorded delivery failure, still
+                       accounted; it does not demote the state, it is reported.
+    Scoreable at inputs_drained or reconciled. Pure/testable."""
     unresolved = []
     # Producers: the full expected set must each report a valid exit. non-zero => invalid;
     # missing / None / unparsable => unknown (cannot reconcile).
@@ -411,11 +451,21 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
-    state = ("invalid" if failed
-             else "inputs_drained" if not unresolved
-             else "inconclusive")
+    if failed:
+        state = "invalid"
+    elif unresolved:
+        state = "inconclusive"
+    elif _receipt_accounted(sink_receipt):
+        state = "reconciled"                       # Rec-D: downstream disposition accounted for
+    else:
+        state = "inputs_drained"                   # consumed + baseline, but delivery unconfirmed
+    delivery = None
+    if sink_receipt:
+        delivery = {"consumed": sink_receipt.get("consumed"), "suppressed": sink_receipt.get("suppressed"),
+                    "sinks": sink_receipt.get("sinks"),
+                    "dead_lettered": sum(s.get("dead_lettered", 0) for s in sink_receipt.get("sinks", []))}
     return {"state": state, "producer_exits": producer_exits,
-            "consumer_group_lag": group_lag, "unresolved": unresolved}
+            "consumer_group_lag": group_lag, "unresolved": unresolved, "delivery": delivery}
 
 
 def run_from_docs(spec: dict, out_dir: str) -> str:
@@ -517,8 +567,9 @@ def run_full(scenario: str, out_dir: str) -> str:
                                          min_stable=3)
     except RuntimeError:
         arm_counts = {}                    # never settled -> classified inconclusive below
-    completion = classify_completion(producer_exits, group_lag, arm_counts)
-    SCOREABLE = ("inputs_drained", "reconciled")   # §25.2: reconciled requires downstream acks (future)
+    sink_receipt = read_sink_receipt(PROJECT)   # Rec-D: the forwarder's accountable delivery disposition
+    completion = classify_completion(producer_exits, group_lag, arm_counts, sink_receipt=sink_receipt)
+    SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,
         # the pipeline never drained, or the baseline never arrived. Write a failure report with the

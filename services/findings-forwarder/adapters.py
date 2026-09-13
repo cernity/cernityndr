@@ -48,6 +48,8 @@ class DurableSink:
         self._retries, self._backoff, self._sleep = retries, backoff, sleep
         self._dedup_max = dedup_max
         self._seen: dict = {}                       # finding_id -> None (insertion-ordered FIFO)
+        self.delivered = 0                          # Rec-D: per-sink delivery accounting for the receipt
+        self.dead_lettered = 0
         # F15: report real backend health — a delivery flips readiness true, an exhausted
         # dead-letter flips it false, so the /readyz probe reflects a wedged sink.
         self._on_health = on_health or (lambda ok: None)
@@ -79,17 +81,25 @@ class DurableSink:
             try:
                 self.inner.emit_batch(fresh)
                 self._mark(fresh)                   # delivered: don't re-send on replay
+                self.delivered += len(fresh)        # Rec-D receipt accounting
                 self._on_health(True)
                 return
             except Exception as e:                  # noqa: BLE001
                 if attempt >= self._retries:
                     self._dlq(fresh, e)             # dead-lettered = durably handled
                     self._mark(fresh)
+                    self.dead_lettered += len(fresh)
                     self._on_health(False)          # backend down -> readiness false (F15)
                     return
                 log.warning("%s: delivery failed (attempt %d/%d), retrying: %s",
                             self.name, attempt + 1, self._retries, e)
                 self._sleep(self._backoff * (2 ** attempt))
+
+    def receipt(self):
+        """Per-sink delivery disposition for the accountable completion receipt (Rec-D): how many
+        findings this sink durably delivered vs dead-lettered. dead_lettered>0 is a valid negative
+        product result (delivery failure, durably captured), not lost data."""
+        return {"name": self.name, "delivered": self.delivered, "dead_lettered": self.dead_lettered}
 
 
 class FileAdapter:
@@ -328,6 +338,9 @@ class MultiAdapter:
                 a.emit_batch(findings)
             except Exception as e:
                 log.error("sink %s failed (continuing): %s", type(a).__name__, e)
+
+    def receipt(self):
+        return [r for a in self.adapters for r in ([a.receipt()] if hasattr(a, "receipt") else [])]
 
 
 def _make(kind):

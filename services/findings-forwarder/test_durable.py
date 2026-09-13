@@ -67,6 +67,26 @@ def test_dead_lettered_is_not_retried_forever():
         assert inner.calls == before
 
 
+def test_receipt_counts_delivered_and_dead_lettered():
+    # Rec-D: the per-sink receipt accounts for what was delivered vs durably dead-lettered.
+    inner = FlakySink(fail_times=0)
+    s = _sink(inner)
+    s.emit_batch([{"finding_id": "a"}, {"finding_id": "b"}])
+    assert s.receipt() == {"name": "test", "delivered": 2, "dead_lettered": 0}
+    with tempfile.TemporaryDirectory() as d:
+        s2 = _sink(FlakySink(fail_times=99), retries=1, dlq_dir=d)
+        s2.emit_batch([{"finding_id": "c"}])
+        assert s2.receipt()["dead_lettered"] == 1 and s2.receipt()["delivered"] == 0
+
+
+def test_receipt_does_not_double_count_replays():
+    inner = FlakySink()
+    s = _sink(inner)
+    s.emit_batch([{"finding_id": "a"}])
+    s.emit_batch([{"finding_id": "a"}])                     # replay -> idempotent, not re-counted
+    assert s.receipt()["delivered"] == 1
+
+
 def test_health_callback_reflects_delivery_then_backend_loss():
     # F15: readiness must track real backend state — a delivery reports healthy, an
     # exhausted dead-letter reports unhealthy.

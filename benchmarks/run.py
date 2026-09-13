@@ -260,6 +260,7 @@ def run_full(scenario: str, out_dir: str) -> str:
     # pin can only be honoured by reusing the images already present (built once / loaded by
     # digest). Unpinned runs build from source as before.
     compose("up", "-d", *([] if os.environ.get("BENCH_PIN_MANIFEST") else ["--build"]))
+    apply_index_template(endpoint)             # M3: type the arm fields before ingestion (best-effort)
     print("[1b] recording provenance manifest (M0.3) + checking artifact drift (M0.4)")
     _bench = os.path.dirname(COMPOSE)
     _pcap = os.environ.get("BENCH_PCAP", "")
@@ -331,6 +332,7 @@ def run_full(scenario: str, out_dir: str) -> str:
             "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
             "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
         }
+    results["exports"] = export_arms(endpoint, out_dir, PROJECT)   # M3: complete raw export
     return _write(results, out_dir)
 
 
@@ -346,6 +348,70 @@ def _eve_paths():
     if not d or not os.path.isdir(d):
         return []
     return [os.path.join(root, f) for root, _dirs, files in os.walk(d) for f in sorted(files)]
+
+
+def _refresh(endpoint):
+    try:
+        urllib.request.urlopen(urllib.request.Request(endpoint + "/_refresh", method="POST"),
+                               timeout=20).read()
+    except Exception:                            # noqa: BLE001
+        pass
+
+
+def apply_index_template(endpoint, tries=15, delay=2.0):
+    """Best-effort: install the arm-index template (M3) so Dashboards fields are typed. Racing
+    the shippers is acceptable — dynamic mapping still works and the numerical export reads raw
+    docs; this only improves the views. Waits briefly for OpenSearch, then PUTs the template."""
+    path = os.path.join(HERE, "dashboards", "mappings", "arm-index-template.json")
+    if not os.path.isfile(path):
+        return
+    body = _load(path)
+    body.pop("_comment", None)
+    import time as _t
+    for _ in range(tries):
+        try:
+            req = urllib.request.Request(endpoint + "/_index_template/cernity-bench-arms",
+                                         data=json.dumps(body).encode(), method="PUT",
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=10).read()
+            return
+        except Exception:                        # noqa: BLE001
+            _t.sleep(delay)
+
+
+ARM_EXPORTS = (("arm-a-suricata", "suricata-alerts.jsonl"),
+               ("arm-b-findings-*", "cernity-findings.jsonl"),
+               ("arm-c-zeek", "zeek-notices.jsonl"))
+
+
+def export_arms(endpoint, out_dir, project=None):
+    """Complete, reproducible export of every arm's docs + the shared source EVE to the
+    release-bundle layout (M3/§9.6/§11) — the auditable source for any numerical claim, and the
+    data behind the paired SIEM views. Refresh first so the read sees every write, then paginate
+    all docs (search_after, no 10k cap). Post-run the arms are static, so this is a complete
+    snapshot; a PIT is only needed under concurrent writes (noted). Returns per-file counts."""
+    outdir = os.path.join(out_dir, "output")
+    os.makedirs(outdir, exist_ok=True)
+    _refresh(endpoint)
+    counts = {}
+    for index, fname in ARM_EXPORTS:
+        docs = os_search(endpoint, index, strict=False)
+        with open(os.path.join(outdir, fname), "w") as f:
+            for d in docs:
+                f.write(json.dumps(d, sort_keys=True) + "\n")
+        counts[fname] = len(docs)
+    if project:                                  # the common EVE both arms consumed (fairness anchor)
+        vol = f"{project}_cernity-bench-eve"
+        try:
+            out = subprocess.run(["docker", "run", "--rm", "-v", f"{vol}:/eve:ro", "alpine",
+                                  "sh", "-c", "cat /eve/eve-*.json 2>/dev/null"],
+                                 capture_output=True, text=True, timeout=60).stdout
+            with open(os.path.join(outdir, "source-eve.jsonl"), "w") as f:
+                f.write(out)
+            counts["source-eve.jsonl"] = sum(1 for _l in out.splitlines() if _l.strip())
+        except Exception:                        # noqa: BLE001
+            pass
+    return counts
 
 
 def _write(results: dict, out_dir: str) -> str:

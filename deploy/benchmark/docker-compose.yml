@@ -44,6 +44,20 @@ services:
       retries: 30
     logging: *cernity-logging
 
+  # OpenSearch Dashboards for the paired SIEM views (M3/§10). Loopback-bound (§3); the numerical
+  # claims come from the exporter (out/<scenario>/output/*.jsonl), this is the human view layer.
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:latest
+    <<: *hardening-infra
+    environment:
+      - 'OPENSEARCH_HOSTS=["http://opensearch:9200"]'
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports: ["127.0.0.1:5601:5601"]
+    depends_on:
+      opensearch: {condition: service_healthy}
+    restart: "no"
+    logging: *cernity-logging
+
   # Offline Suricata over the PCAP -> split EVE on a shared volume (both arms read it).
   suricata-offline:
     image: jasonish/suricata:latest

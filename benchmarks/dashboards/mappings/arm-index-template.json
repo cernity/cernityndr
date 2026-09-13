@@ -1,0 +1,28 @@
+{
+  "_comment": "OpenSearch index template for the benchmark arm indices (M3/§9 'initialize index mappings even for valid zero-output arms'). Applied by benchmarks/run.py before ingestion so the Dashboards views get typed fields (ip/date/keyword) instead of dynamic strings. It does not affect the numerical export, which reads the raw docs.",
+  "index_patterns": ["arm-a-suricata*", "arm-b-findings*", "arm-c-zeek*"],
+  "template": {
+    "settings": {"number_of_replicas": 0},
+    "mappings": {
+      "properties": {
+        "@timestamp":   {"type": "date"},
+        "timestamp":    {"type": "date"},
+        "first_seen":   {"type": "date"},
+        "last_seen":    {"type": "date"},
+        "src_ip":       {"type": "ip"},
+        "dest_ip":      {"type": "ip"},
+        "community_id": {"type": "keyword"},
+        "event_type":   {"type": "keyword"},
+        "detector_id":  {"type": "keyword"},
+        "category":     {"type": "keyword"},
+        "finding_id":   {"type": "keyword"},
+        "tenant":       {"type": "keyword"},
+        "state":        {"type": "keyword"},
+        "severity":     {"type": "integer"},
+        "confidence":   {"type": "float"},
+        "signature":    {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}},
+        "entities":     {"type": "text"}
+      }
+    }
+  }
+}

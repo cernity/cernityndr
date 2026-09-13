@@ -45,12 +45,24 @@ echo "$SENSOR_USER" > bus_user.txt
 printf '%s' "$SENSOR_PASS" > bus_password.txt
 printf '%s' "$CENTRAL_PASS" > bus_central_password.txt
 printf '%s' "$ADMIN_PASS" > bus_admin_password.txt
-# broker.crt/broker.key/ca.crt are bind-mounted into the redpanda container, which runs as a
-# non-host uid and must be able to read them, so they are world-readable. ca.key (the CA
-# signing key) and the SCRAM password files are NOT mounted into redpanda — the passwords
-# reach it via env — so they stay owner-only. Keep the secrets dir itself off untrusted hosts.
-chmod 644 broker.crt broker.key ca.crt
+# The redpanda container runs as a non-root uid (default 101 for redpandadata/redpanda) and must
+# read broker.key over the bind mount. Rather than make the private key world-readable, own the
+# broker key+cert by that uid at mode 640 (owner+group read only — NOT world-readable). The chown
+# needs privilege: run this script as root, or set CERNITY_BROKER_UID/GID and chown the broker
+# key/cert to the broker uid yourself. ca.crt/broker.crt are public (644); ca.key (CA signing key)
+# and the SCRAM password files are never mounted into redpanda, so they stay owner-only (600).
+chmod 644 broker.crt ca.crt
+chmod 640 broker.key
 chmod 600 ca.key bus_password.txt bus_central_password.txt bus_admin_password.txt
+BUID="${CERNITY_BROKER_UID:-101}"; BGID="${CERNITY_BROKER_GID:-101}"
+if ! chown "$BUID:$BGID" broker.key broker.crt 2>/dev/null; then
+  echo "" >&2
+  echo "WARNING: could not chown broker.key/broker.crt to ${BUID}:${BGID} (needs root)." >&2
+  echo "The redpanda container (uid ${BUID}) must be able to read broker.key at mode 640." >&2
+  echo "Re-run this script with privilege, or chown the broker key/cert to the broker uid" >&2
+  echo "yourself (e.g. sudo chown ${BUID}:${BGID} broker.key broker.crt). Do NOT chmod 644 the" >&2
+  echo "private key — that would make it world-readable." >&2
+fi
 
 cat <<MSG
 

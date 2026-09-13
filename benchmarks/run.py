@@ -397,45 +397,21 @@ def run_full(scenario: str, out_dir: str) -> str:
                 "honesty": [], "caveats": [f"run not reconciled ({completion['state']}); not scored (R2/§9)"]},
                out_dir)
         raise SystemExit(f"benchmark not reconciled ({completion['state']}): {completion['unresolved']}")
-    print("[3] querying all arms from OpenSearch (paginated; findings/notices empty-tolerant)")
-    arm_a = os_search(endpoint, "arm-a-suricata")
-    arm_b = os_search(endpoint, "arm-b-findings-*", strict=False)  # findings may be validly empty
-    arm_c = os_search(endpoint, "arm-c-zeek", strict=False)        # Zeek-notice reference; empty-tolerant
-    gran = labels.get("granularity", "host")
-    truth = set(labels["malicious"])
-    arms_raw = {
-        "suricata_siem": {"flagged": extract.flagged_from_alerts(arm_a, gran),
-                          "raw_events": len(arm_a), "alerts": _count_alerts(arm_a),
-                          "delivered": _count_alerts(arm_a)},
-        "cernity_siem": {"flagged": extract.flagged_from_findings(arm_b, gran),
-                         "raw_events": len(arm_a), "alerts": len(arm_b), "delivered": len(arm_b)},
-        # Zeek reference arm: notices parsed separately from Suricata alerts (§4).
-        "zeek_reference": {"flagged": extract.flagged_from_notices(arm_c, gran),
-                           "raw_events": len(arm_c), "alerts": len(arm_c), "delivered": len(arm_c)},
-    }
+    print("[3] exporting the immutable snapshot, then scoring FROM it (R4)")
+    exported, _export_counts = export_arms(endpoint, out_dir, PROJECT)
+    arm_a = exported["arm-a-suricata"]           # scored docs ARE the exported files (§20.3)
+    arm_b = exported["arm-b-findings-*"]
+    arm_c = exported["arm-c-zeek"]
     meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),
-            "granularity": f"per-{gran}",
+            "granularity": f"per-{labels.get('granularity', 'host')}",
             "determinism_hash": determinism_hash(*_eve_paths()),
             "suricata_version": os.environ.get("BENCH_SURICATA_VER", "jasonish/suricata:latest"),
             "zeek_version": os.environ.get("BENCH_ZEEK_VER", "zeek/zeek:latest"),
             "etopen": os.environ.get("BENCH_ETOPEN", "(pin in README)"),
             "cernity_version": os.environ.get("BENCH_CERNITY_VER", "dev")}
-    results = extract.build_results(meta, arms_raw, truth,
-                                    honesty=labels.get("honesty") or DEFAULT_HONESTY,
-                                    caveats=labels.get("caveats") or DEFAULT_CAVEATS)
-    # M2/§7: incident/role-aware scoring when the labels carry episodes (entities+roles). Reported
-    # alongside the host-set score; a detection naming a matched episode's target is relevant, not
-    # an unrelated false positive.
-    truth_eps = labels.get("episodes")
-    if truth_eps:
-        import episodes as _epmod
-        results["episode_scoring"] = {
-            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps),
-            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
-            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
-        }
+    results = _score_arms(arm_a, arm_b, arm_c, labels, meta)       # R4: score the exported snapshot
     results["completion"] = completion                             # R2: reconciled + evidence
-    results["exports"] = export_arms(endpoint, out_dir, PROJECT)   # M3: complete raw export
+    results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
     return _write(results, out_dir)
 
 
@@ -496,13 +472,14 @@ def export_arms(endpoint, out_dir, project=None):
     outdir = os.path.join(out_dir, "output")
     os.makedirs(outdir, exist_ok=True)
     _refresh(endpoint)
-    counts = {}
+    counts, docs_by = {}, {}
     for index, fname in ARM_EXPORTS:
         docs = os_search(endpoint, index, strict=False)
         with open(os.path.join(outdir, fname), "w") as f:
             for d in docs:
                 f.write(json.dumps(d, sort_keys=True) + "\n")
         counts[fname] = len(docs)
+        docs_by[index] = docs
     if project:                                  # the common EVE both arms consumed (fairness anchor)
         vol = f"{project}_cernity-bench-eve"
         try:
@@ -514,7 +491,56 @@ def export_arms(endpoint, out_dir, project=None):
             counts["source-eve.jsonl"] = sum(1 for _l in out.splitlines() if _l.strip())
         except Exception:                        # noqa: BLE001
             pass
-    return counts
+    return docs_by, counts
+
+
+def _score_arms(arm_a, arm_b, arm_c, labels, meta):
+    """Compose the report from the three arms' documents + frozen labels (R4). The SAME function
+    scores a live run (fed the exported snapshot) and a file-only recompute, so a report is
+    reproducible from out/<scenario>/output/*.jsonl. Pure over its inputs."""
+    gran = labels.get("granularity", "host")
+    truth = set(labels.get("malicious", []))
+    arms_raw = {
+        "suricata_siem": {"flagged": extract.flagged_from_alerts(arm_a, gran),
+                          "raw_events": len(arm_a), "alerts": _count_alerts(arm_a),
+                          "delivered": _count_alerts(arm_a)},
+        "cernity_siem": {"flagged": extract.flagged_from_findings(arm_b, gran),
+                         "raw_events": len(arm_a), "alerts": len(arm_b), "delivered": len(arm_b)},
+        "zeek_reference": {"flagged": extract.flagged_from_notices(arm_c, gran),
+                           "raw_events": len(arm_c), "alerts": len(arm_c), "delivered": len(arm_c)},
+    }
+    results = extract.build_results(meta, arms_raw, truth,
+                                    honesty=labels.get("honesty") or DEFAULT_HONESTY,
+                                    caveats=labels.get("caveats") or DEFAULT_CAVEATS)
+    truth_eps = labels.get("episodes")
+    if truth_eps:
+        import episodes as _epmod
+        results["episode_scoring"] = {
+            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps),
+            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
+            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
+        }
+    return results
+
+
+def _read_jsonl(path):
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def score_from_export(out_dir, scenario):
+    """Recompute the report from ONLY the exported files + frozen labels (R4/§21.4 file-only
+    recomputation): every metric must reconcile with out/<scenario>/output/*.jsonl."""
+    labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
+    od = os.path.join(out_dir, "output")
+    arm_a = _read_jsonl(os.path.join(od, "suricata-alerts.jsonl"))
+    arm_b = _read_jsonl(os.path.join(od, "cernity-findings.jsonl"))
+    arm_c = _read_jsonl(os.path.join(od, "zeek-notices.jsonl"))
+    meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),
+            "granularity": f"per-{labels.get('granularity', 'host')}", "source": "file-only recompute"}
+    return _score_arms(arm_a, arm_b, arm_c, labels, meta)
 
 
 def _write(results: dict, out_dir: str) -> str:
@@ -532,8 +558,15 @@ def main(argv=None):
     ap.add_argument("scenario", help="scenario name under benchmarks/datasets/")
     ap.add_argument("--from-docs", help="no-infra: JSON of pre-fetched arm docs")
     ap.add_argument("--out", default=None, help="output dir (default benchmarks/out/<scenario>)")
+    ap.add_argument("--score-export", action="store_true",
+                    help="R4: recompute the report from out/<scenario>/output/*.jsonl only (no infra)")
     a = ap.parse_args(argv)
     out_dir = a.out or os.path.join(HERE, "out", a.scenario)
+    if a.score_export:
+        results = score_from_export(out_dir, a.scenario)
+        md = _write(results, os.path.join(out_dir, "recompute"))
+        print(f"file-only recompute -> {md}")
+        return 0
     md = (run_from_docs(_load(a.from_docs), out_dir) if a.from_docs
           else run_full(a.scenario, out_dir))
     print(f"report -> {md}")

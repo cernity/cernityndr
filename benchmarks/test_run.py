@@ -141,6 +141,45 @@ def test_wait_for_completion_raises_when_never_stable():
         pass
 
 
+def test_score_from_export_reconciles_with_live_scoring():
+    # R4/§20.3+§21.4: the report is computed FROM the exported files. Scoring the same docs
+    # in-memory (as run_full does with the export snapshot) and re-reading them off disk must
+    # produce identical metrics — otherwise a published number can't be reproduced from out/.
+    import json
+    arm_a = [{"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "203.0.113.66",
+              "alert": {"signature": "ET beacon"}}]
+    arm_b = [{"finding_id": "f1", "behavior": "c2",
+              "entities": [{"value": "10.0.0.5", "type": "ip", "role": "initiator"},
+                           {"value": "203.0.113.66", "type": "ip", "role": "target"}]}]
+    labels = {"malicious": ["10.0.0.5"], "granularity": "host",
+              "episodes": [{"id": "A", "label": "malicious", "behavior": "c2",
+                            "entities": [{"value": "10.0.0.5", "role": "initiator"},
+                                         {"value": "203.0.113.66", "role": "target"}]}]}
+    live = run._score_arms(arm_a, arm_b, [], labels, {"scenario": "t", "granularity": "per-host"})
+
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "out", "t", "output")
+        os.makedirs(od)
+        for fname, docs in (("suricata-alerts.jsonl", arm_a), ("cernity-findings.jsonl", arm_b),
+                            ("zeek-notices.jsonl", [])):
+            with open(os.path.join(od, fname), "w") as f:
+                for x in docs:
+                    f.write(json.dumps(x) + "\n")
+        ds = os.path.join(d, "datasets", "t")
+        os.makedirs(ds)
+        with open(os.path.join(ds, "labels.json"), "w") as f:
+            json.dump(labels, f)
+        saved = run.DATASETS
+        run.DATASETS = os.path.join(d, "datasets")
+        try:
+            recomputed = run.score_from_export(os.path.join(d, "out", "t"), "t")
+        finally:
+            run.DATASETS = saved
+
+    assert recomputed["episode_scoring"] == live["episode_scoring"], "episode metrics not reproducible from files"
+    assert recomputed["arms"] == live["arms"], "arm metrics not reproducible from files"
+
+
 def test_eve_paths_hashes_real_outputs():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "eve.json"), "w") as f:

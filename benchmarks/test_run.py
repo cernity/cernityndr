@@ -84,21 +84,44 @@ def test_sha256_matches_hashlib():
         os.unlink(path)
 
 
+# §24.2: reconciliation requires the COMPLETE expected inventory to report a valid outcome; an
+# absent/null/unparsable status is unknown, never success. Tests pin explicit small inventories.
+_P = ("suricata-offline", "arm-b-feeder")
+_G = ("g1", "g2")
+
+
 def test_classify_completion_reconciled():
     c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
-                                {"arm-a-suricata": 100})
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G)
     assert c["state"] == "reconciled" and c["unresolved"] == []
 
 
 def test_classify_completion_invalid_when_a_producer_fails():
-    c = run.classify_completion({"suricata-offline": 1}, {"g1": 0}, {"arm-a-suricata": 100})
+    c = run.classify_completion({"suricata-offline": 1, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G)
     assert c["state"] == "invalid"
 
 
 def test_classify_completion_inconclusive_cases():
-    assert run.classify_completion({"s": 0}, {"g": 5}, {"arm-a-suricata": 100})["state"] == "inconclusive"   # lag
-    assert run.classify_completion({"s": 0}, {"g": 0}, {"arm-a-suricata": 0})["state"] == "inconclusive"     # baseline empty
-    assert run.classify_completion({"s": 0}, {}, {"arm-a-suricata": 100})["state"] == "inconclusive"         # drain unverified
+    def cc(pe, gl, ac):
+        return run.classify_completion(pe, gl, ac, expected_producers=_P, expected_groups=_G)["state"]
+    assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 5, "g2": 0}, {"arm-a-suricata": 100}) == "inconclusive"  # lag
+    assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0}, {"arm-a-suricata": 0}) == "inconclusive"    # baseline empty
+    assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {}, {"arm-a-suricata": 100}) == "inconclusive"                 # drain unverified
+
+
+def test_classify_completion_rejects_incomplete_or_unknown_inventory():
+    # §24.2 adversarial battery: the reproduced false reconciliations must now be inconclusive.
+    def cc(pe, gl):
+        return run.classify_completion(pe, gl, {"arm-a-suricata": 100},
+                                       expected_producers=_P, expected_groups=_G)["state"]
+    assert cc({}, {"g1": 0, "g2": 0}) == "inconclusive"                              # empty producer dict
+    assert cc({"suricata-offline": None, "arm-b-feeder": 0}, {"g1": 0, "g2": 0}) == "inconclusive"  # null status
+    assert cc({"suricata-offline": 0}, {"g1": 0, "g2": 0}) == "inconclusive"         # missing producer
+    assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0}) == "inconclusive"  # missing expected group
+    assert cc({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": None, "g2": 0}) == "inconclusive"  # unparsable lag
+    # a real non-zero exit still dominates as invalid even amid unknowns
+    assert cc({"suricata-offline": 2}, {"g1": 0, "g2": 0}) == "invalid"
 
 
 def test_wait_for_drain_returns_when_lag_stable_zero():

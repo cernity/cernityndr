@@ -62,11 +62,24 @@ def _behavior_ok(det, ep):
     return d == t or d in _COMPAT.get(t, {t})
 
 
-def _interval_ok(det, ep, tol=0.0):
-    di, ei = det.get("interval"), ep.get("interval")
-    if not di or not ei:               # soft: reanchored/absent times must not over-constrain
-        return True
-    return di["start"] <= ei["end"] + tol and ei["start"] <= di["end"] + tol
+def _temporal(det, ep, tol=0.0):
+    """Three-way temporal verdict (§24.3 repair). Timestamps are aligned to ONE clock upstream:
+    the feeder records the replay-clock mapping and both detections and episode truth are expressed
+    on it, so overlap is meaningful.
+      untimed — the episode is not time-bounded (no interval): time does not constrain the match.
+      in      — both carry an interval and they overlap.
+      out     — both carry an interval and they are disjoint (a real time exclusion).
+      unknown — the episode IS time-bounded but the detection carries no time: temporally
+                UNVERIFIABLE. This must NOT silently match (the prior soft rule over-credited);
+                the caller records it as ambiguous, distinct from an in-window match and from a miss."""
+    ei = ep.get("interval")
+    if not ei:
+        return "untimed"
+    di = det.get("interval")
+    if not di:
+        return "unknown"
+    inside = di["start"] <= ei["end"] + tol and ei["start"] <= di["end"] + tol
+    return "in" if inside else "out"
 
 
 def _required_values(ep):
@@ -80,7 +93,9 @@ def _required_values(ep):
     return set(mr) if mr else set(_entity_roles(ep))
 
 
-def matches(det, ep, tol=0.0):
+def _identity_match(det, ep):
+    """Entity+role+behavior+tenant match — the discriminating relationship, WITHOUT the temporal
+    check. Recall/precision layer the temporal verdict on top of this (§24.3)."""
     if (det.get("tenant") or "default") != (ep.get("tenant") or "default"):
         return False
     det_roles = _entity_roles(det)
@@ -92,7 +107,27 @@ def matches(det, ep, tol=0.0):
         return False
     if not all(det_roles.get(v) in (None, ep_roles.get(v)) for v in required):
         return False
-    return _behavior_ok(det, ep) and _interval_ok(det, ep, tol)
+    return _behavior_ok(det, ep)
+
+
+def match_verdict(det, ep, tol=0.0):
+    """Per-(detection, episode) verdict combining identity + the three-way temporal check:
+      'match'     — identity holds and time is untimed/in-window (credits recall, relevant item).
+      'ambiguous' — identity holds but the time-bounded episode's window is unverifiable for this
+                    detection (no invented credit; recorded as ambiguous, not a miss, not an FP).
+      'no'        — identity fails, or the detection is provably out of the episode's window."""
+    if not _identity_match(det, ep):
+        return "no"
+    t = _temporal(det, ep, tol)
+    if t in ("untimed", "in"):
+        return "match"
+    return "ambiguous" if t == "unknown" else "no"
+
+
+def matches(det, ep, tol=0.0):
+    """Boolean surface match: a detection surfaces an episode only on a hard 'match' (identity +
+    time). Ambiguous/out-of-window is not a surface (§24.3)."""
+    return match_verdict(det, ep, tol) == "match"
 
 
 def _dedup(detections):
@@ -117,28 +152,46 @@ def score(detections, episodes, tol=0.0):
     mal = [e for e in episodes if e.get("label") == "malicious"]
     unknown = [e for e in episodes if e.get("label") == "unknown"]
 
-    surfaced = [ep.get("id") for ep in mal if any(matches(d, ep, tol) for d in detections)]
-    tp_ep, fn_ep = len(surfaced), len(mal) - len(surfaced)
-    recall = tp_ep / len(mal) if mal else 0.0
+    # A malicious episode is SURFACED only by a hard match (identity + in-window/untimed). An
+    # episode whose only identity-matching detections are temporally unverifiable is AMBIGUOUS —
+    # reported separately from a true miss so a missing timestamp is visible, not silently credited.
+    surfaced, ambiguous_eps = [], []
+    for ep in mal:
+        verdicts = [match_verdict(d, ep, tol) for d in detections]
+        if "match" in verdicts:
+            surfaced.append(ep.get("id"))
+        elif "ambiguous" in verdicts:
+            ambiguous_eps.append(ep.get("id"))
+    missed = [ep.get("id") for ep in mal
+              if ep.get("id") not in surfaced and ep.get("id") not in ambiguous_eps]
+    tp_ep = len(surfaced)
+    recall = tp_ep / len(mal) if mal else 0.0        # surfaced+ambiguous+missed == total
 
-    relevant, unscored, false = [], [], []
+    relevant, ambiguous, unscored, false = [], [], [], []
     for d in detections:
-        if any(matches(d, ep, tol) for ep in mal):
+        mal_verdicts = [match_verdict(d, ep, tol) for ep in mal]
+        if "match" in mal_verdicts:
             relevant.append(d)
+        elif "ambiguous" in mal_verdicts:
+            ambiguous.append(d)                       # right identity, unverifiable time (§24.3)
         elif any(matches(d, ep, tol) for ep in unknown):
             unscored.append(d)                        # matched only unknown -> unscored (§7)
         else:
             false.append(d)
+    # Precision is over ADJUDICABLE items only: ambiguous/unscored cannot be adjudicated for/against
+    # an incident, so they are excluded from the ratio rather than counted as relevant or false.
     adjudicated = len(relevant) + len(false)
     precision = len(relevant) / adjudicated if adjudicated else 0.0
     f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
     return {
         "malicious_episodes": len(mal),
-        "episodes_surfaced": tp_ep, "episodes_missed": fn_ep,
+        "episodes_surfaced": tp_ep, "episodes_missed": len(missed),
+        "episodes_ambiguous": len(ambiguous_eps), "ambiguous_ids": ambiguous_eps,
         "episode_recall": round(recall, 4),
-        "analyst_items": len(relevant) + len(false) + len(unscored),
-        "relevant_items": len(relevant), "false_items": len(false), "unscored_items": len(unscored),
+        "analyst_items": len(relevant) + len(false) + len(ambiguous) + len(unscored),
+        "relevant_items": len(relevant), "false_items": len(false),
+        "ambiguous_items": len(ambiguous), "unscored_items": len(unscored),
         "analyst_precision": round(precision, 4), "f1": round(f1, 4),
         "surfaced_ids": surfaced,
-        "missed_ids": [ep.get("id") for ep in mal if ep.get("id") not in surfaced],
+        "missed_ids": missed,
     }

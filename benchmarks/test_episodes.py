@@ -112,6 +112,41 @@ def test_interval_excludes_out_of_window_detection():
     assert ep.score([outside], [ep_t])["episode_recall"] == 0.0
 
 
+# §24.3: a time-bounded episode must not be credited by a detection that carries no time — that is
+# temporally UNVERIFIABLE (ambiguous), not an in-window match and not a plain miss.
+def test_timeless_detection_does_not_credit_a_time_bounded_episode():
+    ep_t = dict(BEACON, interval={"start": 0.0, "end": 10.0})
+    d = _det([("10.0.0.5", "src"), ("203.0.113.66", "dst")], behavior="c2")   # right identity, no interval
+    r = ep.score([d], [ep_t])
+    assert r["episode_recall"] == 0.0                       # NOT the prior soft over-credit
+    assert r["episodes_ambiguous"] == 1 and r["ambiguous_ids"] == ["beacon-1"]
+    assert r["episodes_missed"] == 0                        # ambiguous is separate from a true miss
+    assert r["ambiguous_items"] == 1 and r["false_items"] == 0 and r["relevant_items"] == 0
+
+
+def test_out_of_window_detection_is_a_true_miss_and_a_false_item():
+    ep_t = dict(BEACON, interval={"start": 100.0, "end": 200.0})
+    d = _det([("10.0.0.5", "src"), ("203.0.113.66", "dst")], behavior="c2", interval={"start": 900.0, "end": 910.0})
+    r = ep.score([d], [ep_t])
+    assert r["episode_recall"] == 0.0 and r["episodes_missed"] == 1 and r["episodes_ambiguous"] == 0
+    assert r["false_items"] == 1                            # provably out of window -> unrelated
+
+
+def test_disjoint_windows_do_not_cross_credit_same_entities():
+    # same host/peer, two non-overlapping episodes; each detection credits ONLY its own window.
+    e1 = dict(BEACON, id="w1", interval={"start": 0.0, "end": 10.0})
+    e2 = dict(BEACON, id="w2", interval={"start": 100.0, "end": 110.0})
+    d1 = _det([("10.0.0.5", "src"), ("203.0.113.66", "dst")], behavior="c2", interval={"start": 2.0, "end": 3.0})
+    r = ep.score([d1], [e1, e2])
+    assert r["surfaced_ids"] == ["w1"] and r["episodes_missed"] == 1     # w2 not credited by a w1 detection
+
+
+def test_untimed_episode_still_matches_on_identity_alone():
+    # regression: an episode with no interval is not time-bounded; identity match still surfaces it.
+    d = _det([("10.0.0.5", "src"), ("203.0.113.66", "dst")], behavior="c2")
+    assert ep.score([d], [BEACON])["episode_recall"] == 1.0
+
+
 def test_unknown_episode_match_is_unscored_not_false():
     unk = {"id": "u", "label": "unknown", "behavior": "c2", "entities": [{"value": "10.9.9.9", "role": "initiator"}]}
     d = _det([("10.9.9.9", "src")], behavior="c2")

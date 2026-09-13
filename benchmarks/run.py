@@ -300,27 +300,49 @@ def wait_for_drain(project, tries=25, delay=3.0, sleep=None, lag_fn=None):
     return prev or {}
 
 
-def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",)):
-    """Explicit run state (R2/§21.2). invalid: a producer exited non-zero. inconclusive: the
-    pipeline never drained (or drain unverifiable) or a required baseline arm is empty. reconciled:
-    producers succeeded, the bus drained, and the baseline arrived — so an empty findings arm is a
-    VALID miss/benign, not a failure. Completion means all accepted work is accounted for, not that
-    every work item succeeded. Pure/testable."""
+def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
+                        expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS):
+    """Explicit run state (R2/§21.2, §24.2 repair). The run is reconciled ONLY when the COMPLETE
+    expected inventory reports a valid outcome — an absent, null, or unparsable status can never be
+    reconciled (it is unknown, not success):
+      invalid      — an expected producer exited non-zero (a definite product/harness failure).
+      inconclusive — an expected producer is missing/null/unparsable; an expected consumer group is
+                     missing/unparsable/not-drained; drain is unverifiable (no readings at all); or a
+                     required baseline arm is empty. Attribution is impossible; not a valid zero.
+      reconciled   — every expected producer exited 0 AND every expected group drained to 0 AND the
+                     baseline arrived. An empty findings arm is then a VALID miss/benign.
+    A zero-lag group proves offset progress, not timer-driven detection / pending captures / async
+    publication / sink writes (§24.2) — those are tracked as residual, not waived here. Pure/testable."""
     unresolved = []
-    failed = {s: c for s, c in producer_exits.items() if c not in (0, None)}
+    # Producers: the full expected set must each report a valid exit. non-zero => invalid;
+    # missing / None / unparsable => unknown (cannot reconcile).
+    failed = {s: producer_exits.get(s) for s in expected_producers
+              if isinstance(producer_exits.get(s), int) and producer_exits.get(s) != 0}
+    unknown_producers = [s for s in expected_producers
+                         if not isinstance(producer_exits.get(s), int)]   # missing or None
     if failed:
         unresolved.append(f"producer non-zero exit: {failed}")
-    undrained = {g: v for g, v in group_lag.items() if v}
-    if undrained:
-        unresolved.append(f"consumer lag not drained: {undrained}")
+    if unknown_producers:
+        unresolved.append(f"producer status unknown (missing/null): {unknown_producers}")
+    # Consumer groups: no readings at all => drain unverifiable; otherwise every expected group must
+    # have a parseable, zero, drained lag. A missing/unparsable expected group is unknown, not drained.
     if not group_lag:
         unresolved.append("consumer drain unverified (no lag readings)")
+        undrained = {}
+    else:
+        missing_groups = [g for g in expected_groups if not isinstance(group_lag.get(g), int)]
+        undrained = {g: group_lag[g] for g in expected_groups
+                     if isinstance(group_lag.get(g), int) and group_lag[g] != 0}
+        if missing_groups:
+            unresolved.append(f"consumer group status unknown (missing/unparsable): {missing_groups}")
+        if undrained:
+            unresolved.append(f"consumer lag not drained: {undrained}")
     empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
     state = ("invalid" if failed
-             else "inconclusive" if (undrained or empty_baseline or not group_lag)
-             else "reconciled")
+             else "reconciled" if not unresolved
+             else "inconclusive")
     return {"state": state, "producer_exits": producer_exits,
             "consumer_group_lag": group_lag, "unresolved": unresolved}
 

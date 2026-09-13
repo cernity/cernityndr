@@ -393,6 +393,59 @@ def read_sink_receipts(project, topic="ndr.sink.receipt.v1", limit=2000, timeout
     return receipts
 
 
+def read_eval_acks(project, topic="ndr.eval.ack.v1", limit=5000, timeout=12):
+    """All detector evaluation-completion acks on the bus (§stage3), read via rpk. A detector emits
+    one per assigned partition after each evaluate() pass; the harness confirms evaluation covered the
+    input horizon, not just that offsets progressed. Returns the raw list ([] if absent)."""
+    return read_sink_receipts(project, topic=topic, limit=limit, timeout=timeout)
+
+
+def eval_horizon_ok(acks, expected_detectors, deadline_wall, default_horizon=0.0):
+    """PURE (§stage3): every expected detector must have an ack whose evaluate() ran at/after the
+    deadline (last input time + the detector's horizon) — proving a post-drain, horizon-covering
+    evaluation pass, not just consumed offsets. Returns (ok, unresolved[]). An empty expected set
+    means the gate is not armed yet (not all detectors emit acks) -> ok=True with a note, so this is
+    evidence-only until the full rollout."""
+    if not expected_detectors:
+        return True, ["eval-ack gate not armed (no expected detectors declared)"]
+    latest = {}                                       # svc -> max evaluated_wall seen (over its acks)
+    horizon = {}
+    for a in acks or []:
+        if not isinstance(a, dict):
+            continue
+        svc = a.get("svc")
+        ew = a.get("evaluated_wall")
+        if svc is None or not isinstance(ew, (int, float)):
+            continue
+        latest[svc] = max(ew, latest.get(svc, float("-inf")))
+        horizon[svc] = max(a.get("horizon_secs") or default_horizon, horizon.get(svc, 0.0))
+    unresolved = []
+    for svc in expected_detectors:
+        if svc not in latest:
+            unresolved.append(f"{svc}: no evaluation ack")
+        elif latest[svc] < deadline_wall + horizon.get(svc, default_horizon):
+            unresolved.append(f"{svc}: last evaluate {latest[svc]} < deadline+horizon "
+                              f"{deadline_wall + horizon.get(svc, default_horizon)}")
+    return (not unresolved), unresolved
+
+
+def _summarize_eval_acks(acks):
+    """Per-detector evaluation evidence for the completion record: latest evaluate() wall time,
+    records seen, horizon, ack count. Evidence, not yet a gate."""
+    by = {}
+    for a in acks or []:
+        if not isinstance(a, dict) or a.get("svc") is None:
+            continue
+        s = by.setdefault(a["svc"], {"acks": 0, "latest_evaluated_wall": None,
+                                     "records_seen": 0, "horizon_secs": a.get("horizon_secs")})
+        s["acks"] += 1
+        ew = a.get("evaluated_wall")
+        if isinstance(ew, (int, float)):
+            s["latest_evaluated_wall"] = max(ew, s["latest_evaluated_wall"] or ew)
+        s["records_seen"] = max(a.get("records_seen") or 0, s["records_seen"])
+    return by
+
+
 def _is_count(v):
     """A valid count: an int that is not a bool, and nonnegative (§stage3 type validation)."""
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
@@ -624,6 +677,7 @@ def run_full(scenario: str, out_dir: str) -> str:
     if _receipt_problems:
         print(f"  ! sink receipts not accountable: {_receipt_problems}", file=sys.stderr)
     completion = classify_completion(producer_exits, group_lag, arm_counts, sink_receipt=sink_disposition)
+    completion["eval_acks"] = _summarize_eval_acks(read_eval_acks(PROJECT))   # §stage3 evidence (not yet gating)
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,

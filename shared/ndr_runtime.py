@@ -131,6 +131,29 @@ def make_producer(**overrides):
     return KafkaProducer(**_producer_config(**overrides))
 
 
+EVAL_ACK_TOPIC = "ndr.eval.ack.v1"
+
+
+def emit_eval_ack(producer, svc, group, partitions, evaluated_wall, records_seen,
+                  horizon_secs, worker=None, topic=EVAL_ACK_TOPIC):
+    """Publish an evaluation-completion ack per assigned partition (§handoff stage 3): a detector's
+    producer exit + consumer offset progress prove input was CONSUMED, not that its TIMER-DRIVEN
+    windows were evaluated through the observation horizon. After an evaluate() pass a detector
+    emits, per partition it owns, {svc, group, partition, evaluated_wall, records_seen, horizon_secs,
+    worker}. A reader confirms an ack exists with evaluated_wall >= (last input time + horizon) for
+    every expected detector/partition — i.e. the detector had, and completed, a post-drain evaluation
+    covering the horizon. Best-effort: an ack failure must never disrupt detection."""
+    if producer is None:
+        return
+    for p in sorted(partitions or []):
+        try:
+            producer.send(topic, value={"svc": svc, "group": group, "partition": p,
+                                        "evaluated_wall": evaluated_wall, "records_seen": records_seen,
+                                        "horizon_secs": horizon_secs, "worker": worker})
+        except Exception:                            # noqa: BLE001 (acks are evidence, not the workload)
+            pass
+
+
 def assigned_partitions(consumer, topic=None):
     """Partition numbers this replica currently owns, read from the live consumer
     assignment. This is the seam partition-scoped evaluate() uses so each replica

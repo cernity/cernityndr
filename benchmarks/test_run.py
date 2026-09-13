@@ -173,6 +173,20 @@ def test_aggregate_keeps_latest_per_worker_and_sums():
     assert agg["sinks"][0]["delivered"] == 8 and run._receipt_accounted(agg)
 
 
+def test_eval_horizon_ok_requires_a_post_deadline_evaluation_per_detector():
+    # §stage3: a detector must have an evaluate() pass at/after (deadline + its horizon).
+    acks = [{"svc": "behavioral-detectors", "partition": 0, "evaluated_wall": 1000.0, "horizon_secs": 60},
+            {"svc": "behavioral-detectors", "partition": 0, "evaluated_wall": 1200.0, "horizon_secs": 60}]
+    ok, unresolved = run.eval_horizon_ok(acks, ["behavioral-detectors"], deadline_wall=1100.0)
+    assert ok and unresolved == []                    # latest 1200 >= 1100 + 60
+    ok2, u2 = run.eval_horizon_ok(acks, ["behavioral-detectors"], deadline_wall=1200.0)
+    assert not ok2 and u2                             # latest 1200 < 1200 + 60 -> not covered
+    ok3, u3 = run.eval_horizon_ok(acks, ["dns-detector"], deadline_wall=1000.0)
+    assert not ok3 and "no evaluation ack" in u3[0]   # a detector that never acked
+    # gate not armed when no detectors are declared expected (evidence-only phase)
+    assert run.eval_horizon_ok(acks, [], deadline_wall=9e9)[0] is True
+
+
 def test_aggregate_rejects_bad_types_and_broken_invariants():
     assert run.aggregate_receipts([])[0] is None                     # no receipts
     bad_bool = [{"worker": "w", "seq": 1, "consumed": True, "suppressed": 0, "delivered_live": 1,

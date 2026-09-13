@@ -635,7 +635,8 @@ def run_full(scenario: str, out_dir: str) -> str:
                out_dir)
         raise SystemExit(f"benchmark inputs not drained ({completion['state']}): {completion['unresolved']}")
     print("[3] exporting the immutable snapshot, then scoring FROM it (R4)")
-    exported, _export_counts = export_arms(endpoint, out_dir, PROJECT)
+    exported, _export_counts = export_arms(endpoint, out_dir, PROJECT,
+                                           labels_path=os.path.join(DATASETS, scenario, "labels.json"))
     arm_a = exported["arm-a-suricata"]           # scored docs ARE the exported files (§20.3)
     arm_b = exported["arm-b-findings-*"]
     arm_c = exported["arm-c-zeek"]
@@ -708,7 +709,7 @@ ARM_EXPORTS = (("arm-a-suricata", "suricata-alerts.jsonl"),
                ("arm-c-zeek", "zeek-notices.jsonl"))
 
 
-def export_arms(endpoint, out_dir, project=None):
+def export_arms(endpoint, out_dir, project=None, labels_path=None):
     """Complete, reproducible export of every arm's docs + the shared source EVE to the
     release-bundle layout (M3/§9.6/§11) — the auditable source for any numerical claim, and the
     data behind the paired SIEM views. Refresh first so the read sees every write, then paginate
@@ -754,6 +755,14 @@ def export_arms(endpoint, out_dir, project=None):
                                              "doc_count": counts.get("source-eve.jsonl", 0)}
         except Exception:                        # noqa: BLE001
             pass
+    # Freeze the ground TRUTH inside the bundle (§stage4): the file-only scorer reads labels from
+    # here, hashed, NOT from the repo datasets dir — so a recompute needs only the bundle and can't
+    # be silently rescored against a changed answer key.
+    if labels_path and os.path.isfile(labels_path):
+        lpath = os.path.join(outdir, "labels.json")
+        with open(labels_path) as _src, open(lpath, "w") as _dst:
+            _dst.write(_src.read())
+        files["labels.json"] = {"sha256": _sha256(lpath)}
     # Per-file integrity manifest (§25.4/Rec-E): the file-only scorer verifies these before scoring,
     # so a mutated / truncated / missing export fails visibly. consistency_basis records WHY the
     # snapshot is coherent — the completion gate proved the writers exited and the bus/sink settled
@@ -849,12 +858,17 @@ def verify_export_manifest(out_dir):
 
 
 def score_from_export(out_dir, scenario):
-    """Recompute the report from ONLY the exported files + frozen labels (R4/§21.4 file-only
-    recomputation): the export manifest is VERIFIED first (§25.4), then every metric reconciles with
-    out/<scenario>/output/*.jsonl."""
+    """Recompute the report from ONLY the verified bundle (R4/§21.4 + §stage4): the manifest is
+    verified first, then truth is read from the HASHED bundle copy (out/<scenario>/output/labels.json),
+    NOT the repo datasets dir — a recompute needs only the bundle and cannot be rescored against a
+    changed answer key. Fails if the bundle carries no frozen truth."""
     verify_export_manifest(out_dir)                    # refuse to score mutated/truncated evidence
-    labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
     od = os.path.join(out_dir, "output")
+    labels_path = os.path.join(od, "labels.json")
+    if not os.path.isfile(labels_path):
+        raise SystemExit(f"benchmark abort: bundle {od} has no frozen labels.json — cannot recompute "
+                         f"from a self-contained bundle (§stage4). Re-export with truth frozen in.")
+    labels = _load(labels_path)
     arm_a = _read_jsonl(os.path.join(od, "suricata-alerts.jsonl"))
     arm_b = _read_jsonl(os.path.join(od, "cernity-findings.jsonl"))
     arm_c = _read_jsonl(os.path.join(od, "zeek-notices.jsonl"))

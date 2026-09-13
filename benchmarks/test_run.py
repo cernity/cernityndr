@@ -347,21 +347,34 @@ def test_score_from_export_reconciles_with_live_scoring():
                 for x in docs:
                     f.write(json.dumps(x, sort_keys=True) + "\n")
             _files[fname] = {"sha256": run._sha256(fp), "doc_count": len(docs)}
-        with open(os.path.join(od, "export-manifest.json"), "w") as f:  # §25.4: verified before scoring
-            json.dump({"consistency_basis": "test", "files": _files}, f)
-        ds = os.path.join(d, "datasets", "t")
-        os.makedirs(ds)
-        with open(os.path.join(ds, "labels.json"), "w") as f:
+        lp = os.path.join(od, "labels.json")                     # §stage4: truth frozen IN the bundle
+        with open(lp, "w") as f:
             json.dump(labels, f)
-        saved = run.DATASETS
-        run.DATASETS = os.path.join(d, "datasets")
-        try:
-            recomputed = run.score_from_export(os.path.join(d, "out", "t"), "t")
-        finally:
-            run.DATASETS = saved
+        _files["labels.json"] = {"sha256": run._sha256(lp)}
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:  # verified before scoring
+            json.dump({"consistency_basis": "test", "files": _files}, f)
+        recomputed = run.score_from_export(os.path.join(d, "out", "t"), "t")  # no repo/DATASETS fallback
 
     assert recomputed["episode_scoring"] == live["episode_scoring"], "episode metrics not reproducible from files"
     assert recomputed["arms"] == live["arms"], "arm metrics not reproducible from files"
+
+
+def test_score_from_export_refuses_a_bundle_without_frozen_truth():
+    # §stage4: no repo/DATASETS fallback — a bundle with no labels.json cannot be scored.
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "out", "t", "output")
+        os.makedirs(od)
+        fp = os.path.join(od, "suricata-alerts.jsonl")
+        open(fp, "w").close()
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:
+            json.dump({"consistency_basis": "test",
+                       "files": {"suricata-alerts.jsonl": {"sha256": run._sha256(fp), "doc_count": 0}}}, f)
+        try:
+            run.score_from_export(os.path.join(d, "out", "t"), "t")
+            assert False, "must refuse a bundle with no frozen labels.json"
+        except SystemExit as e:
+            assert "frozen labels" in str(e)
 
 
 def test_eve_paths_hashes_real_outputs():

@@ -68,14 +68,24 @@
       "note": "uses a local demonstration rule (deploy/benchmark/suricata/local.rules); pipeline-preservation, not malware accuracy"
     },
     "S08": {
-      "name": "repeated copies of a signature episode (dedup)",
+      "name": "repeated behavioural C2 beacons (dedup)",
       "scenario": "synthetic-dedup",
       "behavior": "c2",
       "control": "synthetic-benign",
       "set": "development",
       "status": "validated",
-      "question": "dedup reduces repetition without hiding a new incident",
-      "note": "two distinct C2 beacons: both surface (recall 2/2), 40 connections -> ~4 findings (dedup reduces repetition without hiding the 2nd incident); behavioural-beacon dedup, not signature"
+      "question": "beacon dedup reduces repetition without hiding a second incident",
+      "note": "two distinct C2 beacons: both surface (recall 2/2), 40 connections -> ~4 findings. This is BEHAVIOURAL-beacon dedup, not signature repetition — the name was corrected (handoff stage 6); the distinct signature-repetition case is S13 (proposed)."
+    },
+    "S13": {
+      "name": "repeated signature alerts + a new signature incident",
+      "scenario": "synthetic-sig-repeat",
+      "behavior": "c2",
+      "control": "synthetic-benign",
+      "set": "development",
+      "status": "proposed",
+      "question": "does signature-alert dedup collapse repeats without hiding a genuinely new signature incident",
+      "note": "PROPOSED (handoff stage 6): needs a generator that emits one ET-Open-matching signature repeated many times PLUS a distinct new signature incident. Not yet built; the S08 case is behavioural, so this signature case is genuinely missing coverage."
     },
     "S09": {
       "name": "scan -> lateral -> callbacks (correlation)",

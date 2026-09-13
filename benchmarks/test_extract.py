@@ -5,14 +5,32 @@ import extract as x
 
 
 def test_flagged_from_alerts_host():
-    docs = [{"src_ip": "10.0.0.5", "dest_ip": "93.184.216.34"},
-            {"src_ip": "10.0.0.5", "dest_ip": "8.8.8.8"}]
+    docs = [{"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "93.184.216.34"},
+            {"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "8.8.8.8"}]
     assert x.flagged_from_alerts(docs) == {"10.0.0.5", "93.184.216.34", "8.8.8.8"}
 
 
 def test_flagged_from_alerts_flow():
-    docs = [{"community_id": "1:aaa"}, {"community_id": "1:bbb"}, {"src_ip": "10.0.0.1"}]
+    docs = [{"event_type": "alert", "community_id": "1:aaa"},
+            {"event_type": "alert", "community_id": "1:bbb"},
+            {"event_type": "alert", "src_ip": "10.0.0.1"}]
     assert x.flagged_from_alerts(docs, "flow") == {"1:aaa", "1:bbb"}
+
+
+def test_flagged_from_alerts_excludes_flow_telemetry():
+    # The flow-endpoint bug (§4): flow/nsm records are stored but are NOT analyst
+    # detections, so their endpoints must not be scored as Arm A positives.
+    docs = [{"event_type": "flow", "src_ip": "10.0.0.9", "dest_ip": "8.8.8.8"},
+            {"event_type": "netflow", "src_ip": "10.0.0.10"},
+            {"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "203.0.113.66"}]
+    assert x.flagged_from_alerts(docs) == {"10.0.0.5", "203.0.113.66"}
+
+
+def test_flagged_from_notices_parses_zeek_notices():
+    # Zeek notices have no event_type=alert; the shipper normalizes src/dst -> src_ip/dest_ip.
+    docs = [{"src_ip": "10.0.0.5", "dest_ip": "203.0.113.66"}, {"src_ip": "10.0.0.7"}]
+    assert x.flagged_from_notices(docs) == {"10.0.0.5", "203.0.113.66", "10.0.0.7"}
+    assert x.flagged_from_notices([{"community_id": "1:z"}], "flow") == {"1:z"}
 
 
 def test_flagged_from_findings_host_parses_entities_string():

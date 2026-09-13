@@ -16,9 +16,28 @@ def _ips(*vals):
 
 
 def flagged_from_alerts(docs, granularity: str = "host") -> set:
-    """Entities implicated by raw Suricata EVE alert docs (Arm A / Zeek-notice-shaped).
-    host -> src_ip + dest_ip; flow -> community_id. Scoring against the truth set
-    turns non-malicious IPs into FPs, so flagging both endpoints is fair, not gamed."""
+    """Entities implicated by Suricata EVE ALERT records (Arm A). Only event_type='alert'
+    is scored: flow/nsm telemetry is stored and searchable but is NOT an analyst detection,
+    so counting its endpoints inflated Arm A's false positives (the flow-endpoint bug, §4
+    'actual alert extraction'). host -> src_ip + dest_ip; flow -> community_id. Flagging
+    both endpoints of a real alert is fair, not gamed (role-aware scoring is M2)."""
+    out = set()
+    for d in docs:
+        if d.get("event_type") != "alert":
+            continue
+        if granularity == "flow":
+            if d.get("community_id"):
+                out.add(d["community_id"])
+        else:
+            out.update(_ips(d.get("src_ip"), d.get("dest_ip")))
+    return out
+
+
+def flagged_from_notices(docs, granularity: str = "host") -> set:
+    """Entities implicated by Zeek notices (Arm C reference), parsed separately from
+    Suricata alerts (§4). Zeek notice.log records ARE the notices (no event_type='alert');
+    the arm-c shipper normalizes their src/dst to src_ip/dest_ip. host -> src_ip + dest_ip;
+    flow -> community_id."""
     out = set()
     for d in docs:
         if granularity == "flow":

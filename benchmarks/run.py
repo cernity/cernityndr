@@ -158,8 +158,8 @@ def run_full(scenario: str, out_dir: str) -> str:
                           "delivered": _count_alerts(arm_a)},
         "cernity_siem": {"flagged": extract.flagged_from_findings(arm_b, gran),
                          "raw_events": len(arm_a), "alerts": len(arm_b), "delivered": len(arm_b)},
-        # Zeek reference arm: notices are alert-shaped, so reuse flagged_from_alerts.
-        "zeek_reference": {"flagged": extract.flagged_from_alerts(arm_c, gran),
+        # Zeek reference arm: notices parsed separately from Suricata alerts (§4).
+        "zeek_reference": {"flagged": extract.flagged_from_notices(arm_c, gran),
                            "raw_events": len(arm_c), "alerts": len(arm_c), "delivered": len(arm_c)},
     }
     meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),

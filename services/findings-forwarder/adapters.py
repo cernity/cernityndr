@@ -11,6 +11,7 @@ import os
 import socket
 import ssl
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 
 import cef
@@ -30,6 +31,58 @@ def _live(findings):
     return [f for f in findings if f.get("state") != "SUPPRESSED"]
 
 
+def _obl_key(finding_id, revision, dest):
+    """Stable obligation identity: one finding REVISION at one destination (§stage2). A replay of the
+    same revision is the same obligation; a new revision is a new one."""
+    return json.dumps([finding_id, revision, dest], sort_keys=True)
+
+
+class DurableLedger:
+    """Append-only per-sink obligation ledger (§handoff stage 2): each delivered/dead-lettered
+    obligation is recorded durably with its worker epoch + timestamp, so a restart resumes with prior
+    dispositions and never re-sends an already-terminal obligation. File-backed (matches the DLQ
+    pattern) and fsync'd. ponytail: the in-memory index holds one entry per distinct obligation
+    (unbounded); add periodic compaction/rotation for a long-lived high-volume forwarder — fine for
+    the bounded runs here. This is durable DEDUP + audit; the per-process receipt counters stay
+    per-worker (the harness aggregates them by worker epoch)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.outcome = {}                            # obligation key -> "delivered" | "dead_lettered"
+        if os.path.isfile(path):
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("outcome"):
+                        self.outcome[_obl_key(r.get("finding_id"), r.get("revision"), r.get("dest"))] = r["outcome"]
+
+    def terminal(self, finding, dest):
+        """The recorded terminal outcome for this finding-revision at this destination, or None."""
+        return self.outcome.get(_obl_key(finding.get("finding_id"), finding.get("revision"), dest))
+
+    def record(self, findings, dest, outcome, worker):
+        if not findings:
+            return
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "a") as fh:
+            for f in findings:
+                k = _obl_key(f.get("finding_id"), f.get("revision"), dest)
+                if k in self.outcome:                # already terminal: don't double-record
+                    continue
+                fh.write(json.dumps({"finding_id": f.get("finding_id"), "revision": f.get("revision"),
+                                     "dest": dest, "outcome": outcome, "worker": worker,
+                                     "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
+                self.outcome[k] = outcome
+            fh.flush()
+            os.fsync(fh.fileno())
+
+
 class DurableSink:
     """Durable per-sink delivery (F07): wraps one sink adapter with retry + dead-letter
     + idempotent admission. Each sink is INDEPENDENT — a finding already delivered here
@@ -42,25 +95,20 @@ class DurableSink:
     if a non-idempotent sink needs cross-restart exactly-once."""
 
     def __init__(self, inner, name, dlq_dir=DLQ_DIR, retries=MAX_RETRIES,
-                 backoff=BACKOFF_SECS, sleep=time.sleep, dedup_max=DEDUP_MAX, on_health=None):
+                 backoff=BACKOFF_SECS, sleep=time.sleep, dedup_max=DEDUP_MAX, on_health=None, worker=None):
         self.inner, self.name = inner, name
         self._dlq_path = os.path.join(dlq_dir, f"dlq-{name}.jsonl")
         self._retries, self._backoff, self._sleep = retries, backoff, sleep
-        self._dedup_max = dedup_max
-        self._seen: dict = {}                       # finding_id -> None (insertion-ordered FIFO)
-        self.delivered = 0                          # Rec-D: per-sink delivery accounting for the receipt
+        self._dedup_max = dedup_max                 # kept for API compat; the ledger is the dedup store
+        # Durable obligations (§stage2): dedup + audit survive a restart, so a replay never re-sends an
+        # already-terminal obligation. worker epoch tags each recorded transition.
+        self._worker = worker or uuid.uuid4().hex
+        self._ledger = DurableLedger(os.path.join(dlq_dir, f"obligations-{name}.jsonl"))
+        self.delivered = 0                          # Rec-D: per-WORKER delivery accounting for the receipt
         self.dead_lettered = 0
         # F15: report real backend health — a delivery flips readiness true, an exhausted
         # dead-letter flips it false, so the /readyz probe reflects a wedged sink.
         self._on_health = on_health or (lambda ok: None)
-
-    def _mark(self, findings):
-        for f in findings:
-            fid = f.get("finding_id")
-            if fid is not None:
-                self._seen[fid] = None
-        while len(self._seen) > self._dedup_max:
-            self._seen.pop(next(iter(self._seen)))
 
     def _dlq(self, findings, err):
         os.makedirs(os.path.dirname(self._dlq_path) or ".", exist_ok=True)
@@ -74,7 +122,9 @@ class DurableSink:
         self.emit_batch([finding])
 
     def emit_batch(self, findings):
-        fresh = [f for f in findings if f.get("finding_id") not in self._seen]
+        # Skip obligations already terminal in the durable ledger (delivered or dead-lettered by this
+        # or a prior process) — a replay never re-sends and is not re-counted (§stage2 restart-safe).
+        fresh = [f for f in findings if not self._ledger.terminal(f, self.name)]
         if not fresh:
             return
         # Per-item delivery contract (§handoff stage 2): the inner adapter RETURNS the findings that
@@ -92,7 +142,7 @@ class DurableSink:
             fail_ids = {id(f) for f in failed}
             accepted = [f for f in pending if id(f) not in fail_ids]
             if accepted:
-                self._mark(accepted)                # delivered: don't re-send on replay
+                self._ledger.record(accepted, self.name, "delivered", self._worker)   # durable, don't re-send
                 self.delivered += len(accepted)     # Rec-D: only truly accepted items
             if not failed:
                 self._on_health(True)
@@ -100,7 +150,7 @@ class DurableSink:
             pending = failed
             if attempt >= self._retries:
                 self._dlq(pending, err)             # dead-lettered = durably handled, never dropped
-                self._mark(pending)
+                self._ledger.record(pending, self.name, "dead_lettered", self._worker)
                 self.dead_lettered += len(pending)
                 self._on_health(False)              # backend down / rejected -> readiness false (F15)
                 return

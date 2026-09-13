@@ -42,6 +42,7 @@ class PartialSink:
 def _sink(inner, **kw):
     kw.setdefault("sleep", lambda _s: None)      # no real backoff sleep in tests
     kw.setdefault("backoff", 0)
+    kw.setdefault("dlq_dir", tempfile.mkdtemp())  # ledger + DLQ live in a temp dir, never /var/lib
     return DurableSink(inner, "test", **kw)
 
 
@@ -119,6 +120,32 @@ def test_receipt_does_not_double_count_replays():
     s.emit_batch([{"finding_id": "a"}])
     s.emit_batch([{"finding_id": "a"}])                     # replay -> idempotent, not re-counted
     assert s.receipt()["delivered"] == 1
+
+
+def test_ledger_survives_restart_and_does_not_resend():
+    # §stage2: a fresh DurableSink over the same ledger dir must NOT re-send an already-delivered
+    # obligation (restart-safe dedup + audit), even though its per-worker counters start at 0.
+    with tempfile.TemporaryDirectory() as d:
+        DurableSink(FlakySink(), "test", dlq_dir=d, sleep=lambda _s: None).emit_batch([{"finding_id": "a"}])
+        inner2 = FlakySink()
+        s2 = DurableSink(inner2, "test", dlq_dir=d, sleep=lambda _s: None)   # "restart": fresh process
+        s2.emit_batch([{"finding_id": "a"}, {"finding_id": "b"}])
+        assert inner2.delivered == ["b"]                    # a already delivered pre-restart, not resent
+        assert s2.delivered == 1 and s2.dead_lettered == 0  # only the new obligation counted this worker
+        obl = os.path.join(d, "obligations-test.jsonl")
+        rows = [json.loads(l) for l in open(obl)]
+        assert {r["finding_id"] for r in rows} == {"a", "b"} and all(r["outcome"] == "delivered" for r in rows)
+
+
+def test_new_revision_is_delivered_even_if_finding_id_seen():
+    # §stage2 revision-at-sink: same finding_id, a NEW revision is a new obligation -> delivered.
+    with tempfile.TemporaryDirectory() as d:
+        inner = FlakySink()
+        s = DurableSink(inner, "test", dlq_dir=d, sleep=lambda _s: None)
+        s.emit_batch([{"finding_id": "f", "revision": 1}])
+        s.emit_batch([{"finding_id": "f", "revision": 1}])   # replay same revision -> skipped
+        s.emit_batch([{"finding_id": "f", "revision": 2}])   # new revision -> delivered
+        assert inner.delivered == ["f", "f"] and s.delivered == 2   # rev1 once, rev2 once
 
 
 def test_health_callback_reflects_delivery_then_backend_loss():

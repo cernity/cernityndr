@@ -224,6 +224,45 @@ def test_wait_for_completion_raises_when_never_stable():
         pass
 
 
+def test_verify_export_manifest_detects_mutation_truncation_and_missing():
+    # §25.4/Rec-E: file-only recompute must refuse mutated/truncated/missing exported evidence.
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "output")
+        os.makedirs(od)
+        fpath = os.path.join(od, "cernity-findings.jsonl")
+        with open(fpath, "w") as f:
+            f.write('{"a":1}\n{"a":2}\n')
+        manifest = {"consistency_basis": "test", "files": {"cernity-findings.jsonl":
+                    {"sha256": run._sha256(fpath), "doc_count": 2}}}
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:
+            json.dump(manifest, f)
+        assert run.verify_export_manifest(d)["files"]           # unchanged -> passes
+        with open(fpath, "a") as f:                             # mutate/append -> hash + count drift
+            f.write('{"a":3}\n')
+        try:
+            run.verify_export_manifest(d)
+            assert False, "mutated export must fail verification"
+        except SystemExit as e:
+            assert "cernity-findings.jsonl" in str(e)
+        os.remove(fpath)                                        # missing file
+        try:
+            run.verify_export_manifest(d)
+            assert False, "missing export must fail verification"
+        except SystemExit as e:
+            assert "missing" in str(e)
+
+
+def test_verify_export_manifest_requires_a_manifest():
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "output"))
+        try:
+            run.verify_export_manifest(d)
+            assert False, "absent manifest must fail (cannot verify evidence)"
+        except SystemExit:
+            pass
+
+
 def test_score_from_export_reconciles_with_live_scoring():
     # R4/§20.3+§21.4: the report is computed FROM the exported files. Scoring the same docs
     # in-memory (as run_full does with the export snapshot) and re-reading them off disk must
@@ -243,11 +282,16 @@ def test_score_from_export_reconciles_with_live_scoring():
     with tempfile.TemporaryDirectory() as d:
         od = os.path.join(d, "out", "t", "output")
         os.makedirs(od)
+        _files = {}
         for fname, docs in (("suricata-alerts.jsonl", arm_a), ("cernity-findings.jsonl", arm_b),
                             ("zeek-notices.jsonl", [])):
-            with open(os.path.join(od, fname), "w") as f:
+            fp = os.path.join(od, fname)
+            with open(fp, "w") as f:
                 for x in docs:
-                    f.write(json.dumps(x) + "\n")
+                    f.write(json.dumps(x, sort_keys=True) + "\n")
+            _files[fname] = {"sha256": run._sha256(fp), "doc_count": len(docs)}
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:  # §25.4: verified before scoring
+            json.dump({"consistency_basis": "test", "files": _files}, f)
         ds = os.path.join(d, "datasets", "t")
         os.makedirs(ds)
         with open(os.path.join(ds, "labels.json"), "w") as f:

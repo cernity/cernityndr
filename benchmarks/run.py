@@ -611,14 +611,19 @@ def export_arms(endpoint, out_dir, project=None):
     outdir = os.path.join(out_dir, "output")
     os.makedirs(outdir, exist_ok=True)
     _refresh(endpoint)
-    counts, docs_by = {}, {}
+    counts, docs_by, files = {}, {}, {}
     for index, fname in ARM_EXPORTS:
-        docs = os_search(endpoint, index, strict=False)
-        with open(os.path.join(outdir, fname), "w") as f:
+        # The baseline arm is exported STRICT: a query/engine error must FAIL the export, never write
+        # an apparently-valid empty dataset (§25.4). Optional arms tolerate a missing index (empty).
+        strict = index == "arm-a-suricata"
+        docs = os_search(endpoint, index, strict=strict)
+        path = os.path.join(outdir, fname)
+        with open(path, "w") as f:
             for d in docs:
                 f.write(json.dumps(d, sort_keys=True) + "\n")
         counts[fname] = len(docs)
         docs_by[index] = docs
+        files[fname] = {"sha256": _sha256(path), "doc_count": len(docs)}
     if project:                                  # the common EVE both arms consumed (fairness anchor)
         vol = f"{project}_cernity-bench-eve"
         try:
@@ -633,10 +638,24 @@ def export_arms(endpoint, out_dir, project=None):
                                   "sh", "-c", "cat /eve/replay.json 2>/dev/null"],
                                  capture_output=True, text=True, timeout=60).stdout
             if rep.strip():
-                with open(os.path.join(outdir, "replay.json"), "w") as f:
+                rpath = os.path.join(outdir, "replay.json")
+                with open(rpath, "w") as f:
                     f.write(rep)
+                files["replay.json"] = {"sha256": _sha256(rpath)}
+            spath = os.path.join(outdir, "source-eve.jsonl")
+            if os.path.isfile(spath):
+                files["source-eve.jsonl"] = {"sha256": _sha256(spath),
+                                             "doc_count": counts.get("source-eve.jsonl", 0)}
         except Exception:                        # noqa: BLE001
             pass
+    # Per-file integrity manifest (§25.4/Rec-E): the file-only scorer verifies these before scoring,
+    # so a mutated / truncated / missing export fails visibly. consistency_basis records WHY the
+    # snapshot is coherent — the completion gate proved the writers exited and the bus/sink settled
+    # (a proven post-reconciliation write-freeze), which is Codex's accepted alternative to a PIT.
+    manifest = {"consistency_basis": "post-reconciliation write-freeze (producers exited, groups "
+                "drained, sink settled)", "files": files}
+    with open(os.path.join(outdir, "export-manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
     return docs_by, counts
 
 
@@ -696,9 +715,38 @@ def _read_jsonl(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+def verify_export_manifest(out_dir):
+    """Recompute each exported file's hash + line count and check them against export-manifest.json
+    (§25.4/Rec-E). A mutated, truncated, or missing exported file must FAIL visibly before any score
+    is recomputed from it. Returns the manifest; raises SystemExit on drift."""
+    od = os.path.join(out_dir, "output")
+    mpath = os.path.join(od, "export-manifest.json")
+    if not os.path.isfile(mpath):
+        raise SystemExit(f"benchmark abort: no export-manifest.json in {od} — cannot verify the "
+                         f"exported evidence before recomputing (§25.4).")
+    manifest = _load(mpath)
+    drift = []
+    for fname, rec in manifest.get("files", {}).items():
+        fpath = os.path.join(od, fname)
+        if not os.path.isfile(fpath):
+            drift.append(f"{fname}: missing")
+            continue
+        if _sha256(fpath) != rec.get("sha256"):
+            drift.append(f"{fname}: sha256 mismatch (mutated/truncated)")
+            continue
+        if "doc_count" in rec and sum(1 for _l in open(fpath) if _l.strip()) != rec["doc_count"]:
+            drift.append(f"{fname}: doc_count mismatch")
+    if drift:
+        raise SystemExit("benchmark abort: exported evidence fails manifest verification (§25.4): "
+                         + "; ".join(drift))
+    return manifest
+
+
 def score_from_export(out_dir, scenario):
     """Recompute the report from ONLY the exported files + frozen labels (R4/§21.4 file-only
-    recomputation): every metric must reconcile with out/<scenario>/output/*.jsonl."""
+    recomputation): the export manifest is VERIFIED first (§25.4), then every metric reconciles with
+    out/<scenario>/output/*.jsonl."""
+    verify_export_manifest(out_dir)                    # refuse to score mutated/truncated evidence
     labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
     od = os.path.join(out_dir, "output")
     arm_a = _read_jsonl(os.path.join(od, "suricata-alerts.jsonl"))

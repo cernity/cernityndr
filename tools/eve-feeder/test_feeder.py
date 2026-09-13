@@ -1,4 +1,32 @@
-from feeder import route, _security_kwargs
+from datetime import datetime, timezone
+
+from feeder import route, _security_kwargs, paced_offsets, reanchor, _parse
+
+
+def test_paced_offsets_honours_interarrival():
+    evs = [{"timestamp": "2026-01-01T00:00:00+00:00"},
+           {"timestamp": "2026-01-01T00:00:05+00:00"},
+           {"timestamp": "2026-01-01T00:00:10+00:00"}]
+    assert paced_offsets(evs) == [0.0, 5.0, 10.0]
+    assert paced_offsets(evs, speed=2) == [0.0, 2.5, 5.0]        # labelled acceleration
+
+
+def test_paced_offsets_untimestamped_inherits_previous():
+    evs = [{"timestamp": "2026-01-01T00:00:00+00:00"}, {"no": "ts"},
+           {"timestamp": "2026-01-01T00:00:04+00:00"}]
+    assert paced_offsets(evs) == [0.0, 0.0, 4.0]
+
+
+def test_reanchor_anchor_start_vs_end():
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    def mk():
+        return [{"timestamp": "2026-01-01T00:00:00+00:00"},
+                {"timestamp": "2026-01-01T00:01:00+00:00"}]     # 60s apart
+    end = reanchor(mk(), now=now, anchor="end")
+    assert _parse(end[-1]["timestamp"]) == now                  # newest at now (burst)
+    start = reanchor(mk(), now=now, anchor="start")
+    assert _parse(start[0]["timestamp"]) == now                 # oldest at now (paced)
+    assert (_parse(end[-1]["timestamp"]) - _parse(end[0]["timestamp"])).total_seconds() == 60
 
 
 def test_security_none_is_plaintext():

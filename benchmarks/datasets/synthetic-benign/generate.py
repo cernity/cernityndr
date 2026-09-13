@@ -38,7 +38,7 @@ domains = ["www.example.com", "cdn.example.net", "api.github.com", "images.unspl
 webs = ["93.184.216.34", "151.101.1.140", "140.82.112.3"]
 t = BASE
 for _ in range(50):
-    t += random.uniform(2, 30)
+    t += random.uniform(0.3, 3.0)      # compressed real timespan (~80s) for paced replay (M1.6)
     if random.random() < 0.5:
         dns(random.choice(hosts), random.choice(domains), t)
     else:

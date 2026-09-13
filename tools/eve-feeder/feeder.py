@@ -49,15 +49,18 @@ def _parse(ts):
         return None
 
 
-def reanchor(events, now=None):
-    """Shift every event timestamp so the latest one sits at `now`, preserving
-    relative spacing. Events without a parseable timestamp are left untouched."""
+def reanchor(events, now=None, anchor="end"):
+    """Shift every event timestamp uniformly so a reference event sits at `now`, preserving
+    relative spacing. anchor='end' (default) puts the NEWEST event at now — burst replay keeps
+    a recorded fixture inside the detectors' rolling window whenever it is replayed.
+    anchor='start' puts the OLDEST at now, so paced replay sends each event at its real offset
+    from the start. Events without a parseable timestamp are left untouched."""
     now = now or datetime.now(timezone.utc)
     stamped = [(_parse(e.get("timestamp")), e) for e in events]
     times = [t for t, _ in stamped if t]
     if not times:
         return events
-    shift = now - max(times)
+    shift = now - (min(times) if anchor == "start" else max(times))
     for t, e in stamped:
         if t:
             e["timestamp"] = (t + shift).isoformat()
@@ -67,21 +70,55 @@ def reanchor(events, now=None):
     return events
 
 
+def paced_offsets(events, speed=1.0):
+    """Wall-clock offset in seconds (from the first timestamped event) at which each event
+    should be sent for paced replay (M1.6/§5): the feeder honours the recorded inter-arrival
+    timing instead of bursting, so event-time and processing-clock stay aligned. `speed` >1
+    compresses the schedule (a labelled acceleration, validated separately per §5). Events with
+    no timestamp inherit the previous offset. Assumes events are ascending by timestamp."""
+    offs, base, last = [], None, 0.0
+    for e in events:
+        t = _parse(e.get("timestamp"))
+        if t is not None:
+            base = base if base is not None else t
+            last = (t - base).total_seconds() / (speed or 1.0)
+        offs.append(last)
+    return offs
+
+
 def main(path):
+    import time
     from kafka import KafkaProducer
     events = [json.loads(l) for l in open(path) if l.strip()]
+    paced = os.environ.get("CERNITY_FEED_PACED", "").strip().lower() not in ("", "0", "false", "no")
+    if paced:
+        events.sort(key=lambda e: _parse(e.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc))
     if not os.environ.get("CERNITY_FEED_NO_ANCHOR"):
-        events = reanchor(events)
+        events = reanchor(events, anchor="start" if paced else "end")
     p = KafkaProducer(bootstrap_servers=os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092"),
                       value_serializer=lambda v: json.dumps(v).encode(),
                       **_security_kwargs())
     n = 0
-    for ev in events:
-        topic, key = route(ev)
-        p.send(topic, key=key, value=ev)
-        n += 1
+    if paced:
+        # Honour recorded inter-arrival timing (§5). max_gap bounds any long idle stretch so a
+        # sparse fixture does not stall the run; speed>1 compresses (labelled acceleration).
+        offsets = paced_offsets(events, float(os.environ.get("CERNITY_FEED_SPEED", "1") or "1"))
+        max_gap = float(os.environ.get("CERNITY_FEED_MAX_GAP", "10"))
+        start = time.monotonic()
+        for ev, off in zip(events, offsets):
+            delay = min(off - (time.monotonic() - start), max_gap)
+            if delay > 0:
+                time.sleep(delay)
+            topic, key = route(ev)
+            p.send(topic, key=key, value=ev)
+            n += 1
+    else:
+        for ev in events:
+            topic, key = route(ev)
+            p.send(topic, key=key, value=ev)
+            n += 1
     p.flush()
-    print(f"fed {n} events")
+    print(f"fed {n} events{' (paced)' if paced else ''}")
 
 
 if __name__ == "__main__":

@@ -157,6 +157,34 @@ def test_inconsistent_receipt_does_not_reconcile():
     assert _clean(receipt)["state"] == "inputs_drained"
 
 
+# §stage3: aggregate the latest receipt PER WORKER, not the last message; validate types/invariants.
+def _r(worker, seq, consumed, suppressed, delivered, dead=0, name="es"):
+    return {"schema_version": "1.0", "worker": worker, "seq": seq, "consumed": consumed,
+            "suppressed": suppressed, "delivered_live": consumed - suppressed,
+            "sinks": [{"name": name, "delivered": delivered, "dead_lettered": dead}]}
+
+
+def test_aggregate_keeps_latest_per_worker_and_sums():
+    receipts = [_r("w1", 1, 3, 0, 3), _r("w1", 2, 5, 0, 5),          # w1 latest = seq2 (5)
+                _r("w2", 1, 4, 1, 3)]                                 # w2 = 4 consumed, 1 suppressed, 3 live
+    agg, problems = run.aggregate_receipts(receipts)
+    assert problems == [] and agg["workers"] == 2
+    assert agg["consumed"] == 9 and agg["suppressed"] == 1 and agg["delivered_live"] == 8
+    assert agg["sinks"][0]["delivered"] == 8 and run._receipt_accounted(agg)
+
+
+def test_aggregate_rejects_bad_types_and_broken_invariants():
+    assert run.aggregate_receipts([])[0] is None                     # no receipts
+    bad_bool = [{"worker": "w", "seq": 1, "consumed": True, "suppressed": 0, "delivered_live": 1,
+                 "sinks": [{"name": "es", "delivered": 1, "dead_lettered": 0}]}]
+    assert run.aggregate_receipts(bad_bool)[0] is None               # bool is not a count
+    negative = [_r("w", 1, 3, 0, 3)]; negative[0]["sinks"][0]["delivered"] = -1
+    assert run.aggregate_receipts(negative)[0] is None
+    broken = [_r("w", 1, 10, 0, 4)]                                   # sink 4 != live 10
+    agg, problems = run.aggregate_receipts(broken)
+    assert agg is None and problems
+
+
 def test_classify_completion_rejects_incomplete_or_unknown_inventory():
     # §24.2 adversarial battery: the reproduced false reconciliations must now be inconclusive.
     def cc(pe, gl):

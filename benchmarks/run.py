@@ -367,13 +367,13 @@ def wait_for_drain(project, tries=25, delay=3.0, sleep=None, lag_fn=None):
     return prev or {}
 
 
-def read_sink_receipt(project, topic="ndr.sink.receipt.v1", limit=1000, timeout=12):
-    """The latest findings-forwarder delivery receipt (Rec-D), read from the bus via rpk. Reads from
-    the start and keeps the last valid JSON record; rpk tails after end-of-topic, so a bounded
-    timeout stops it and we parse whatever was printed. None if the topic/receipt is absent."""
+def read_sink_receipts(project, topic="ndr.sink.receipt.v1", limit=2000, timeout=12):
+    """ALL findings-forwarder receipts on the bus (Rec-D/§stage3), read via rpk. Returns the raw list;
+    the caller aggregates the latest PER WORKER — trusting one recent message drops a second worker's
+    counts or accepts a stale one. rpk tails after end-of-topic, so a bounded timeout stops it."""
     cid = _redpanda_cid(project)
     if not cid:
-        return None
+        return []
     p = subprocess.Popen(["docker", "exec", cid, "rpk", "topic", "consume", topic,
                           "-o", "start", "-n", str(limit), "-f", "%v\n"],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -382,29 +382,81 @@ def read_sink_receipt(project, topic="ndr.sink.receipt.v1", limit=1000, timeout=
     except subprocess.TimeoutExpired:
         p.kill()
         out, _ = p.communicate()
-    last = None
+    receipts = []
     for line in (out or "").splitlines():
         line = line.strip()
         if line:
             try:
-                last = json.loads(line)
+                receipts.append(json.loads(line))
             except ValueError:
                 pass
-    return last
+    return receipts
 
 
-def _receipt_accounted(receipt):
-    """A findings-forwarder sink receipt (Rec-D) is 'accounted' when every consumed finding is
-    accounted for downstream — each sink's delivered + dead_lettered equals the live (non-suppressed)
-    consumed count, with at least one sink reporting. dead_lettered>0 is a recorded delivery FAILURE
-    (a valid negative product result), not a gap: the work is still accounted, so it does not block
-    reconciliation — it is surfaced separately."""
-    if not receipt or not receipt.get("sinks"):
+def _is_count(v):
+    """A valid count: an int that is not a bool, and nonnegative (§stage3 type validation)."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def aggregate_receipts(receipts):
+    """Fold the forwarder receipts into ONE accountable disposition (§stage3): keep the latest (max
+    seq) receipt per worker, VALIDATE each (schema, int-not-bool nonnegative counts, the internal
+    invariants consumed==suppressed+delivered_live and per-sink delivered+dead_lettered==delivered_live),
+    then SUM across workers (per-sink by name). Returns (aggregate|None, problems[]). Any validation
+    problem -> aggregate is None so the run cannot reconcile on a malformed/partial receipt."""
+    latest = {}
+    for r in receipts or []:
+        if not isinstance(r, dict):
+            continue
+        w = r.get("worker")
+        if w not in latest or r.get("seq", 0) > latest[w].get("seq", 0):
+            latest[w] = r
+    if not latest:
+        return None, ["no receipts"]
+    problems, consumed, suppressed, live = [], 0, 0, 0
+    sinks = {}
+    for w, r in latest.items():
+        for k in ("consumed", "suppressed", "delivered_live"):
+            if not _is_count(r.get(k)):
+                problems.append(f"worker {w}: bad {k}={r.get(k)!r}")
+        if problems:
+            continue
+        if r["consumed"] != r["suppressed"] + r["delivered_live"]:
+            problems.append(f"worker {w}: consumed != suppressed + delivered_live")
+        rs = r.get("sinks")
+        if not isinstance(rs, list) or not rs:
+            problems.append(f"worker {w}: no sinks")
+            continue
+        for s in rs:
+            d, x = s.get("delivered"), s.get("dead_lettered")
+            if not (_is_count(d) and _is_count(x)):
+                problems.append(f"worker {w}/{s.get('name')}: bad sink counts")
+                continue
+            if d + x != r["delivered_live"]:
+                problems.append(f"worker {w}/{s.get('name')}: delivered+dead_lettered != delivered_live")
+            agg = sinks.setdefault(s.get("name"), {"name": s.get("name"), "delivered": 0, "dead_lettered": 0})
+            agg["delivered"] += d
+            agg["dead_lettered"] += x
+        consumed += r["consumed"]
+        suppressed += r["suppressed"]
+        live += r["delivered_live"]
+    if problems:
+        return None, problems
+    return ({"consumed": consumed, "suppressed": suppressed, "delivered_live": live,
+             "sinks": list(sinks.values()), "workers": len(latest)}, [])
+
+
+def _receipt_accounted(aggregate):
+    """The aggregated disposition (from aggregate_receipts) is 'accounted' when every consumed finding
+    is accounted downstream — each sink's delivered + dead_lettered equals the aggregate live count,
+    with at least one sink. dead_lettered>0 is a recorded delivery FAILURE (valid negative), still
+    accounted, so it does not block reconciliation — it is surfaced separately."""
+    if not aggregate or not aggregate.get("sinks"):
         return False
-    live = receipt.get("delivered_live")
-    if live is None:
+    live = aggregate.get("delivered_live")
+    if not _is_count(live):
         return False
-    return all(s.get("delivered", 0) + s.get("dead_lettered", 0) == live for s in receipt["sinks"])
+    return all(s.get("delivered", 0) + s.get("dead_lettered", 0) == live for s in aggregate["sinks"])
 
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
@@ -567,8 +619,11 @@ def run_full(scenario: str, out_dir: str) -> str:
                                          min_stable=3)
     except RuntimeError:
         arm_counts = {}                    # never settled -> classified inconclusive below
-    sink_receipt = read_sink_receipt(PROJECT)   # Rec-D: the forwarder's accountable delivery disposition
-    completion = classify_completion(producer_exits, group_lag, arm_counts, sink_receipt=sink_receipt)
+    _receipts = read_sink_receipts(PROJECT)     # Rec-D/§stage3: aggregate the latest receipt per worker
+    sink_disposition, _receipt_problems = aggregate_receipts(_receipts)
+    if _receipt_problems:
+        print(f"  ! sink receipts not accountable: {_receipt_problems}", file=sys.stderr)
+    completion = classify_completion(producer_exits, group_lag, arm_counts, sink_receipt=sink_disposition)
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,

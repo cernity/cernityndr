@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import time
+import uuid
 
 import ndr_runtime
 
@@ -39,17 +40,21 @@ def main():
     consumer = ndr_runtime.make_consumer(FINAL_TOPIC, group_id="cernity-findings-forwarder",
                                          auto_offset_reset="earliest", enable_auto_commit=False)
     producer = ndr_runtime.make_producer() if RECEIPTS_ON else None
-    log.info("findings-forwarder up: consuming %s -> sink=%s", FINAL_TOPIC, type(adapter).__name__)
-    total = suppressed = 0
+    worker = uuid.uuid4().hex                          # stable per-process id: receipts are attributable
+    log.info("findings-forwarder up: consuming %s -> sink=%s (worker %s)",
+             FINAL_TOPIC, type(adapter).__name__, worker[:8])
+    total = suppressed = seq = 0
     last_beat = time.monotonic()
 
     def emit_receipt():
         # Rec-D: publish the accountable disposition (consumed = suppressed + delivered + dead-lettered
         # per sink) so a reader can confirm every consumed finding was accounted for, not just drained.
+        nonlocal seq
         if producer is None:
             return
         try:
-            producer.send(RECEIPT_TOPIC, value=build_receipt(adapter, total, suppressed))
+            seq += 1
+            producer.send(RECEIPT_TOPIC, value=build_receipt(adapter, total, suppressed, worker, seq))
             producer.flush()
         except Exception as e:                       # noqa: BLE001 (a receipt failure must not drop findings)
             log.warning("could not emit sink receipt: %s", e)

@@ -164,6 +164,67 @@ def preflight_no_foreign_containers(names=None, exists=None):
             "isolated host or tear that deployment down first (M1.1/§3).")
 
 
+# The offline PRODUCERS (read the pcap / feed the bus). Verification runs while the rest of the
+# stack is up but BEFORE these start, so a drifted image, bad input, or reused output aborts the
+# run before any data is produced (§25.1 verify-before-feeder). Compose service names.
+PRODUCER_SERVICES = ("suricata-offline", "zeek-offline", "arm-b-feeder")
+
+
+def _all_services():
+    out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "config", "--services"],
+                         capture_output=True, text=True)
+    return [s for s in out.stdout.split() if s]
+
+
+def _running_services():
+    out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "ps", "--services",
+                          "--status", "running"], capture_output=True, text=True)
+    return [s for s in out.stdout.split() if s]
+
+
+def _run_id():
+    import datetime as _dt
+    import uuid
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
+
+
+def build_run_spec(scenario, run_id, manifest, required_services, required_groups, deadline=None):
+    """The frozen experiment spec archived with each run (§25.1): what identity/inputs/topology this
+    result is attributable to. Required components are listed EXPLICITLY so a missing one is a
+    failure, never a silent optional. `replay_mapping` is filled after the feeder records it."""
+    return {
+        "run_id": run_id, "scenario": scenario,
+        "target_images": manifest.get("images", {}),          # per-service revision identity
+        "inputs": manifest.get("inputs", {}),                 # pcap/labels/config hashes (fairness anchor)
+        "required_services": list(required_services),
+        "required_groups": list(required_groups),
+        "optional_arms": ["arm-b-findings-*", "arm-c-zeek"],  # a valid-empty result, not required
+        "replay_mapping": None,
+        "eval_deadline": deadline,
+        "scoring_policy": {"identity": "(tenant, finding_id)", "temporal": "in/out/ambiguous/untimed",
+                           "precision": "adjudicable-only", "revision": "max-rank, deadline-aware"},
+    }
+
+
+def preflight_run_spec(spec, running_services, output_exists=False, overwrite=False):
+    """Gate scenario execution on an explicit successful preflight BEFORE the feeder is released
+    (§25.1). Fails on: an empty required set (would silently accept any topology), a required
+    service not running, or a populated output dir (reused run id / overlapping path — refuse to
+    overwrite existing evidence). Pure/testable."""
+    problems = []
+    if not spec.get("required_services"):
+        problems.append("run-spec declares no required services (would silently accept any topology)")
+    missing = [s for s in spec.get("required_services", []) if s not in set(running_services)]
+    if missing:
+        problems.append(f"required services not running: {missing}")
+    if output_exists and not overwrite:
+        problems.append(f"output already holds a scored run (reused run dir / id {spec.get('run_id')}); "
+                        f"refusing to overwrite evidence — set BENCH_OVERWRITE=1 for a new attempt")
+    if problems:
+        raise SystemExit("run-spec preflight FAILED (before any production): " + "; ".join(problems))
+    return spec
+
+
 def svc_container(service):
     """Resolve a bench service to its project-scoped, auto-named container id."""
     out = subprocess.run(["docker", "compose", "-p", PROJECT, "-f", COMPOSE, "ps", "-q", service],
@@ -378,16 +439,22 @@ def run_full(scenario: str, out_dir: str) -> str:
     """Docker path. Sequences the offline engines, ships both arms, queries, scores."""
     labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
     endpoint = os.environ.get("BENCH_OPENSEARCH", "http://localhost:9200")
-    print(f"[1] bringing up benchmark stack for '{scenario}'")
+    run_id = _run_id()
+    overwrite = os.environ.get("BENCH_OVERWRITE", "").strip() not in ("", "0", "false", "no")
+    if os.path.isfile(os.path.join(out_dir, "report.json")) and not overwrite:
+        raise SystemExit(f"benchmark abort: {out_dir} already holds a scored run — refusing to "
+                         f"overwrite evidence (§25.1). Set BENCH_OVERWRITE=1 or use a fresh --out.")
+    print(f"[1] bringing up benchmark stack for '{scenario}' (run {run_id}), producers held")
     compose("down", "-v", "--remove-orphans")     # clean THIS project's state (empty-state, §3)
     preflight_no_foreign_containers()             # abort if a real deployment would collide (§3)
-    # A pinned run must NOT rebuild: `--build` yields fresh, non-reproducible local image IDs
-    # each time (observed: a rebuild drifts nearly every service from the prior manifest), so a
-    # pin can only be honoured by reusing the images already present (built once / loaded by
-    # digest). Unpinned runs build from source as before.
-    compose("up", "-d", *([] if os.environ.get("BENCH_PIN_MANIFEST") else ["--build"]))
+    # Verify-before-feeder (§25.1): bring up everything EXCEPT the offline producers, verify the
+    # topology/images/inputs, and only release the producers once preflight passes — so a drifted
+    # image / bad input / reused output aborts BEFORE any data is produced. A pinned run must NOT
+    # rebuild (`--build` yields fresh, non-reproducible local image IDs); unpinned builds from source.
+    _infra = [s for s in _all_services() if s not in PRODUCER_SERVICES]
+    compose("up", "-d", *([] if os.environ.get("BENCH_PIN_MANIFEST") else ["--build"]), *_infra)
     apply_index_template(endpoint)             # M3: type the arm fields before ingestion (best-effort)
-    print("[1b] recording provenance manifest (M0.3) + checking artifact drift (M0.4)")
+    print("[1b] recording provenance manifest (M0.3) + run-spec preflight (M0.4/§25.1)")
     _bench = os.path.dirname(COMPOSE)
     _pcap = os.environ.get("BENCH_PCAP", "")
     _pcap_dir = os.environ.get("BENCH_PCAP_DIR")
@@ -403,12 +470,26 @@ def run_full(scenario: str, out_dir: str) -> str:
         json.dump(manifest, _mf, indent=2, sort_keys=True)
     _pin = os.environ.get("BENCH_PIN_MANIFEST")
     if _pin:
-        _drift = manifest_drift(manifest["images"], _load(_pin))
-        if _drift:
+        _pinned = _load(_pin)
+        _drift = manifest_drift(manifest["images"], _pinned)
+        _input_drift = {k: v for k, v in manifest.get("inputs", {}).items()
+                        if _pinned.get("inputs", {}).get(k, {}).get("sha256") not in (None, v.get("sha256"))}
+        if _drift or _input_drift:
             compose("down", "-v", "--remove-orphans")
-            raise SystemExit(f"benchmark abort: running images drift from pinned manifest "
-                             f"{os.path.basename(_pin)}: {json.dumps(_drift)} — the run does not "
-                             f"match the pinned artifacts (M0.4).")
+            raise SystemExit(f"benchmark abort: run drifts from pinned manifest "
+                             f"{os.path.basename(_pin)}: images={json.dumps(_drift)} "
+                             f"inputs={json.dumps(_input_drift)} — does not match pinned artifacts (M0.4).")
+    # The pipeline (detectors/forwarder/shippers/bus/store) must be up to RECEIVE production; verify
+    # that before releasing producers, else findings are lost to the offset race. dashboards is not
+    # essential to scoring, so it is not required.
+    _required = [s for s in _infra if s != "dashboards"]
+    spec = build_run_spec(scenario, run_id, manifest, required_services=_required,
+                          required_groups=PIPELINE_GROUPS, deadline=labels.get("eval_deadline"))
+    preflight_run_spec(spec, running_services=_running_services(), output_exists=False, overwrite=overwrite)
+    with open(os.path.join(out_dir, "run-spec.json"), "w") as _sf:
+        json.dump(spec, _sf, indent=2, sort_keys=True)
+    print("[1c] preflight passed — releasing offline producers")
+    compose("up", "-d", *PRODUCER_SERVICES)
     print("[2] R2 completion: waiting for producers to exit + checking their exit status")
     producer_exits = wait_for_producer_exits()
     print("[2a] R2 completion: reconciling consumer-group drain (pipeline consumed the input)")
@@ -455,6 +536,13 @@ def run_full(scenario: str, out_dir: str) -> str:
             "completion=inputs_drained: inputs consumed + baseline shipped; downstream detector "
             "evaluation / pending-capture / per-sink disposition not yet verified (§25.2)")
     results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
+    results["run_id"] = run_id                                     # §25.1: link the result to its spec
+    _spec_path = os.path.join(out_dir, "run-spec.json")            # archive the effective spec + mapping
+    if os.path.isfile(_spec_path):
+        _spec = _load(_spec_path)
+        _spec["replay_mapping"] = {"replay_offset_seconds": results.get("replay_offset_seconds", 0.0)}
+        with open(_spec_path, "w") as _sf:
+            json.dump(_spec, _sf, indent=2, sort_keys=True)
     return _write(results, out_dir)
 
 

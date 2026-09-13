@@ -153,6 +153,48 @@ def test_wait_for_drain_returns_when_lag_stable_zero():
     assert run.wait_for_drain("p", tries=5, sleep=lambda _s: None, lag_fn=lag_fn) == {"g": 0}
 
 
+def _spec(required=("redpanda", "ndr-finding-service"), rid="r1"):
+    return run.build_run_spec("s", rid, {"images": {}, "inputs": {}},
+                              required_services=required, required_groups=("g",))
+
+
+def test_run_spec_preflight_passes_complete_topology():
+    run.preflight_run_spec(_spec(), running_services=["redpanda", "ndr-finding-service", "opensearch"])
+
+
+def test_run_spec_preflight_fails_missing_required_service():
+    try:
+        run.preflight_run_spec(_spec(), running_services=["redpanda"])   # finding-service absent
+        assert False, "must abort before production on a missing required service"
+    except SystemExit as e:
+        assert "ndr-finding-service" in str(e)
+
+
+def test_run_spec_preflight_fails_empty_required_set():
+    # a spec that declares nothing required would silently accept any topology
+    try:
+        run.preflight_run_spec(_spec(required=()), running_services=["redpanda"])
+        assert False, "empty required set must fail"
+    except SystemExit:
+        pass
+
+
+def test_run_spec_preflight_refuses_to_clobber_existing_output():
+    try:
+        run.preflight_run_spec(_spec(), running_services=["redpanda", "ndr-finding-service"],
+                               output_exists=True)                       # reused run dir / id
+        assert False, "must refuse to overwrite an existing scored run"
+    except SystemExit as e:
+        assert "overwrite" in str(e).lower()
+    # explicit overwrite is allowed
+    run.preflight_run_spec(_spec(), running_services=["redpanda", "ndr-finding-service"],
+                           output_exists=True, overwrite=True)
+
+
+def test_run_ids_are_unique():
+    assert run._run_id() != run._run_id()
+
+
 def test_preflight_aborts_on_foreign_container():
     # a fixed container name already present (a real deployment) must abort, never attach (§3)
     try:

@@ -20,6 +20,13 @@ x-central-bus-auth: &central-bus-auth
   NDR_BUS_SASL_MECHANISM: ${CERNITY_BUS_CENTRAL_MECHANISM-SCRAM-SHA-512}
   NDR_BUS_SASL_USER: ${CERNITY_BUS_CENTRAL_USER:-cernity-central}
   NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
+  # Consumer offset reset override. Unset by default (empty) so each service keeps its own
+  # code default (ids-alerts 'latest'; finding-service/forwarder 'earliest'). Offline PCAP
+  # replay (benchmark) sets NDR_OFFSET_RESET=earliest to position every consumer
+  # deterministically; ndr_runtime applies it over a service's hard-coded default only when
+  # it is non-empty. Must stay empty here, not 'latest', or it would flip the services that
+  # deliberately use 'earliest'.
+  NDR_OFFSET_RESET: ${NDR_OFFSET_RESET-}
 
 # Common environment shared by the detector services.
 x-detector-env: &detector-env

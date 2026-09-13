@@ -77,11 +77,17 @@ def _security_config():
 def _consumer_config(group_id, **overrides):
     """Throughput-tuned KafkaConsumer kwargs for one single-box replica. Larger
     fetch/poll sizing keeps the bus from becoming the ceiling when many replicas
-    read many partitions; all env-overridable, explicit overrides win."""
+    read many partitions; all env-overridable, explicit overrides win.
+
+    auto_offset_reset precedence (documented): an explicitly-set NDR_OFFSET_RESET wins
+    over everything, including a service's hard-coded default. This lets offline replay
+    position EVERY consumer deterministically (a service that hard-codes 'latest' would
+    otherwise silently skip a burst produced before it joined). Unset in production, each
+    service keeps its own code default; the base default is 'latest'."""
     conf = dict(
         bootstrap_servers=_bootstrap(),
         group_id=group_id,
-        auto_offset_reset=os.environ.get("NDR_OFFSET_RESET", "latest"),
+        auto_offset_reset="latest",
         enable_auto_commit=True,
         max_poll_records=_int("NDR_MAX_POLL_RECORDS", 1000),
         fetch_max_bytes=_int("NDR_FETCH_MAX_BYTES", 52428800),          # 50 MiB
@@ -91,7 +97,10 @@ def _consumer_config(group_id, **overrides):
         value_deserializer=lambda b: json.loads(b.decode()),
         **_security_config(),                                  # SASL_SSL when env-set, else {}
     )
-    conf.update(overrides)
+    conf.update(overrides)                       # a service's explicit default wins over base
+    env_reset = os.environ.get("NDR_OFFSET_RESET")
+    if env_reset:                                # ...but an explicit env setting wins over that
+        conf["auto_offset_reset"] = env_reset
     return conf
 
 

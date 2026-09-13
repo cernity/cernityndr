@@ -37,6 +37,20 @@ def test_env_and_explicit_override_precedence():
         del os.environ["NDR_MAX_POLL_RECORDS"]
 
 
+def test_offset_reset_precedence():
+    # M1.3: production defaults are preserved when NDR_OFFSET_RESET is unset...
+    assert rt._consumer_config("g")["auto_offset_reset"] == "latest"                 # base default
+    assert rt._consumer_config("g", auto_offset_reset="earliest")["auto_offset_reset"] == "earliest"  # ids-alerts uses latest; finding-service/forwarder use earliest -> preserved
+    # ...but an explicit NDR_OFFSET_RESET wins over even a service's hard-coded default,
+    # so offline replay can position every consumer deterministically.
+    os.environ["NDR_OFFSET_RESET"] = "earliest"
+    try:
+        assert rt._consumer_config("g", auto_offset_reset="latest")["auto_offset_reset"] == "earliest"
+        assert rt._consumer_config("g")["auto_offset_reset"] == "earliest"
+    finally:
+        del os.environ["NDR_OFFSET_RESET"]
+
+
 def test_malformed_env_falls_back_to_default():
     os.environ["NDR_MAX_POLL_RECORDS"] = "notanint"
     try:

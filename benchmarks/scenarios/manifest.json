@@ -99,8 +99,9 @@
       "behavior": "c2",
       "control": "synthetic-benign",
       "set": "holdout",
-      "status": "built",
-      "question": "the report admits misses and unavailable evidence"
+      "status": "validated",
+      "question": "the report admits misses and unavailable evidence",
+      "note": "expected-MISS scenario: sub-threshold (4 callbacks); recall=0 is the correct 'admits misses' outcome + valid-empty completion"
     },
     "S12": {
       "name": "duplicate/reordered telemetry, sink outage (resilience)",

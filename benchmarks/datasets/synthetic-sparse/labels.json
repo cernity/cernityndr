@@ -1,0 +1,19 @@
+{
+  "dataset": "synthetic-sparse (built-in, S11)",
+  "granularity": "host",
+  "malicious": ["10.0.0.5"],
+  "episodes": [
+    {"id": "sparse-beacon", "label": "malicious", "behavior": "c2",
+     "entities": [{"value": "10.0.0.5", "role": "initiator"},
+                  {"value": "203.0.113.66", "role": "target"}]}
+  ],
+  "expected_outcome": "miss",
+  "honesty": [
+    "S11: only 4 callbacks — below the beacon evidence threshold (>=6). A MISS here is the CORRECT, expected outcome: the point is that the report admits the limitation (insufficient evidence), not that the detector fires. episode_recall=0 is a PASS for this scenario's intent, not a failure of the pipeline.",
+    "A visibility-limitation case (§6 S11); do not read recall=0 as a detection defect."
+  ],
+  "caveats": [
+    "Synthetic sparse scenario for the admits-misses gate.",
+    "The run still completes (valid-empty Arm B is legitimate here)."
+  ]
+}

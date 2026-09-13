@@ -320,6 +320,17 @@ def run_full(scenario: str, out_dir: str) -> str:
     results = extract.build_results(meta, arms_raw, truth,
                                     honesty=labels.get("honesty") or DEFAULT_HONESTY,
                                     caveats=labels.get("caveats") or DEFAULT_CAVEATS)
+    # M2/§7: incident/role-aware scoring when the labels carry episodes (entities+roles). Reported
+    # alongside the host-set score; a detection naming a matched episode's target is relevant, not
+    # an unrelated false positive.
+    truth_eps = labels.get("episodes")
+    if truth_eps:
+        import episodes as _epmod
+        results["episode_scoring"] = {
+            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps),
+            "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps),
+            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps),
+        }
     return _write(results, out_dir)
 
 

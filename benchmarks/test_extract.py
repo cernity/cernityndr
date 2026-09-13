@@ -44,6 +44,24 @@ def test_flagged_from_findings_tolerates_bad_entities():
     assert x.flagged_from_findings([{"entities": "not-json"}, {}]) == set()
 
 
+def test_detections_from_alerts_filters_flow_and_maps_behavior():
+    docs = [{"event_type": "flow", "src_ip": "1.1.1.1"},
+            {"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "203.0.113.66",
+             "alert": {"category": "A Network Trojan was detected"}}]
+    d = x.detections_from_alerts(docs)
+    assert len(d) == 1 and d[0]["behavior"] == "c2"
+    assert {e["value"] for e in d[0]["entities"]} == {"10.0.0.5", "203.0.113.66"}
+
+
+def test_detections_from_findings_parses_roles_and_id():
+    docs = [{"finding_id": "f1", "category": "c2",
+             "entities": json.dumps([{"type": "ip", "role": "src", "value": "10.0.0.5"},
+                                     {"type": "spray", "value": "ignore"}])}]
+    d = x.detections_from_findings(docs)
+    assert d[0]["finding_id"] == "f1" and d[0]["behavior"] == "c2"
+    assert d[0]["entities"] == [{"value": "10.0.0.5", "role": "src"}]
+
+
 def test_build_results_composes_accuracy_and_noise():
     meta = {"scenario": "t", "granularity": "per-host"}
     arms = {

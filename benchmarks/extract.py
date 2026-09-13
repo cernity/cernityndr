@@ -66,6 +66,51 @@ def flagged_from_findings(docs, granularity: str = "host") -> set:
     return out
 
 
+def _alert_behavior(d) -> str | None:
+    """Coarse behaviour class for a Suricata alert, for episode matching (M2)."""
+    cat = str((d.get("alert") or {}).get("category") or d.get("category") or "").lower()
+    for needle, behavior in (("trojan", "c2"), ("command and control", "c2"),
+                             ("malware", "malware"), ("attack", "c2"),
+                             ("scan", "recon"), ("exfil", "exfil")):
+        if needle in cat:
+            return behavior
+    return cat or None
+
+
+def _ip_entities(raw):
+    """[{value, role}] for the ip-typed entities in a finding's `entities` (a JSON string)."""
+    try:
+        ents = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except (ValueError, TypeError):
+        ents = []
+    return [{"value": e.get("value"), "role": e.get("role")}
+            for e in ents if e.get("type") == "ip" and e.get("value")]
+
+
+def _endpoint_entities(d):
+    return [{"value": d[k], "role": r} for k, r in (("src_ip", "src"), ("dest_ip", "dst")) if d.get(k)]
+
+
+def detections_from_alerts(docs):
+    """Suricata alert docs -> episode detections (initiator=src_ip, target=dest_ip)."""
+    return [{"entities": _endpoint_entities(d), "behavior": _alert_behavior(d),
+             "tenant": d.get("tenant", "default")}
+            for d in docs if d.get("event_type") == "alert"]
+
+
+def detections_from_findings(docs):
+    """Cernity finding docs -> episode detections (entities already carry roles)."""
+    return [{"entities": _ip_entities(d.get("entities")), "behavior": d.get("category"),
+             "finding_id": d.get("finding_id"), "tenant": d.get("tenant", "default")}
+            for d in docs]
+
+
+def detections_from_notices(docs):
+    """Zeek notice docs -> episode detections (shipper normalized src/dst -> src_ip/dest_ip)."""
+    return [{"entities": _endpoint_entities(d), "behavior": (d.get("note") or None),
+             "tenant": d.get("tenant", "default")} for d in docs]
+
+
 def build_results(meta: dict, arms_raw: dict, truth, honesty=None, caveats=None) -> dict:
     """Compose the report dict. `arms_raw[arm]` = {flagged:set, raw_events, alerts,
     delivered}. Accuracy comes from the flagged set vs truth; noise from the counts."""

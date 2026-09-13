@@ -69,21 +69,30 @@ def _interval_ok(det, ep, tol=0.0):
     return di["start"] <= ei["end"] + tol and ei["start"] <= di["end"] + tol
 
 
-def _role_compatible(det_roles, ep_roles, shared):
-    """>=1 shared entity carried in a role the episode assigns (a detection with no role for
-    that entity is allowed — many detections do not label roles)."""
-    return any(det_roles.get(v) in (None, ep_roles.get(v)) for v in shared)
+def _required_values(ep):
+    """The entity values a detection MUST implicate to surface this episode (R3/§21.3). Default:
+    ALL of the episode's entities — a peer-specific beacon needs BOTH the initiator and the
+    target/domain; one shared IP is insufficient (that was the §20.1 over-credit: two episodes
+    sharing a source were both credited by a detection naming only that source). An episode may
+    narrow the requirement with `match_requires` (a list of values) for a family whose
+    discriminator is a subset (e.g. a scan keyed on the initiator + target-set evidence)."""
+    mr = ep.get("match_requires")
+    return set(mr) if mr else set(_entity_roles(ep))
 
 
 def matches(det, ep, tol=0.0):
     if (det.get("tenant") or "default") != (ep.get("tenant") or "default"):
         return False
+    det_roles = _entity_roles(det)
+    required = _required_values(ep)
     ep_roles = _entity_roles(ep)
-    shared = set(_entity_roles(det)) & set(ep_roles)
-    if not shared:
+    # every discriminating entity must be implicated (subset), each in a compatible role
+    # (a detection that does not label the role is allowed — many detections do not).
+    if not required or not required.issubset(set(det_roles)):
         return False
-    return (_role_compatible(_entity_roles(det), ep_roles, shared)
-            and _behavior_ok(det, ep) and _interval_ok(det, ep, tol))
+    if not all(det_roles.get(v) in (None, ep_roles.get(v)) for v in required):
+        return False
+    return _behavior_ok(det, ep) and _interval_ok(det, ep, tol)
 
 
 def _dedup(detections):
@@ -93,9 +102,10 @@ def _dedup(detections):
     for d in detections:
         fid = d.get("finding_id")
         if fid is not None:
-            if fid in seen:
+            key = (d.get("tenant") or "default", fid)     # scope identity by tenant (§20.1)
+            if key in seen:
                 continue
-            seen.add(fid)
+            seen.add(key)
         out.append(d)
     return out
 

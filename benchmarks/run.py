@@ -393,6 +393,54 @@ def read_sink_receipts(project, topic="ndr.sink.receipt.v1", limit=2000, timeout
     return receipts
 
 
+def read_obligations(project):
+    """The findings-forwarder's DURABLE obligation ledger(s), read off the persistent cernity-out
+    volume (§stage2/3 fix). This is the AUTHORITATIVE, synchronously-written delivery record — unlike
+    the bus receipt it cannot race the deliveries it describes. Returns (records, available): available
+    is False only when the volume/ledger could not be read (then the caller falls back to the receipt)."""
+    vol = f"{project}_cernity-out"
+    try:
+        out = subprocess.run(["docker", "run", "--rm", "-v", f"{vol}:/out:ro", "alpine",
+                              "sh", "-c", "cat /out/dlq/obligations-*.jsonl 2>/dev/null"],
+                             capture_output=True, text=True, timeout=60)
+    except Exception:                                # noqa: BLE001
+        return [], False
+    if out.returncode != 0:
+        return [], False
+    records = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                pass
+    return records, True                             # readable (possibly empty = a benign no-delivery run)
+
+
+def ledger_disposition(records):
+    """Authoritative delivery disposition from the obligation ledger: distinct delivered / dead-lettered
+    obligations per destination (deduped by finding_id+revision+dest — a record appears once even if the
+    ledger was appended to across restarts). dead_lettered>0 is a recorded delivery FAILURE (valid
+    negative), still accounted."""
+    seen, sinks = set(), {}
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        key = (r.get("finding_id"), r.get("revision"), r.get("dest"))
+        if key in seen:
+            continue
+        seen.add(key)
+        s = sinks.setdefault(r.get("dest"), {"name": r.get("dest"), "delivered": 0, "dead_lettered": 0})
+        if r.get("outcome") == "delivered":
+            s["delivered"] += 1
+        elif r.get("outcome") == "dead_lettered":
+            s["dead_lettered"] += 1
+    return {"sinks": list(sinks.values()),
+            "delivered": sum(s["delivered"] for s in sinks.values()),
+            "dead_lettered": sum(s["dead_lettered"] for s in sinks.values())}
+
+
 def read_eval_acks(project, topic="ndr.eval.ack.v1", limit=5000, timeout=12):
     """All detector evaluation-completion acks on the bus (§stage3), read via rpk. A detector emits
     one per assigned partition after each evaluate() pass; the harness confirms evaluation covered the
@@ -513,21 +561,21 @@ def _receipt_accounted(aggregate):
 
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
-                        expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None):
-    """Explicit run state (R2/§21.2, §24.2 + §25.2/Rec-D). A valid outcome requires the COMPLETE
-    expected inventory to report — an absent, null, or unparsable status is unknown, never success:
+                        expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None,
+                        ledger=None):
+    """Explicit run state (R2/§21.2, §24.2 + §25.2/Rec-D + §stage3 fix). A valid outcome requires the
+    COMPLETE expected inventory to report — an absent/null/unparsable status is unknown, never success:
       invalid        — an expected producer exited non-zero (a definite product/harness failure).
       inconclusive   — an expected producer is missing/null/unparsable; an expected consumer group is
-                       missing/unparsable/not-drained; drain is unverifiable (no readings at all); or a
-                       required baseline arm is empty. Attribution is impossible; not a valid zero.
-      inputs_drained — every expected producer exited 0, every expected group drained to 0, and the
-                       baseline arrived, but NO accountable sink receipt confirmed downstream
-                       disposition. Proves the input was CONSUMED, not that every finding reached its
-                       sink — a zero-lag group is offset progress, not delivery.
-      reconciled     — inputs_drained AND a forwarder sink receipt accounts for every consumed finding
-                       (delivered + intentionally suppressed + dead-lettered), so all accepted work is
-                       accounted for (Rec-D). dead_lettered>0 is a recorded delivery failure, still
-                       accounted; it does not demote the state, it is reported.
+                       missing/unparsable/not-drained; drain is unverifiable; or the baseline is empty.
+      inputs_drained — producers exited 0, groups drained to 0, baseline arrived, but downstream
+                       delivery is NOT authoritatively accounted (no ledger, and no accountable receipt).
+      reconciled     — inputs_drained AND downstream delivery is accounted. The AUTHORITATIVE source is
+                       the forwarder's durable obligation `ledger` (read off the persistent volume,
+                       written synchronously at delivery) — used when present so a run reconciles on the
+                       real record, not the async bus receipt which can race the deliveries (§stage3
+                       run8 finding). The bus `sink_receipt` is the fallback when the ledger is
+                       unreadable. dead_lettered>0 is a recorded delivery failure, still accounted.
     Scoreable at inputs_drained or reconciled. Pure/testable."""
     unresolved = []
     # Producers: the full expected set must each report a valid exit. non-zero => invalid;
@@ -556,18 +604,27 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
+    # Delivery is accounted authoritatively by the durable ledger when it could be read (present even
+    # if empty = a benign no-delivery run); the bus receipt is the fallback. Either one accounts for
+    # downstream delivery -> reconciled (§stage3 fix: the ledger cannot race its own deliveries).
+    delivery_accounted = ledger is not None or _receipt_accounted(sink_receipt)
     if failed:
         state = "invalid"
     elif unresolved:
         state = "inconclusive"
-    elif _receipt_accounted(sink_receipt):
-        state = "reconciled"                       # Rec-D: downstream disposition accounted for
+    elif delivery_accounted:
+        state = "reconciled"
     else:
         state = "inputs_drained"                   # consumed + baseline, but delivery unconfirmed
     delivery = None
-    if sink_receipt:
-        delivery = {"consumed": sink_receipt.get("consumed"), "suppressed": sink_receipt.get("suppressed"),
-                    "sinks": sink_receipt.get("sinks"),
+    if ledger is not None:                          # authoritative
+        delivery = {"source": "obligation-ledger", "sinks": ledger.get("sinks"),
+                    "delivered": ledger.get("delivered", 0), "dead_lettered": ledger.get("dead_lettered", 0),
+                    "receipt": ({"consumed": sink_receipt.get("consumed"),
+                                 "suppressed": sink_receipt.get("suppressed")} if sink_receipt else None)}
+    elif sink_receipt:
+        delivery = {"source": "bus-receipt", "consumed": sink_receipt.get("consumed"),
+                    "suppressed": sink_receipt.get("suppressed"), "sinks": sink_receipt.get("sinks"),
                     "dead_lettered": sum(s.get("dead_lettered", 0) for s in sink_receipt.get("sinks", []))}
     return {"state": state, "producer_exits": producer_exits,
             "consumer_group_lag": group_lag, "unresolved": unresolved, "delivery": delivery}
@@ -672,11 +729,14 @@ def run_full(scenario: str, out_dir: str) -> str:
                                          min_stable=3)
     except RuntimeError:
         arm_counts = {}                    # never settled -> classified inconclusive below
-    _receipts = read_sink_receipts(PROJECT)     # Rec-D/§stage3: aggregate the latest receipt per worker
+    _receipts = read_sink_receipts(PROJECT)     # Rec-D/§stage3: the bus receipt (fallback / live signal)
     sink_disposition, _receipt_problems = aggregate_receipts(_receipts)
     if _receipt_problems:
         print(f"  ! sink receipts not accountable: {_receipt_problems}", file=sys.stderr)
-    completion = classify_completion(producer_exits, group_lag, arm_counts, sink_receipt=sink_disposition)
+    _obl, _obl_ok = read_obligations(PROJECT)    # §stage3 fix: the durable ledger is authoritative
+    ledger = ledger_disposition(_obl) if _obl_ok else None
+    completion = classify_completion(producer_exits, group_lag, arm_counts,
+                                     sink_receipt=sink_disposition, ledger=ledger)
     completion["eval_acks"] = _summarize_eval_acks(read_eval_acks(PROJECT))   # §stage3 evidence (not yet gating)
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:

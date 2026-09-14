@@ -143,6 +143,37 @@ def test_reconciled_only_with_an_accountable_sink_receipt():
     assert c["state"] == "reconciled" and c["delivery"]["dead_lettered"] == 0
 
 
+def test_ledger_disposition_dedups_and_tallies_by_dest():
+    recs = [{"finding_id": "a", "revision": None, "dest": "opensearch", "outcome": "delivered"},
+            {"finding_id": "a", "revision": None, "dest": "opensearch", "outcome": "delivered"},  # dup append
+            {"finding_id": "b", "revision": None, "dest": "opensearch", "outcome": "dead_lettered"}]
+    d = run.ledger_disposition(recs)
+    assert d["delivered"] == 1 and d["dead_lettered"] == 1                 # a counted once
+    assert d["sinks"][0] == {"name": "opensearch", "delivered": 1, "dead_lettered": 1}
+
+
+def test_ledger_is_authoritative_over_an_incomplete_receipt():
+    # the run8 case: the bus receipt raced (consumed=1/delivered=0) but the durable ledger recorded
+    # real deliveries -> reconcile from the LEDGER, not the stale receipt (§stage3 fix).
+    stale_receipt = {"consumed": 1, "suppressed": 1, "delivered_live": 0,
+                     "sinks": [{"name": "opensearch", "delivered": 0, "dead_lettered": 0}]}
+    ledger = run.ledger_disposition([{"finding_id": f"b{i}", "revision": None, "dest": "opensearch",
+                                      "outcome": "delivered"} for i in range(3)])
+    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                sink_receipt=stale_receipt, ledger=ledger)
+    assert c["state"] == "reconciled"
+    assert c["delivery"]["source"] == "obligation-ledger" and c["delivery"]["delivered"] == 3
+
+
+def test_readable_empty_ledger_reconciles_a_benign_run():
+    ledger = run.ledger_disposition([])              # no deliveries, but the ledger was readable
+    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                ledger=ledger)
+    assert c["state"] == "reconciled" and c["delivery"]["delivered"] == 0
+
+
 def test_dead_letters_still_reconcile_as_a_recorded_negative_outcome():
     receipt = {"consumed": 8, "suppressed": 0, "delivered_live": 8,
                "sinks": [{"name": "splunk", "delivered": 5, "dead_lettered": 3}]}

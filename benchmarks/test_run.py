@@ -35,6 +35,46 @@ def test_os_search_strict_raises_on_query_error():
     assert run.os_search("http://x", "idx", fetch=boom, strict=False) == []
 
 
+def test_os_search_distinguishes_absent_index_from_query_error():
+    # R07: an ABSENT index (404) is a proven-empty arm; a query/engine error is NOT — it must raise even
+    # for an optional arm, never silently reading as '0 detections'.
+    class _NotFound(Exception):
+        code = 404
+    def absent(*_a):
+        raise _NotFound("index_not_found_exception")
+    def engine_error(*_a):
+        raise RuntimeError("engine 503")
+    assert run.os_search("http://x", "arm-b", fetch=absent, allow_absent=True) == []   # absent -> empty
+    try:
+        run.os_search("http://x", "arm-b", fetch=engine_error, allow_absent=True)
+        assert False, "a query error must raise even when absent is allowed"
+    except RuntimeError as e:
+        assert "arm-b" in str(e)
+
+
+def test_require_scorer_inventory_enforces_mandatory_artifacts():
+    # R07: scoring a bundle requires labels + baseline arm to be enumerated; an on-disk scorer-read file
+    # absent from the manifest is unverified influence and also fails.
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "output")
+        os.makedirs(od)
+        # manifest omits labels.json entirely
+        m = {"files": {"suricata-alerts.jsonl": {"sha256": "x", "doc_count": 0}}}
+        try:
+            run.require_scorer_inventory(d, m)
+            assert False, "missing labels.json entry must fail"
+        except SystemExit as e:
+            assert "labels.json" in str(e) and "required artifact" in str(e)
+        # labels + baseline enumerated, but replay.json sits on disk unenumerated -> unverified influence
+        open(os.path.join(od, "replay.json"), "w").close()
+        m2 = {"files": {"labels.json": {"sha256": "x"}, "suricata-alerts.jsonl": {"sha256": "y", "doc_count": 0}}}
+        try:
+            run.require_scorer_inventory(d, m2)
+            assert False, "unenumerated on-disk replay.json must fail"
+        except SystemExit as e:
+            assert "replay.json" in str(e) and "not enumerated" in str(e)
+
+
 def test_wait_for_completion_returns_counts_with_valid_empty_optional():
     # baseline 'a' arrives and stabilises; optional 'b' stays empty -> a VALID completion
     # (benign scenario / real miss), returning the counts rather than raising.
@@ -547,7 +587,9 @@ def test_score_from_export_refuses_a_bundle_without_frozen_truth():
             run.score_from_export(os.path.join(d, "out", "t"), "t")
             assert False, "must refuse a bundle with no frozen labels.json"
         except SystemExit as e:
-            assert "frozen labels" in str(e)
+            # R07: the mandatory-artifact inventory now catches the missing labels at manifest
+            # verification (before scoring), still refusing a truth-less bundle.
+            assert "labels.json" in str(e) and "required artifact" in str(e)
 
 
 def test_eve_paths_hashes_real_outputs():

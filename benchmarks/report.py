@@ -12,9 +12,46 @@ ARM_LABEL = {"suricata_siem": "Suricata -> SIEM",
              "zeek_ref": "Zeek (reference)"}
 
 
+def _qualified(results: dict) -> bool:
+    """A run is QUALIFIED only when its completion state is 'reconciled' with no unresolved work. Any
+    other state (inputs_drained, inconclusive, invalid) makes the numbers DIAGNOSTIC, not a qualified
+    effectiveness result (R09)."""
+    c = results.get("completion") or {}
+    return c.get("state") == "reconciled" and not c.get("unresolved")
+
+
+def _validity_lines(results: dict) -> list:
+    """Run validity + unresolved work, rendered BEFORE any metric so a reader cannot mistake a diagnostic
+    table for a qualified result (R09/§33.5). Names the completion state, delivery accounting, and every
+    unresolved item."""
+    c = results.get("completion") or {}
+    if not c:
+        return ["", "## Run validity", "",
+                "- No completion record attached — treat every number below as UNQUALIFIED diagnostics."]
+    state = c.get("state", "unknown")
+    qualified = _qualified(results)
+    L = ["", "## Run validity", "",
+         f"- Completion state: **{state}**",
+         f"- Qualified effectiveness result: **{'yes' if qualified else 'NO — diagnostic only'}**"]
+    delivery = c.get("delivery")
+    if delivery:
+        L.append(f"- Delivery accounting: source=`{delivery.get('source', '?')}` "
+                 f"delivered={delivery.get('delivered', '?')} dead_lettered={delivery.get('dead_lettered', '?')}")
+    lifecycle = c.get("lifecycle")
+    if lifecycle:
+        L.append(f"- Finding lifecycle: delivered_now={lifecycle.get('delivered_now', '?')} "
+                 f"finalized={lifecycle.get('finalized', '?')} pending={lifecycle.get('pending', '?')}")
+    unresolved = c.get("unresolved") or []
+    if unresolved:
+        L += ["", "### Unresolved work (blocks qualification)", ""]
+        L += [f"- {u}" for u in unresolved]
+    return L
+
+
 def render_markdown(results: dict) -> str:
     meta = results.get("meta", {})
     arms = results.get("arms", {})
+    qualified = _qualified(results)
     L = [f"# Benchmark: {meta.get('scenario', '(scenario)')}", ""]
     L.append(f"- Dataset: {meta.get('dataset', '?')}")
     L.append(f"- Suricata: {meta.get('suricata_version', '?')} · ET Open: {meta.get('etopen', '?')}")
@@ -22,7 +59,13 @@ def render_markdown(results: dict) -> str:
     L.append(f"- Granularity: {meta.get('granularity', 'per-host')} · determinism hash: "
              f"`{meta.get('determinism_hash', '?')}`")
 
-    L += ["", "## Detection accuracy", "",
+    L += _validity_lines(results)                      # R09: validity BEFORE metrics
+
+    acc_title = "Detection accuracy" if qualified else "Detection accuracy (DIAGNOSTIC — run not reconciled)"
+    if not qualified:
+        L += ["", f"> ⚠️ This run is **not a qualified effectiveness result** (see Run validity). The "
+              "tables below are diagnostics for investigation, not a comparative verdict."]
+    L += ["", f"## {acc_title}", "",
           "| Arm | Precision | Recall | F1 | TP | FP | FN |",
           "|---|---|---|---|---|---|---|"]
     for a in ARMS:
@@ -32,7 +75,7 @@ def render_markdown(results: dict) -> str:
         L.append(f"| {ARM_LABEL[a]} | {sc.get('precision', '-')} | {sc.get('recall', '-')} | "
                  f"{sc.get('f1', '-')} | {sc.get('tp', '-')} | {sc.get('fp', '-')} | {sc.get('fn', '-')} |")
 
-    L += ["", "## Analyst experience (volume & noise)", "",
+    L += ["", "## Volume & noise (analyst-workload diagnostics)", "",
           "| Arm | Raw events | Alerts/Findings | Delivered | Alerts per true positive | Suppression |",
           "|---|---|---|---|---|---|"]
     for a in ARMS:

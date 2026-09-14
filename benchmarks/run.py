@@ -72,11 +72,22 @@ def _http_fetch(endpoint, index, body):
         return json.loads(r.read()).get("hits", {}).get("hits", [])
 
 
-def os_search(endpoint, index, page=10000, fetch=None, strict=True) -> list:
+def _index_absent(e) -> bool:
+    """True when the error is a genuine 'index does not exist' (HTTP 404 / index_not_found), as opposed
+    to a query/engine error (5xx, timeout, malformed). Only an absent index is a PROVEN-empty arm; an
+    engine error must never be read as '0 detections' (R07/§25.4)."""
+    code = getattr(e, "code", None)
+    if code == 404:
+        return True
+    return "index_not_found" in str(e) or "no such index" in str(e).lower()
+
+
+def os_search(endpoint, index, page=10000, fetch=None, strict=True, allow_absent=False) -> list:
     """ALL documents from an index, paginating past the 10k max_result_window via
     search_after (F10: the old `size=10000` SILENTLY TRUNCATED at 10k, so any arm with more
     than 10k docs scored wrong). On a query/engine error, RAISE in strict mode — the
-    benchmark must fail loudly, never report a silent empty arm as '0 detections'."""
+    benchmark must fail loudly, never report a silent empty arm as '0 detections'. `allow_absent`
+    tolerates ONLY a genuinely absent index (proven empty), never a failed query (R07)."""
     fetch = fetch or _http_fetch
     out, after = [], None
     while True:
@@ -86,6 +97,9 @@ def os_search(endpoint, index, page=10000, fetch=None, strict=True) -> list:
         try:
             hits = fetch(endpoint, index, body)
         except Exception as e:                       # noqa: BLE001
+            if allow_absent and _index_absent(e):
+                print(f"  ! index {index} absent — proven-empty arm", file=sys.stderr)
+                return out
             if strict:
                 raise RuntimeError(f"OpenSearch query '{index}' failed: {e}") from e
             print(f"  ! OpenSearch query {index} failed (non-strict): {e}", file=sys.stderr)
@@ -954,6 +968,15 @@ ARM_EXPORTS = (("arm-a-suricata", "suricata-alerts.jsonl"),
                ("arm-b-findings-*", "cernity-findings.jsonl"),
                ("arm-c-zeek", "zeek-notices.jsonl"))
 
+# R07: the artifacts a valid recompute cannot proceed without — the frozen answer key and the baseline
+# arm. Their absence from the manifest inventory fails verification (an omitted labels entry can't
+# silently rescore against a changed answer key).
+REQUIRED_EXPORT_ARTIFACTS = ("labels.json", "suricata-alerts.jsonl")
+# Every file score_from_export reads: each must be manifest-enumerated + hash-verified if present in the
+# bundle, so no unverified file can influence the score (labels/replay/the three arm exports).
+_SCORER_READ_FILES = ("labels.json", "replay.json", "suricata-alerts.jsonl",
+                      "cernity-findings.jsonl", "zeek-notices.jsonl")
+
 
 def export_arms(endpoint, out_dir, project=None, labels_path=None):
     """Complete, reproducible export of every arm's docs + the shared source EVE to the
@@ -966,10 +989,12 @@ def export_arms(endpoint, out_dir, project=None, labels_path=None):
     _refresh(endpoint)
     counts, docs_by, files = {}, {}, {}
     for index, fname in ARM_EXPORTS:
-        # The baseline arm is exported STRICT: a query/engine error must FAIL the export, never write
-        # an apparently-valid empty dataset (§25.4). Optional arms tolerate a missing index (empty).
-        strict = index == "arm-a-suricata"
-        docs = os_search(endpoint, index, strict=strict)
+        # EVERY enabled arm is exported STRICT: a query/engine error FAILS the export, never writes an
+        # apparently-valid empty dataset — a B-arm query error must not read as 'Cernity found nothing'
+        # (R07/§25.4). Optional arms additionally tolerate a genuinely ABSENT index (a proven-empty arm),
+        # which is distinct from a failed query.
+        allow_absent = index != "arm-a-suricata"
+        docs = os_search(endpoint, index, strict=True, allow_absent=allow_absent)
         path = os.path.join(outdir, fname)
         with open(path, "w") as f:
             for d in docs:
@@ -1113,12 +1138,33 @@ def verify_export_manifest(out_dir):
     return manifest
 
 
+def require_scorer_inventory(out_dir, manifest):
+    """R07: before scoring FROM a bundle, enforce that the manifest ENUMERATES every artifact the scorer
+    reads — a mandatory inventory, not just whatever files it happens to list. A missing required entry
+    (e.g. labels.json dropped to hide a changed answer key) fails; any scorer-read file present in the
+    bundle but absent from the manifest is unverified influence and also fails. Existence of a
+    bundle-local file is not proof it was hashed. Raises SystemExit on a gap."""
+    od = os.path.join(out_dir, "output")
+    files = manifest.get("files", {})
+    missing = []
+    for req in REQUIRED_EXPORT_ARTIFACTS:
+        if req not in files:
+            missing.append(f"{req}: required artifact missing from manifest inventory")
+    for fn in _SCORER_READ_FILES:
+        if fn not in files and os.path.isfile(os.path.join(od, fn)):
+            missing.append(f"{fn}: present in bundle but not enumerated/hashed in the manifest")
+    if missing:
+        raise SystemExit("benchmark abort: bundle inventory incomplete for scoring (R07): "
+                         + "; ".join(missing))
+
+
 def score_from_export(out_dir, scenario):
     """Recompute the report from ONLY the verified bundle (R4/§21.4 + §stage4): the manifest is
     verified first, then truth is read from the HASHED bundle copy (out/<scenario>/output/labels.json),
     NOT the repo datasets dir — a recompute needs only the bundle and cannot be rescored against a
     changed answer key. Fails if the bundle carries no frozen truth."""
-    verify_export_manifest(out_dir)                    # refuse to score mutated/truncated evidence
+    manifest = verify_export_manifest(out_dir)         # refuse to score mutated/truncated evidence
+    require_scorer_inventory(out_dir, manifest)        # R07: every scorer-read artifact must be enumerated + hashed
     od = os.path.join(out_dir, "output")
     labels_path = os.path.join(od, "labels.json")
     if not os.path.isfile(labels_path):

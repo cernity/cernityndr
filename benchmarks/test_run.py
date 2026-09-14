@@ -408,6 +408,32 @@ def test_verify_export_manifest_detects_altered_file_list_via_bundle_digest():
             assert "bundle_digest" in str(e)
 
 
+def test_verify_export_manifest_rejects_path_traversal_in_file_names():
+    # §stage4: a manifest entry must be a plain basename inside the bundle, never an escaping path.
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "output")
+        os.makedirs(od)
+        files = {"../../etc/passwd": {"sha256": "x", "doc_count": 0}}
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:
+            json.dump({"consistency_basis": "t", "files": files, "bundle_digest": run._bundle_digest(files)}, f)
+        try:
+            run.verify_export_manifest(d)
+            assert False, "traversal path in manifest must be rejected"
+        except SystemExit as e:
+            assert "traversal" in str(e)
+
+
+def test_release_record_pins_run_bundle_and_report():
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "report.json"), "w") as f:
+            json.dump({"metric": 1}, f)
+        rec = run._release_record(d, "run-xyz", "deadbeef")
+        assert rec["run_id"] == "run-xyz" and rec["bundle_digest"] == "deadbeef"
+        assert rec["report_sha256"] and json.load(open(os.path.join(d, "release.json")))["run_id"] == "run-xyz"
+
+
 def test_verify_export_manifest_requires_a_manifest():
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, "output"))

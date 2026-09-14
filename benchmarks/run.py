@@ -837,7 +837,24 @@ def run_full(scenario: str, out_dir: str) -> str:
         results["bundle_digest"] = _load(_mf).get("bundle_digest")
     # The frozen run-spec is NOT mutated post-run (§28 Major-2): the measured replay mapping is a
     # runtime OBSERVATION, recorded in the result (report.json) + output/replay.json, linked by run_id.
-    return _write(results, out_dir)
+    md = _write(results, out_dir)
+    _release_record(out_dir, run_id, results.get("bundle_digest"))   # §stage4: immutable release record
+    return md
+
+
+def _release_record(out_dir, run_id, bundle_digest):
+    """The immutable release record (§stage4): pins the run to its evidence — run_id, the export
+    bundle_digest, and the sha256 of the scored report — in one small file that lands in version
+    control. Comparing these to a later re-export/re-score proves the published numbers came from
+    exactly this bundle (completion evidence lives in report.json, hashed here)."""
+    import datetime as _dt
+    report = os.path.join(out_dir, "report.json")
+    rec = {"run_id": run_id, "bundle_digest": bundle_digest,
+           "report_sha256": _sha256(report) if os.path.isfile(report) else None,
+           "created": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    with open(os.path.join(out_dir, "release.json"), "w") as f:
+        json.dump(rec, f, indent=2, sort_keys=True)
+    return rec
 
 
 def _count_alerts(docs):
@@ -1022,6 +1039,9 @@ def verify_export_manifest(out_dir):
     files = manifest.get("files", {})
     drift = []
     for fname, rec in files.items():
+        if fname != os.path.basename(fname) or fname in ("", ".", ".."):
+            drift.append(f"{fname}: unsafe manifest path (traversal)")   # §stage4: resolve inside the bundle only
+            continue
         fpath = os.path.join(od, fname)
         if not os.path.isfile(fpath):
             drift.append(f"{fname}: missing")

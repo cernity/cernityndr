@@ -463,14 +463,16 @@ def read_eval_acks(project, topic="ndr.eval.ack.v1", limit=5000, timeout=12):
 
 
 def eval_horizon_ok(acks, expected_detectors, deadline_wall, default_horizon=0.0):
-    """PURE (§stage3): every expected detector must have an ack whose evaluate() ran at/after the
-    deadline (last input time + the detector's horizon) — proving a post-drain, horizon-covering
-    evaluation pass, not just consumed offsets. Returns (ok, unresolved[]). An empty expected set
-    means the gate is not armed yet (not all detectors emit acks) -> ok=True with a note, so this is
-    evidence-only until the full rollout."""
+    """PURE (§stage3, R04): every expected detector must have evaluated PAST the deadline (last input
+    time + horizon) on EVERY partition it acked — resolved per (svc, partition), not one max per service
+    (a single partition's late ack no longer satisfies the whole service gate). Returns (ok,
+    unresolved[]). An empty expected set means the gate is not armed yet -> ok=True with a note.
+    ponytail: this requires coverage for every OBSERVED partition; freezing the full expected
+    topic/partition/end-offset inventory (so a partition that never acked at all is caught) is the next
+    step — noted as a coverage limitation, not silently assumed complete."""
     if not expected_detectors:
         return True, ["eval-ack gate not armed (no expected detectors declared)"]
-    latest = {}                                       # svc -> max evaluated_wall seen (over its acks)
+    per = {}                                          # svc -> {partition -> max evaluated_wall}
     horizon = {}
     for a in acks or []:
         if not isinstance(a, dict):
@@ -479,15 +481,20 @@ def eval_horizon_ok(acks, expected_detectors, deadline_wall, default_horizon=0.0
         ew = a.get("evaluated_wall")
         if svc is None or not isinstance(ew, (int, float)):
             continue
-        latest[svc] = max(ew, latest.get(svc, float("-inf")))
+        parts = per.setdefault(svc, {})
+        part = a.get("partition")
+        parts[part] = max(ew, parts.get(part, float("-inf")))
         horizon[svc] = max(a.get("horizon_secs") or default_horizon, horizon.get(svc, 0.0))
     unresolved = []
     for svc in expected_detectors:
-        if svc not in latest:
+        parts = per.get(svc)
+        if not parts:
             unresolved.append(f"{svc}: no evaluation ack")
-        elif latest[svc] < deadline_wall + horizon.get(svc, default_horizon):
-            unresolved.append(f"{svc}: last evaluate {latest[svc]} < deadline+horizon "
-                              f"{deadline_wall + horizon.get(svc, default_horizon)}")
+            continue
+        need = deadline_wall + horizon.get(svc, default_horizon)
+        lagging = {p: w for p, w in parts.items() if w < need}
+        if lagging:
+            unresolved.append(f"{svc}: partition(s) evaluated before deadline+horizon {need}: {lagging}")
     return (not unresolved), unresolved
 
 
@@ -515,6 +522,16 @@ def lifecycle_disposition(acks):
             "pending": sum(a.get("pending", 0) for a in latest.values()),
             "finalized": sum(a.get("finalized", 0) for a in latest.values()),
             "workers": len(latest)}
+
+
+def lifecycle_ok_gate(lifecycle, produced_count):
+    """R05: turn the lifecycle disposition into a reconciliation gate. Missing acks are UNKNOWN, not
+    zero-pending: if findings WERE produced (produced_count>0) but no lifecycle acks exist, disposition
+    is unconfirmed -> False (block reconciliation). With acks, require zero pending. With no acks AND no
+    produced findings, there is nothing to finalize -> None (evidence-only, non-blocking)."""
+    if lifecycle is None:
+        return False if produced_count > 0 else None
+    return lifecycle.get("pending", 0) == 0
 
 
 def _summarize_eval_acks(acks):
@@ -600,6 +617,30 @@ def _receipt_accounted(aggregate):
     return all(s.get("delivered", 0) + s.get("dead_lettered", 0) == live for s in aggregate["sinks"])
 
 
+def _ledger_accounted(ledger, aggregate):
+    """R01: a durable ledger reconciles a run ONLY when it actually ACCOUNTS for deliveries — not merely
+    because the file was readable. A readable-but-EMPTY ledger must not reconcile a run that produced
+    findings. Returns (ok, reason).
+      - A ledger that recorded >=1 terminal obligation (delivered or dead-lettered) is authoritative:
+        these are synchronously-written, non-racing records (the §stage3 run8 fix — the ledger wins over
+        a stale bus receipt precisely because it cannot race its own deliveries).
+      - An EMPTY ledger reconciles only with INDEPENDENT proof of a zero-delivery run: the forwarder's
+        validated receipt reporting delivered_live == 0. Absent that proof, an empty ledger is
+        unresolved (it could equally mean deliveries happened but were never recorded).
+    ponytail: this catches the reproduced blocker (empty ledger reconciling) and the empty-ledger /
+    nonzero-expected case; full run/tenant/offset-scoped obligation reconciliation is a larger change —
+    the bounded benchmark starts each run on a fresh cernity-out volume (`compose down -v`), so the
+    ledger reflects this run. Add scoping for a long-lived shared forwarder."""
+    if ledger is None:
+        return False, "no ledger"
+    accounted = ledger.get("delivered", 0) + ledger.get("dead_lettered", 0)
+    if accounted > 0:
+        return True, ""
+    if aggregate is not None and _is_count(aggregate.get("delivered_live")) and aggregate["delivered_live"] == 0:
+        return True, ""                              # independently-proven zero-delivery run
+    return False, "empty durable ledger with no independent proof of a zero-delivery run (R01)"
+
+
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
                         expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None,
                         ledger=None, eval_ok=None, lifecycle_ok=None):
@@ -644,10 +685,12 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
-    # Delivery is accounted authoritatively by the durable ledger when it could be read (present even
-    # if empty = a benign no-delivery run); the bus receipt is the fallback. Either one accounts for
-    # downstream delivery -> reconciled (§stage3 fix: the ledger cannot race its own deliveries).
-    delivery_accounted = ledger is not None or _receipt_accounted(sink_receipt)
+    # Delivery is accounted authoritatively by the durable ledger — but only when the ledger actually
+    # ACCOUNTS for the expected deliveries (R01: a readable-but-empty ledger no longer reconciles a run
+    # that delivered findings). The independent expected inventory is the forwarder's validated receipt;
+    # the receipt is also the fallback account when the ledger is unreadable.
+    ledger_ok, ledger_reason = _ledger_accounted(ledger, sink_receipt)
+    delivery_accounted = ledger_ok or _receipt_accounted(sink_receipt)
     # §stage3 gate: the timer-driven detectors must have evaluated PAST the drained input (eval acks),
     # not merely progressed offsets. eval_ok=None = gate not armed (evidence-only); False = detectors
     # did not evaluate through the horizon -> not reconciled (the run is inputs_drained, still
@@ -660,10 +703,13 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
         state = "reconciled"
     else:
         state = "inputs_drained"                   # consumed + baseline, but delivery/eval/lifecycle unconfirmed
+        if not delivery_accounted:
+            unresolved.append(f"downstream delivery not accounted (R01): {ledger_reason or 'no accountable receipt'}")
         if eval_ok is False:
             unresolved.append("detectors have not acked evaluation through the input horizon (§stage3)")
         if lifecycle_ok is False:
-            unresolved.append("finding lifecycle has capture-bound findings still pending disposition (§stage3)")
+            unresolved.append("finding lifecycle unresolved: pending disposition or unacked lifecycle "
+                              "coverage for produced findings (§stage3/R05)")
     delivery = None
     if ledger is not None:                          # authoritative
         delivery = {"source": "obligation-ledger", "sinks": ledger.get("sinks"),
@@ -792,8 +838,12 @@ def run_full(scenario: str, out_dir: str) -> str:
     if not eval_ok:
         print(f"  ! detector evaluation not confirmed through horizon: {eval_unresolved}", file=sys.stderr)
     _lifecycle = lifecycle_disposition(read_lifecycle_acks(PROJECT))   # §stage3: pending capture disposition
-    lifecycle_ok = None if _lifecycle is None else (_lifecycle.get("pending", 0) == 0)
-    if lifecycle_ok is False:
+    _arm_b_count = sum(v for k, v in arm_counts.items() if str(k).startswith("arm-b"))
+    lifecycle_ok = lifecycle_ok_gate(_lifecycle, _arm_b_count)         # R05: missing acks = unknown, not zero-pending
+    if lifecycle_ok is False and _lifecycle is None:
+        print(f"  ! {_arm_b_count} finding(s) produced but NO finding-lifecycle acks — disposition "
+              "unconfirmed (R05)", file=sys.stderr)
+    elif lifecycle_ok is False:
         print(f"  ! finding lifecycle has {_lifecycle['pending']} pending capture disposition(s)", file=sys.stderr)
     completion = classify_completion(producer_exits, group_lag, arm_counts,
                                      sink_receipt=sink_disposition, ledger=ledger,

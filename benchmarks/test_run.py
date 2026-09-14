@@ -111,7 +111,26 @@ _G = ("g1", "g2")
 def test_classify_completion_reconciled():
     c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
                                 {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G)
-    assert c["state"] == "inputs_drained" and c["unresolved"] == []   # §25.2: not "reconciled" (no downstream acks yet)
+    # §25.2: clean inputs but no downstream accounting -> inputs_drained; R01: the reason is now named
+    # (delivery not accounted), never a silent [] that could be mistaken for a reconciled run.
+    assert c["state"] == "inputs_drained"
+    assert any("delivery not accounted" in u for u in c["unresolved"])
+
+
+def test_empty_ledger_does_not_reconcile_without_zero_proof():
+    # R01 (reproduced blocker): a readable-but-EMPTY ledger must NOT reconcile a run.
+    empty = run.ledger_disposition([])
+    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                ledger=empty)
+    assert c["state"] == "inputs_drained"                     # not "reconciled"
+    assert any("empty durable ledger" in u for u in c["unresolved"])
+    # ... unless a zero-delivery run is independently proven by the receipt (delivered_live == 0):
+    zero_receipt = {"consumed": 0, "suppressed": 0, "delivered_live": 0, "sinks": [{"name": "es", "delivered": 0, "dead_lettered": 0}]}
+    c2 = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                 {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                 ledger=empty, sink_receipt=zero_receipt)
+    assert c2["state"] == "reconciled"
 
 
 def test_classify_completion_invalid_when_a_producer_fails():
@@ -185,6 +204,29 @@ def test_lifecycle_gate_blocks_reconcile_while_capture_pending():
     assert run.classify_completion(**base, lifecycle_ok=None)["state"] == "reconciled"   # not armed
 
 
+def test_eval_horizon_requires_every_partition_past_the_deadline():
+    # R04: one partition acked past the deadline must NOT satisfy the whole service gate — every
+    # OBSERVED partition of an expected detector must have evaluated past deadline+horizon.
+    exp = ("behavioral-detectors",)
+    good = [{"svc": "behavioral-detectors", "partition": 0, "evaluated_wall": 150.0, "horizon_secs": 0},
+            {"svc": "behavioral-detectors", "partition": 1, "evaluated_wall": 150.0, "horizon_secs": 0}]
+    ok, un = run.eval_horizon_ok(good, exp, deadline_wall=100.0)
+    assert ok and un == []
+    lagging = [{"svc": "behavioral-detectors", "partition": 0, "evaluated_wall": 150.0, "horizon_secs": 0},
+               {"svc": "behavioral-detectors", "partition": 1, "evaluated_wall": 80.0, "horizon_secs": 0}]
+    ok2, un2 = run.eval_horizon_ok(lagging, exp, deadline_wall=100.0)
+    assert not ok2 and any("partition" in u for u in un2)          # partition 1 lags -> not ok
+
+
+def test_lifecycle_ok_gate_treats_missing_acks_as_unknown():
+    # R05: no acks + findings produced -> False (block); no acks + no findings -> None (evidence-only);
+    # acks present -> pending gate.
+    assert run.lifecycle_ok_gate(None, produced_count=5) is False    # findings but disposition unconfirmed
+    assert run.lifecycle_ok_gate(None, produced_count=0) is None     # nothing to finalize
+    assert run.lifecycle_ok_gate({"pending": 0}, produced_count=5) is True
+    assert run.lifecycle_ok_gate({"pending": 2}, produced_count=5) is False
+
+
 def test_eval_gate_blocks_reconcile_until_detectors_ack():
     # §stage3 armed gate: delivery accounted but detectors not yet evaluated-through-horizon ->
     # inputs_drained (still scoreable, reason recorded), NOT reconciled.
@@ -198,11 +240,17 @@ def test_eval_gate_blocks_reconcile_until_detectors_ack():
     assert run.classify_completion(**base, eval_ok=None)["state"] == "reconciled"   # gate not armed -> unchanged
 
 
-def test_readable_empty_ledger_reconciles_a_benign_run():
+def test_empty_ledger_reconciles_only_with_independent_zero_proof():
+    # R01: a readable-but-empty ledger is NOT self-justifying (readability != completeness). It
+    # reconciles a benign no-delivery run ONLY when the forwarder receipt independently proves zero live
+    # deliveries; on its own it stays inputs_drained.
     ledger = run.ledger_disposition([])              # no deliveries, but the ledger was readable
-    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
-                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
-                                ledger=ledger)
+    base = dict(producer_exits={"suricata-offline": 0, "arm-b-feeder": 0}, group_lag={"g1": 0, "g2": 0},
+                arm_counts={"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G, ledger=ledger)
+    assert run.classify_completion(**base)["state"] == "inputs_drained"
+    zero_receipt = {"consumed": 0, "suppressed": 0, "delivered_live": 0,
+                    "sinks": [{"name": "es", "delivered": 0, "dead_lettered": 0}]}
+    c = run.classify_completion(**base, sink_receipt=zero_receipt)
     assert c["state"] == "reconciled" and c["delivery"]["delivered"] == 0
 
 

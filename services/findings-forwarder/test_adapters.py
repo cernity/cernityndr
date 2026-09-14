@@ -42,6 +42,41 @@ def test_es_failed_items_maps_per_item_bulk_outcomes():
     assert len(ElasticsearchAdapter._failed_items(fs, short)) == 3             # unmapped -> all failed
 
 
+def test_es_failed_items_rejects_malformed_response_structure():
+    # R10: never trust the summary `errors` flag alone — a malformed/empty response cannot ack any item.
+    fs = [{"finding_id": "a"}, {"finding_id": "b"}]
+    assert len(ElasticsearchAdapter._failed_items(fs, {})) == 2                 # empty object acks nothing
+    assert len(ElasticsearchAdapter._failed_items(fs, {"errors": False})) == 2  # flag-only, no items
+    assert len(ElasticsearchAdapter._failed_items(fs, "not-json")) == 2         # non-dict
+    long = {"errors": False, "items": [{"index": {"status": 201}}] * 3}         # more items than sent
+    assert len(ElasticsearchAdapter._failed_items(fs, long)) == 2               # length mismatch -> all failed
+    nostatus = {"errors": False, "items": [{"index": {}}, {"index": {"status": 201}}]}
+    assert [f["finding_id"] for f in ElasticsearchAdapter._failed_items(fs, nostatus)] == ["a"]  # missing status
+
+
+def test_es_doc_id_is_tenant_and_revision_scoped():
+    # R02: two tenants sharing a finding_id must be DISTINCT documents; R03: each revision is retained.
+    a = ElasticsearchAdapter._doc_id({"finding_id": "f1", "tenant_id": "t1", "revision": 1})
+    b = ElasticsearchAdapter._doc_id({"finding_id": "f1", "tenant_id": "t2", "revision": 1})
+    c = ElasticsearchAdapter._doc_id({"finding_id": "f1", "tenant_id": "t1", "revision": 2})
+    assert a != b and a != c and len({a, b, c}) == 3
+    assert ElasticsearchAdapter._doc_id({"finding_id": "f1"}) == "default:f1"    # no tenant/rev fallback
+
+
+def test_ledger_scopes_obligations_by_tenant():
+    # R02: the same finding_id+revision in two tenants are TWO obligations, delivered independently.
+    d = tempfile.mkdtemp()
+    led = adapters.DurableLedger(os.path.join(d, "obl.jsonl"))
+    f_t1 = {"finding_id": "f1", "revision": 1, "tenant_id": "t1"}
+    f_t2 = {"finding_id": "f1", "revision": 1, "tenant_id": "t2"}
+    led.record([f_t1], "es", "delivered", "w1")
+    assert led.terminal(f_t1, "es") == "delivered"
+    assert led.terminal(f_t2, "es") is None                                     # other tenant NOT collapsed
+    # reload from disk: tenant scoping survives a restart
+    led2 = adapters.DurableLedger(os.path.join(d, "obl.jsonl"))
+    assert led2.terminal(f_t1, "es") == "delivered" and led2.terminal(f_t2, "es") is None
+
+
 def test_splunk_hec_body():
     os.environ.update(SPLUNK_HEC_URL="https://splunk:8088/services/collector", SPLUNK_HEC_TOKEN="t")
     body = SplunkAdapter()._body([F]).decode()

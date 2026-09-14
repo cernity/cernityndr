@@ -85,6 +85,17 @@ def test_ok_enrichment_attaches_evidence():
     assert "minio://ndr-pcap/x" in done["evidence_refs"]
 
 
+def test_lifecycle_issues_monotonic_revisions():
+    # R03: the initial final is revision 1; an enriched update or a timeout finalization is a NEW
+    # revision, so the two are distinct obligations/documents the scorer can order (latest wins).
+    f, _ = sm.build_finding(dict(SCAN, severity=7))
+    assert f["revision"] == 1
+    enriched = sm.apply_enrichment_result(f, {"status": "ok", "evidence_refs": []})
+    assert enriched["revision"] == 2 and f["revision"] == 1     # bump does not mutate the original
+    timed_out = sm.finalize_timeout(f)
+    assert timed_out["revision"] == 2
+
+
 def test_finding_id_deterministic_for_dedup():
     # Same window/scanner -> same id -> ClickHouse ReplacingMergeTree dedups.
     a, _ = sm.build_finding(SCAN)

@@ -31,10 +31,12 @@ def _live(findings):
     return [f for f in findings if f.get("state") != "SUPPRESSED"]
 
 
-def _obl_key(finding_id, revision, dest):
-    """Stable obligation identity: one finding REVISION at one destination (§stage2). A replay of the
-    same revision is the same obligation; a new revision is a new one."""
-    return json.dumps([finding_id, revision, dest], sort_keys=True)
+def _obl_key(tenant, finding_id, revision, dest):
+    """Stable obligation identity: one TENANT's finding REVISION at one destination (§stage2, R02). A
+    replay of the same revision is the same obligation; a new revision, or the SAME id in a different
+    tenant, is a distinct one. tenant must be included or two tenants sharing a finding_id collapse to a
+    single delivery record."""
+    return json.dumps([tenant or "default", finding_id, revision, dest], sort_keys=True)
 
 
 class DurableLedger:
@@ -60,11 +62,11 @@ class DurableLedger:
                     except ValueError:
                         continue
                     if r.get("outcome"):
-                        self.outcome[_obl_key(r.get("finding_id"), r.get("revision"), r.get("dest"))] = r["outcome"]
+                        self.outcome[_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest"))] = r["outcome"]
 
     def terminal(self, finding, dest):
-        """The recorded terminal outcome for this finding-revision at this destination, or None."""
-        return self.outcome.get(_obl_key(finding.get("finding_id"), finding.get("revision"), dest))
+        """The recorded terminal outcome for this tenant's finding-revision at this destination, or None."""
+        return self.outcome.get(_obl_key(finding.get("tenant_id"), finding.get("finding_id"), finding.get("revision"), dest))
 
     def record(self, findings, dest, outcome, worker):
         if not findings:
@@ -72,12 +74,12 @@ class DurableLedger:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "a") as fh:
             for f in findings:
-                k = _obl_key(f.get("finding_id"), f.get("revision"), dest)
+                k = _obl_key(f.get("tenant_id"), f.get("finding_id"), f.get("revision"), dest)
                 if k in self.outcome:                # already terminal: don't double-record
                     continue
-                fh.write(json.dumps({"finding_id": f.get("finding_id"), "revision": f.get("revision"),
-                                     "dest": dest, "outcome": outcome, "worker": worker,
-                                     "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
+                fh.write(json.dumps({"tenant_id": f.get("tenant_id"), "finding_id": f.get("finding_id"),
+                                     "revision": f.get("revision"), "dest": dest, "outcome": outcome,
+                                     "worker": worker, "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
                 self.outcome[k] = outcome
             fh.flush()
             os.fsync(fh.fileno())
@@ -210,6 +212,18 @@ class ElasticsearchAdapter:
         f["@timestamp"] = f.get("last_seen") or f.get("first_seen")
         return f
 
+    @staticmethod
+    def _doc_id(d):
+        """TENANT-scoped document identity so two tenants sharing a finding_id are distinct docs (R02),
+        and REVISION-scoped so an enriched update is retained as immutable evidence rather than
+        overwriting the initial final (R03). A duplicate of the same revision keeps the same id (an
+        idempotent overwrite); the scorer selects the latest revision per (tenant, finding_id)."""
+        tenant = d.get("tenant_id") or "default"
+        fid = d.get("finding_id")
+        rev = d.get("revision")
+        base = f"{tenant}:{fid}"
+        return f"{base}:r{rev}" if rev is not None else base
+
     def emit(self, finding):
         self.emit_batch([finding])
 
@@ -221,7 +235,7 @@ class ElasticsearchAdapter:
         lines = []
         for f in findings:
             d = self._doc(f)
-            lines.append(json.dumps({"index": {"_index": idx, "_id": d.get("finding_id")}}))
+            lines.append(json.dumps({"index": {"_index": idx, "_id": self._doc_id(d)}}))
             lines.append(json.dumps(d))
         body = ("\n".join(lines) + "\n").encode()
         headers = {"Content-Type": "application/x-ndjson"}
@@ -239,22 +253,22 @@ class ElasticsearchAdapter:
 
     @staticmethod
     def _failed_items(findings, res):
-        """Per-item contract: a 2xx bulk response can still reject individual documents. Return the
-        findings whose item errored / did not land 2xx so the caller retries only those and never
-        counts them as delivered. Items are in request order (ES/OS guarantee). A malformed response
-        (errors set but items missing/short) can't be reconciled per-item -> treat all as failed
-        rather than silently accepted."""
-        if not res.get("errors"):
-            return []
-        items = res.get("items", [])
-        if len(items) < len(findings):
-            return list(findings)
+        """Per-item contract (R10): VALIDATE the response structure and require exactly one 2xx-acked
+        item per submitted finding — never trust the summary `errors` flag alone. A malformed or empty
+        response ({}, a non-dict, a missing/short/long `items` array, or an item with no integer status)
+        cannot be reconciled per document, so those findings are returned as failed (retryable/uncertain)
+        rather than silently counted as delivered. Items are in request order (ES/OS guarantee)."""
+        if not isinstance(res, dict):
+            return list(findings)                     # not even a JSON object -> nothing acknowledged
+        items = res.get("items")
+        if not isinstance(items, list) or len(items) != len(findings):
+            return list(findings)                     # structure mismatch: cannot reconcile -> all failed
         failed = []
         for f, item in zip(findings, items):
-            outcome = (item.get("index") or item.get("create") or item.get("update") or {})
-            status = outcome.get("status", 0)
-            if outcome.get("error") or not (200 <= status < 300):
-                failed.append(f)
+            outcome = (item.get("index") or item.get("create") or item.get("update")) if isinstance(item, dict) else None
+            status = outcome.get("status") if isinstance(outcome, dict) else None
+            if not isinstance(status, int) or not (200 <= status < 300) or outcome.get("error"):
+                failed.append(f)                      # missing/malformed status or explicit error -> failed
         return failed
 
 

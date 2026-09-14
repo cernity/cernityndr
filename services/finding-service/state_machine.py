@@ -96,6 +96,10 @@ def build_finding(cand: dict) -> tuple[dict, str]:
     f = dict(cand)
     f.setdefault("sensor_ids", [])
     f.setdefault("evidence_refs", [])
+    # R03: issue a durable monotonic revision at each lifecycle transition, so an initial final and a
+    # later enriched update are DISTINCT obligations/documents (not one collapsed record) and the scorer
+    # can order them. Revision 1 is the first version; enrichment/timeout finalization bumps it.
+    f["revision"] = 1
     # A detector may emit its own precise technique(s) (e.g. T1558.004 for AS-REP
     # roasting); otherwise fall back to the coarse category map.
     f["mitre"] = cand.get("mitre") or CATEGORY_MITRE.get(cand.get("category"), [])
@@ -142,6 +146,7 @@ def apply_enrichment_result(finding: dict, result: dict) -> dict:
         f["enrichment_state"] = "ENRICHMENT_FAILED"
     f["state"] = "FINAL"
     f["devo_delivery_state"] = "QUEUED"
+    f["revision"] = int(finding.get("revision") or 1) + 1     # R03: enriched update is a new revision
     return f
 
 
@@ -156,6 +161,7 @@ def finalize_timeout(finding: dict) -> dict:
     f["state"] = "FINAL"
     f["enrichment_state"] = "TIMEOUT"
     f["devo_delivery_state"] = "QUEUED"
+    f["revision"] = int(finding.get("revision") or 1) + 1     # R03: timeout-finalization is a new revision
     return f
 
 

@@ -8,7 +8,7 @@ import app
 
 _ENVELOPE = {"finding_id", "tenant_id", "detector_id", "detector_version",
              "category", "severity", "confidence", "first_seen", "last_seen",
-             "entities", "state"}
+             "observed", "emitted_at", "entities", "state"}
 _CATEGORIES = {"c2", "exfil", "dns_tunnel", "malware", "anomaly"}
 _DETECTORS = {"beacon", "beacon_fqdn", "strobe", "long_connection",
               "long_connection_cumulative", "exfil", "dns_tunnel", "dns_exploded",

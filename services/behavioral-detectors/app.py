@@ -20,7 +20,7 @@ import os
 import re
 import signal
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ndr_runtime                      # shared tuned consumer/producer + metrics (plan 003 U1)
 
@@ -94,9 +94,11 @@ _TZ_OFFSET = re.compile(r'([+-]\d{2})(\d{2})$')     # +0000 -> +00:00
 
 def _epoch(ts):
     """Parse an RFC3339/EVE timestamp to epoch seconds, or None. Suricata emits a `+0000` offset with
-    NO colon, which datetime.fromisoformat REJECTS on Python < 3.11 (the runtime here is 3.10) — the
-    old `.replace("Z","+00:00")`-only parse then raised and callers fell back to time.time(), silently
-    destroying flow timing (the beacon false-negative on real traffic, §stage5). Normalise the offset."""
+    NO colon, which datetime.fromisoformat REJECTS on Python < 3.11. This service's image is
+    python:3.12-slim (where fromisoformat accepts the compact form), so this normalisation is a
+    defence-in-depth guard covering the offline/host feeder path and any older runtime — NOT the proven
+    root cause of the §stage5 beacon false-negative (the container parses `+0000` natively). Normalise
+    the offset regardless so timing never silently collapses to a time.time() fallback."""
     if not ts:
         return None
     s = _TZ_OFFSET.sub(r'\1:\2', str(ts).replace("Z", "+00:00"))
@@ -146,16 +148,29 @@ def _timing_evidence(ts):
             {"type": "connections", "value": len(ts)}]
 
 
-def _candidate(detector_id, category, severity, confidence, entities, tenant):
+def _rfc3339(ep):
+    """Epoch -> RFC3339 UTC preserving sub-second resolution (R06: keep timestamp resolution)."""
+    return datetime.fromtimestamp(ep, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _candidate(detector_id, category, severity, confidence, entities, tenant, obs=(None, None)):
     bucket = int(time.time() // WINDOW)
     if not _store.dedup_seen(f"emit:{tenant}:{detector_id}:{_stable(entities) % 10**12}:{bucket}", WINDOW):
         return None
     metrics.finding(detector_id, tenant)
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    emitted = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())     # when the aggregate was EMITTED
+    omin, omax = obs
+    observed = omin is not None
+    # first_seen/last_seen carry the OBSERVATION interval (event times) when we have one; `observed=False`
+    # tells the scorer these are emission-derived so temporal attribution is unknown, never a fabricated
+    # in-window match (R06/§33.3). `emitted_at` is the availability signal, kept separate from observation.
+    fs = _rfc3339(omin) if observed else emitted
+    ls = _rfc3339(omax if omax is not None else omin) if observed else emitted
     return {"finding_id": f"{detector_id}-{_stable(entities) % 10**10}-{bucket}",
             "tenant_id": tenant, "detector_id": detector_id, "detector_version": "1.0",
             "category": category, "severity": severity, "confidence": confidence,
-            "first_seen": now, "last_seen": now, "entities": entities, "state": "CANDIDATE"}
+            "first_seen": fs, "last_seen": ls, "observed": observed, "emitted_at": emitted,
+            "entities": entities, "state": "CANDIDATE"}
 
 
 # Enumerate assigned-partition keys via the per-partition index by default;
@@ -297,7 +312,7 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst}]
                              + _timing_evidence(ts))
-            c = _candidate("beacon", "c2", sev, score, ent, ten)
+            c = _candidate("beacon", "c2", sev, score, ent, ten, obs=(ts[0], ts[-1]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("BEACON %s->%s sev=%s score=%s", src, dst, sev, score)
         is_s, sscore = det.strobe_check(len(rng), dst, is_beacon=is_b, min_conns=cfg["strobe_min_conns"])
@@ -305,7 +320,7 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst},
                               {"type": "connections", "value": len(rng)}])
-            c = _candidate("strobe", "c2", det.gated_severity(5, breed, risks, env_assets=env), sscore, ent, ten)
+            c = _candidate("strobe", "c2", det.gated_severity(5, breed, risks, env_assets=env), sscore, ent, ten, obs=(ts[0], ts[-1]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("STROBE %s->%s conns=%d", src, dst, len(rng))
     # FQDN / SNI beacon
@@ -321,7 +336,7 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "domain", "role": "c2", "value": dom},
                               {"type": "rotating_ips", "value": n_ips}])
-            c = _candidate("beacon_fqdn", "c2", det.gated_severity(8, "", []), fscore, ent, ten)
+            c = _candidate("beacon_fqdn", "c2", det.gated_severity(8, "", []), fscore, ent, ten, obs=(rng[0][0], rng[-1][0]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("BEACON_FQDN %s->%s ips=%d score=%s", src, dom, n_ips, fscore)
     # DNS tunnel + exploded DNS
@@ -335,14 +350,14 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
         is_t, tscore = det.dns_tunnel_score(qnames, min_queries=cfg["dns_min_queries"], len_threshold=cfg["dns_len_threshold"], entropy_threshold=cfg["dns_entropy_threshold"])
         if is_t:
             ent = json.dumps([{"type": "ip", "role": "client", "value": client}])
-            c = _candidate("dns_tunnel", "dns_tunnel", 6, tscore, ent, ten)
+            c = _candidate("dns_tunnel", "dns_tunnel", 6, tscore, ent, ten, obs=(rng[0][0], rng[-1][0]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("DNS_TUNNEL %s score=%s", client, tscore)
         is_x, xscore, parent = det.dns_exploded_score(qnames, min_subdomains=cfg["exploded_min_subdomains"])
         if is_x:
             ent = json.dumps([{"type": "ip", "role": "client", "value": client},
                               {"type": "domain", "role": "tunnel_parent", "value": parent}])
-            c = _candidate("dns_exploded", "dns_tunnel", 6, xscore, ent, ten)
+            c = _candidate("dns_exploded", "dns_tunnel", 6, xscore, ent, ten, obs=(rng[0][0], rng[-1][0]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("DNS_EXPLODED %s parent=%s score=%s", client, parent, xscore)
     # exfil: the ex: byte counter accrues per flow (write-only in _handle, plan 007);

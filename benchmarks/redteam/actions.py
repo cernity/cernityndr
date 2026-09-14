@@ -41,9 +41,11 @@ def dns_tunnel(attacker, resolver, base_domain, queries=60):
 
 
 def exfil(attacker, dest, mb=50, port=443):
-    """A single large outbound transfer (exfil / large_transfer). targets=[dest]."""
+    """A single large outbound transfer (exfil / large_transfer). targets=[dest]. A socket timeout
+    bounds the transfer so a slow/echoing/absent peer can never deadlock the sender (§stage5 live
+    safety); the bytes that DO go out are what the sensor sees."""
     one = (f"import socket\n"
-           f"s=socket.socket()\n"
+           f"s=socket.socket(); s.settimeout(15)\n"
            f"try:\n    s.connect(('{dest}',{port}))\n    b=b'x'*65536\n"
            f"    for _ in range({mb}*16): s.sendall(b)\n"
            f"except OSError: pass\n"

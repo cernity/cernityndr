@@ -22,13 +22,15 @@ import actions                       # noqa: E402
 
 
 def default_spec(attacker, c2, resolver, targets, dataset):
-    """A first qualification batch spanning the behaviour classes the scorer knows: recon (scan),
-    c2 (beacon), exfil (DNS tunnel). Extend with lateral()/exfil() once the range has AD/large-transfer
-    targets. Each action's attacker/targets ARE the independent truth."""
+    """A first qualification batch spanning the behaviour classes the scorer knows and that capture
+    reliably on a bridged range: recon (scan), c2 (beacon), exfil (large transfer to c2). DNS-tunnel
+    is available in the library but omitted here — a container's DNS goes to the embedded resolver
+    (127.0.0.11), off the captured interface, so it would be a false miss on a docker range. Add
+    dns_tunnel/lateral once the range has an on-wire resolver / AD targets. attacker+targets ARE truth."""
     return {"dataset": dataset, "actions": [
         actions.scan(attacker, targets),
         actions.beacon(attacker, c2),
-        actions.dns_tunnel(attacker, resolver, "tunnel.example"),
+        actions.exfil(attacker, c2),
     ]}
 
 

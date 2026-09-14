@@ -42,9 +42,19 @@ def _security_kwargs(env=os.environ):
     return kw
 
 
+import re as _re
+_TZ_OFFSET = _re.compile(r'([+-]\d{2})(\d{2})$')    # +0000 -> +00:00
+
+
 def _parse(ts):
+    # Suricata emits a `+0000` offset with NO colon, which fromisoformat REJECTS on Python < 3.11.
+    # Left unparsed, paced replay could not order/reanchor by flow.start and beacon timing collapsed
+    # (§stage5). Normalise the offset before parsing.
+    if ts is None:
+        return None
+    s = _TZ_OFFSET.sub(r'\1:\2', str(ts).replace("Z", "+00:00"))
     try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
 

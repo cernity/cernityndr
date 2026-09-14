@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import time
 from datetime import datetime
@@ -88,6 +89,23 @@ def _ndpi_risks(n):
     return [rk] if rk else []
 
 
+_TZ_OFFSET = re.compile(r'([+-]\d{2})(\d{2})$')     # +0000 -> +00:00
+
+
+def _epoch(ts):
+    """Parse an RFC3339/EVE timestamp to epoch seconds, or None. Suricata emits a `+0000` offset with
+    NO colon, which datetime.fromisoformat REJECTS on Python < 3.11 (the runtime here is 3.10) — the
+    old `.replace("Z","+00:00")`-only parse then raised and callers fell back to time.time(), silently
+    destroying flow timing (the beacon false-negative on real traffic, §stage5). Normalise the offset."""
+    if not ts:
+        return None
+    s = _TZ_OFFSET.sub(r'\1:\2', str(ts).replace("Z", "+00:00"))
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def _event_epoch(e) -> float:
     # For a flow record prefer flow.start (when the connection happened) over the EVE
     # 'timestamp' (when Suricata emitted/flushed the record). Offline Suricata flushes every
@@ -95,12 +113,8 @@ def _event_epoch(e) -> float:
     # real inter-arrival timing survives only in flow.start. dns/other events have no
     # flow.start and fall back to timestamp.
     ts = (e.get("flow") or {}).get("start") or e.get("timestamp")
-    if ts:
-        try:
-            return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-        except (ValueError, TypeError):
-            pass
-    return time.time()
+    ep = _epoch(ts)
+    return ep if ep is not None else time.time()
 
 
 def _key_parts(key: str):

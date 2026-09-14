@@ -147,9 +147,14 @@ def _revision_rank(det):
 
 
 def _eligible_time(det):
-    """The time by which this revision's evidence was available, for deadline gating. Uses last_seen
-    recency (interval end) as the documented proxy — true delivery time is not reliably exposed by
-    the product yet (§25.2), so a deadline claim on it is an approximation, not a delivery receipt."""
+    """The time by which this revision's evidence was AVAILABLE, for deadline gating (R06/§33.3). Prefer
+    `available` (the finding's emitted_at — a real availability/emission signal, distinct from observation
+    time); fall back to last_seen recency (interval end) as the documented proxy only when the product
+    exposes no emission time. Availability is deliberately NOT the observation interval used for episode
+    attribution: an aggregate can observe early activity yet only become available later."""
+    a = det.get("available")
+    if a is not None:
+        return a
     iv = det.get("interval") or {}
     return iv.get("end")
 

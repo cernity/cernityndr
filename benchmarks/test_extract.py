@@ -119,6 +119,22 @@ def test_detections_carry_intervals_from_real_time_fields():
     assert x.detections_from_notices([{"src_ip": "10.0.0.5", "ts": "not-a-time"}])[0]["interval"] is None
 
 
+def test_observed_flag_splits_observation_from_availability():
+    # R06/§33.3: observed=False means first_seen/last_seen are EMISSION-derived -> interval must be None
+    # (temporal attribution unknown), while emitted_at surfaces as `available` for deadline utility.
+    obs = x.detections_from_findings([{"finding_id": "f1", "category": "lateral", "tenant_id": "t",
+                                       "first_seen": "2026-01-01T00:00:00Z", "last_seen": "2026-01-01T00:05:00Z",
+                                       "observed": True, "emitted_at": "2026-01-01T01:00:00Z",
+                                       "entities": json.dumps([])}])[0]
+    assert obs["interval"]["end"] - obs["interval"]["start"] == 300.0   # observation interval used
+    assert obs["available"] == x._epoch("2026-01-01T01:00:00Z")         # emitted_at -> availability
+    unk = x.detections_from_findings([{"finding_id": "f2", "category": "lateral", "tenant_id": "t",
+                                       "first_seen": "2026-01-01T02:00:00Z", "last_seen": "2026-01-01T02:00:00Z",
+                                       "observed": False, "emitted_at": "2026-01-01T02:00:00Z",
+                                       "entities": json.dumps([])}])[0]
+    assert unk["interval"] is None                                      # emission time is NOT observation
+
+
 def test_extract_to_score_disjoint_windows_do_not_cross_credit():
     # §25.3 acceptance: real-shaped exported findings in two disjoint windows must credit only their
     # own episode through the ACTUAL extractor -> scorer (not hand-built scorer dicts).

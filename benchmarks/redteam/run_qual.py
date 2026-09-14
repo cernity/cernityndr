@@ -35,18 +35,34 @@ def default_spec(attacker, c2, resolver, targets, dataset):
 
 
 def _tcpdump_capture(iface):
-    """Wrap the campaign in a full-packet capture on the sensor interface (live mode)."""
+    """Wrap the campaign in a full-packet capture on the sensor interface (live mode). The handle
+    verifies tcpdump actually STARTED and reports the packet count on stop (R08: capture readiness +
+    coverage), so an unverified capture is recorded rather than mistaken for a clean run."""
+    import re
+    import time
+
     def cap(path):
         p = subprocess.Popen(["tcpdump", "-i", iface, "-w", path, "-U", "-s", "0"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        time.sleep(0.5)                                   # give it a moment to bind or die
+        started = p.poll() is None                        # still alive => it opened the interface
 
         class _H:
             def stop(self):
+                if p.poll() is not None:                  # already exited (failed to start / died)
+                    err = (p.stderr.read() if p.stderr else "") or ""
+                    return {"ok": False, "started": False, "packets": None,
+                            "path": path, "error": err.strip()[:200]}
                 p.terminate()
                 try:
-                    p.wait(timeout=10)
+                    _o, err = p.communicate(timeout=10)
                 except subprocess.TimeoutExpired:
-                    p.kill()
+                    p.kill(); _o, err = p.communicate()
+                m = re.search(r"(\d+) packets captured", err or "")
+                packets = int(m.group(1)) if m else None
+                ok = started and (packets is None or packets > 0)
+                return {"ok": ok, "started": started, "packets": packets,
+                        "path": path, "size": os.path.getsize(path) if os.path.exists(path) else 0}
         return _H()
     return cap
 

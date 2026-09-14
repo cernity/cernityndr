@@ -120,6 +120,36 @@ def test_smb_filename_pipe_svcctl_fires_lateral_exec():
     assert "lateral_exec" in _dets(p.sent)
 
 
+def test_finding_carries_observed_interval_not_emission_time():
+    # R06/§33.3: an aggregating detector must emit the OBSERVED activity interval (event times),
+    # SEPARATELY from emission time, so scoring attributes the episode by observation. A scan whose
+    # flows happened ~1h ago must stamp first_seen/last_seen ~1h ago, emitted_at ~now, observed=True.
+    _fresh()
+    base = app.time.time() - 300                            # activity 5 min before emission (in-window)
+    p = _P()
+    for i in range(6):                                     # 6 internal dsts on admin port -> lateral
+        app._handle({"event_type": "flow", "src_ip": "10.0.0.5", "dest_ip": f"10.0.0.{100 + i}",
+                     "dest_port": 445, "flow": {"start": app._rfc3339(base + i)}}, p, 2)
+    app.evaluate(p, flow_parts={2}, raw_parts=set())
+    m = next(x for x in p.sent if x["detector_id"] == "lateral_movement")
+    assert m["observed"] is True
+    fs, ls = app._epoch(m["first_seen"]), app._epoch(m["last_seen"])
+    assert abs(fs - base) < 1.0 and abs(ls - (base + 5)) < 1.0          # observed bounds, not "now"
+    assert app._epoch(m["emitted_at"]) - ls > 100                        # emitted well after last observed
+
+
+def test_no_observed_time_marks_observation_unknown():
+    # R06: when no event carried a parseable time, the finding must declare observed=False so the
+    # scorer treats temporal attribution as UNKNOWN, never a fabricated emission-time in-window match.
+    _fresh()
+    p = _P()
+    for i in range(6):
+        app._ew_add("lat:", 2, "10.0.0.5", f"10.0.0.{100 + i}|445")     # no ev_epoch -> no obs window
+    app.evaluate(p, flow_parts={2}, raw_parts=set())
+    m = next(x for x in p.sent if x["detector_id"] == "lateral_movement")
+    assert m["observed"] is False
+
+
 if __name__ == "__main__":
     for _n, _f in sorted(globals().items()):
         if _n.startswith("test_") and callable(_f):

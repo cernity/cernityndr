@@ -17,12 +17,41 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import time
+from datetime import datetime, timezone
 
 import ndr_runtime
 import store as store_mod
 import ew
+
+_TZ_OFFSET = re.compile(r'([+-]\d{2})(\d{2})$')    # +0000 -> +00:00 (fromisoformat rejects the compact form)
+
+
+def _epoch(ts):
+    """A flow/event timestamp -> epoch seconds, or None. Suricata emits a compact `+0000` offset that
+    datetime.fromisoformat rejects on older Pythons; normalise it (and 'Z') first so observation time
+    is real, never a fabricated wall-clock fallback."""
+    if ts is None:
+        return None
+    s = _TZ_OFFSET.sub(r'\1:\2', str(ts).replace("Z", "+00:00"))
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _event_epoch(e):
+    """The OBSERVED time of an EVE record: flow.start for flows (connection time), else the EVE
+    timestamp. Returns None when neither parses — the finding is then marked observation-unknown
+    rather than pretending emission time is observation (R06/§33.3)."""
+    return _epoch((e.get("flow") or {}).get("start") or e.get("timestamp"))
+
+
+def _rfc3339(ep):
+    """Epoch -> RFC3339 UTC preserving sub-second resolution (R06: keep timestamp resolution)."""
+    return datetime.fromtimestamp(ep, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 log = ndr_runtime.setup_logging("east-west-detectors")
 
@@ -74,22 +103,40 @@ def _prune_index(key):
         _store.set_remove(_index_key(key.split(":", 1)[0] + ":", _part_of(key)), key)
 
 
-def _ew_add(prefix, part, src, member):
+def _ew_add(prefix, part, src, member, ev_epoch=None):
     key = f"{prefix}{part}:{TENANT}:{src}"
     _store.set_add(key, member, WINDOW)
+    if ev_epoch is not None:                                     # R06: retain the OBSERVED event times so
+        _store.window_add("obs:" + key, ev_epoch, ev_epoch, WINDOW)   # the finding carries a real interval
     if ENUM_INDEX:
         _store.set_add(_index_key(prefix, part), key, WINDOW)   # partition index
 
 
-def _cand(detector, category, sev, conf, entities, mitre=None):
+def _obs_bounds(key):
+    """(min, max) OBSERVED event epoch for a source's live window, or (None, None) when no timestamped
+    event was recorded. This is the activity interval the aggregate describes — emitted SEPARATELY from
+    emission time so scoring attributes the episode by observation, not by when the detector flushed
+    (R06/§33.3)."""
+    rows = _store.window_range("obs:" + key, time.time() - WINDOW)
+    return (rows[0][0], rows[-1][0]) if rows else (None, None)
+
+
+def _cand(detector, category, sev, conf, entities, mitre=None, obs=(None, None)):
     bucket = int(time.time() // 600)
     if not _store.dedup_seen(f"emit:{TENANT}:{detector}:{_stable(entities) % 10**12}:{bucket}", 600):
         return None
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    emitted = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())   # when the aggregate was EMITTED
+    omin, omax = obs
+    observed = omin is not None
+    # first_seen/last_seen carry the OBSERVATION interval when we have one; `observed=False` tells the
+    # scorer these are emission-derived (temporal attribution unknown), never a fabricated in-window match.
+    fs = _rfc3339(omin) if observed else emitted
+    ls = _rfc3339(omax if omax is not None else omin) if observed else emitted
     c = {"finding_id": f"{detector}-{_stable(entities) % 10**10}-{bucket}",
             "tenant_id": TENANT, "detector_id": detector, "detector_version": "1.0",
             "category": category, "severity": sev, "confidence": conf,
-            "first_seen": now, "last_seen": now, "entities": entities, "state": "CANDIDATE"}
+            "first_seen": fs, "last_seen": ls, "observed": observed, "emitted_at": emitted,
+            "entities": entities, "state": "CANDIDATE"}
     if mitre:
         c["mitre"] = mitre                          # precise technique(s); finding-service prefers this
     return c
@@ -120,7 +167,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "count", "internal_targets": n}])
-            c = _cand("lateral_movement", "lateral", 7, 0.7, ent)
+            c = _cand("lateral_movement", "lateral", 7, 0.7, ent, obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("LATERAL %s -> %d internal hosts", _src_of(key), n)
     # internal scan (flow.v1): one src -> many hosts (horizontal) or many ports (vertical)
@@ -133,7 +180,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "scan", "kind": kind, "count": n}])
-            c = _cand("internal_scan", "discovery", 6, 0.6, ent, mitre=["T1046"])
+            c = _cand("internal_scan", "discovery", 6, 0.6, ent, mitre=["T1046"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("INTERNAL_SCAN %s %s=%d", _src_of(key), kind, n)
     # RDP fan-out (flow.v1)
@@ -145,7 +192,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "count", "rdp_targets": n}])
-            c = _cand("rdp_fanout", "lateral", 6, 0.6, ent)
+            c = _cand("rdp_fanout", "lateral", 6, 0.6, ent, obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("RDP_FANOUT %s -> %d hosts", _src_of(key), n)
     # kerberoasting (raw.v1 / krb5)
@@ -158,7 +205,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "kerberoast", "distinct_spns": spns, "rc4": rc4}])
-            c = _cand("kerberoasting", "credential_access", 8, 0.8, ent, mitre=["T1558.003"])
+            c = _cand("kerberoasting", "credential_access", 8, 0.8, ent, mitre=["T1558.003"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("KERBEROAST %s spns=%d rc4=%s", _src_of(key), spns, rc4)
     # password spraying (raw.v1): one src failing auth across many distinct accounts
@@ -170,7 +217,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "spray", "distinct_accounts": n}])
-            c = _cand("password_spraying", "credential_access", 7, 0.7, ent, mitre=["T1110.003"])
+            c = _cand("password_spraying", "credential_access", 7, 0.7, ent, mitre=["T1110.003"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("PASSWORD_SPRAY %s accounts=%d", _src_of(key), n)
     # AS-REP roasting (raw.v1): AS-REQs for pre-auth-disabled accounts
@@ -182,7 +229,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "asrep", "preauthless_accounts": n}])
-            c = _cand("as_rep_roasting", "credential_access", 7, 0.75, ent, mitre=["T1558.004"])
+            c = _cand("as_rep_roasting", "credential_access", 7, 0.75, ent, mitre=["T1558.004"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("ASREP_ROAST %s accounts=%d", _src_of(key), n)
     # ransomware over SMB (raw.v1): write-heavy file flood across many distinct files
@@ -197,7 +244,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                               {"type": "ransomware", "distinct_files": len(files), "writes": writes}])
-            c = _cand("ransomware_smb", "impact", 9, 0.8, ent, mitre=["T1486"])
+            c = _cand("ransomware_smb", "impact", 9, 0.8, ent, mitre=["T1486"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("RANSOMWARE_SMB %s files=%d writes=%d", _src_of(key), len(files), writes)
     # lateral exec (raw.v1): known exec named-pipe / RPC signals per source
@@ -207,7 +254,7 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
             _prune_index(key); continue
         ent = json.dumps([{"type": "ip", "role": "src", "value": _src_of(key)},
                           {"type": "lateral_exec", "signals": sorted(sigs)}])
-        c = _cand("lateral_exec", "lateral", 7, 0.75, ent, mitre=["T1021.002"])
+        c = _cand("lateral_exec", "lateral", 7, 0.75, ent, mitre=["T1021.002"], obs=_obs_bounds(key))
         if c:
             producer.send(CAND, c); log.info("LATERAL_EXEC %s signals=%d", _src_of(key), len(sigs))
     # LLMNR/mDNS poisoning (dns.v1): a host answering many distinct names (Responder-style)
@@ -219,37 +266,38 @@ def evaluate(producer, flow_parts=None, raw_parts=None, dns_parts=None):
         if hit:
             ent = json.dumps([{"type": "ip", "role": "responder", "value": _src_of(key)},
                               {"type": "llmnr", "answered_names": n}])
-            c = _cand("llmnr_poison", "credential_access", 7, 0.6, ent, mitre=["T1557.001"])
+            c = _cand("llmnr_poison", "credential_access", 7, 0.6, ent, mitre=["T1557.001"], obs=_obs_bounds(key))
             if c:
                 producer.send(CAND, c); log.info("LLMNR_POISON %s names=%d", _src_of(key), n)
 
 
 def _handle(e, producer, part):
     et = e.get("event_type")
+    ep = _event_epoch(e)                                        # R06: observed event time, carried into state
     if et == "flow":
         src, dst, port = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
         if src and dst and ew.is_internal(src) and ew.is_internal(dst):
-            _ew_add("scan:", part, src, f"{dst}|{port}")        # internal scan fan-out
+            _ew_add("scan:", part, src, f"{dst}|{port}", ep)    # internal scan fan-out
             if port in ew.ADMIN_PORTS:
-                _ew_add("lat:", part, src, f"{dst}|{port}")
+                _ew_add("lat:", part, src, f"{dst}|{port}", ep)
             if port == 3389:
-                _ew_add("rdp:", part, src, dst)
+                _ew_add("rdp:", part, src, dst, ep)
     elif et == "krb5":
         k = e.get("krb5", {}) or {}
         src = e.get("src_ip")
         if k.get("msg_type") in ("KRB_TGS_REQ", "TGS-REQ") or "sname" in k:
             _ew_add("krb:", part, src,
                     json.dumps({"sname": k.get("sname"),
-                                "encryption": k.get("encryption") or k.get("weak_encryption")}))
+                                "encryption": k.get("encryption") or k.get("weak_encryption")}), ep)
         # password spraying: AS-REQ pre-auth failures accrue distinct failed accounts.
         err = str(k.get("error_code", "")).upper()
         if ("PREAUTH_FAILED" in err or err in ("24", "0x18")) and k.get("cname"):
-            _ew_add("spray:", part, src, k.get("cname"))
+            _ew_add("spray:", part, src, k.get("cname"), ep)
         # AS-REP roasting: AS-REQ with pre-auth absent. Suricata eve does not
         # currently expose a pre-auth flag, so this stays dormant until it does
         # (see docs/suricata-config.md); it fires the moment the field appears.
         if _asrep_preauthless(k) and k.get("cname"):
-            _ew_add("asrep:", part, src, k.get("cname"))
+            _ew_add("asrep:", part, src, k.get("cname"), ep)
     elif et == "smb":
         s = e.get("smb", {}) or {}
         src = e.get("src_ip")
@@ -259,14 +307,14 @@ def _handle(e, producer, part):
         if "SESSION_SETUP" in cmd and ("LOGON_FAILURE" in status or "ACCESS_DENIED" in status):
             acct = (s.get("ntlmssp") or {}).get("user") or s.get("user")
             if acct:
-                _ew_add("spray:", part, src, acct)
+                _ew_add("spray:", part, src, acct, ep)
         # ransomware: write/rename vs read ops across distinct files (T1486)
         fname = s.get("filename")
         if fname:
             if any(x in cmd for x in ("WRITE", "SET_INFO", "RENAME")):
-                _ew_add("rw:", part, src, f"w|{fname}")
+                _ew_add("rw:", part, src, f"w|{fname}", ep)
             elif "READ" in cmd:
-                _ew_add("rw:", part, src, f"r|{fname}")
+                _ew_add("rw:", part, src, f"r|{fname}", ep)
         # lateral exec via SMB named pipe (svcctl/atsvc/winreg/samr/lsarpc) or DCERPC-
         # over-SMB (nested smb.dcerpc). F06: the pipe shows up as filename "\svcctl" (no
         # "pipe" substring), so pass the filename straight to the exec-pipe matcher — which
@@ -274,7 +322,7 @@ def _handle(e, producer, part):
         pipes = [p for p in (s.get("named_pipe"), fname) if p]
         hit, matched = ew.lateral_exec_score(pipes, ew.dcerpc_uuids(s.get("dcerpc")), [])
         if hit:
-            _ew_add("lex:", part, src, matched[0])
+            _ew_add("lex:", part, src, matched[0], ep)
     elif et == "dns":
         d = e.get("dns", {}) or {}
         # LLMNR/mDNS runs on udp/5355; a Responder-style attacker ANSWERS name queries
@@ -282,7 +330,7 @@ def _handle(e, producer, part):
         # the answer). NBT-NS (udp/137) is not decoded by Suricata; see suricata-config.
         if (e.get("dest_port") == 5355 or e.get("src_port") == 5355) \
                 and str(d.get("type")) == "answer" and d.get("rrname"):
-            _ew_add("llmnr:", part, e.get("src_ip"), d.get("rrname"))
+            _ew_add("llmnr:", part, e.get("src_ip"), d.get("rrname"), ep)
     elif et == "dcerpc":
         d = e.get("dcerpc", {}) or {}
         # F06: real EVE carries dcerpc.interfaces[] (array of {uuid}); the old scalar read
@@ -292,7 +340,7 @@ def _handle(e, producer, part):
             ent = json.dumps([{"type": "ip", "role": "src", "value": e.get("src_ip")},
                               {"type": "ip", "role": "dst", "value": e.get("dest_ip")},
                               {"type": "dcerpc", "op": "; ".join(matched)}])
-            c = _cand("dcerpc_lateral", "lateral", 7, 0.75, ent)
+            c = _cand("dcerpc_lateral", "lateral", 7, 0.75, ent, obs=(ep, ep) if ep is not None else (None, None))
             if c:
                 producer.send(CAND, c); log.info("DCERPC_LATERAL %s->%s %s", e.get("src_ip"), e.get("dest_ip"), matched)
 

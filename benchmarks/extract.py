@@ -151,13 +151,25 @@ def _revision(d):
     return float(v) if isinstance(v, (int, float)) else None
 
 
+def _observation_interval(d):
+    """The OBSERVED activity interval of a finding (R06/§33.3). An aggregating detector may correctly
+    describe earlier activity while emitting later; first_seen/last_seen are the observation bounds ONLY
+    when the finding says so. `observed=False` means they are emission-derived — return None so the
+    scorer marks temporal attribution UNKNOWN rather than pretending emission is observation. Legacy
+    findings without the flag keep first_seen/last_seen as the observation interval (unchanged)."""
+    if d.get("observed") is False:
+        return None
+    return _interval(d.get("first_seen"), d.get("last_seen"))
+
+
 def detections_from_findings(docs):
-    """Cernity finding docs -> episode detections (entities already carry roles). Observation
-    interval from the contract's first_seen/last_seen; revision key + lifecycle state carried for
-    deadline-aware revision selection (§25.3)."""
+    """Cernity finding docs -> episode detections (entities already carry roles). Observation interval
+    from the contract's first_seen/last_seen (unless observed=False); `available` = emitted_at, the
+    availability signal used for deadline utility SEPARATELY from observation (R06); revision key +
+    lifecycle state carried for deadline-aware revision selection (§25.3)."""
     return [{"entities": _finding_entities(d.get("entities")), "behavior": d.get("category"),
              "finding_id": d.get("finding_id"), "tenant": _tenant(d),
-             "interval": _interval(d.get("first_seen"), d.get("last_seen")),
+             "interval": _observation_interval(d), "available": _epoch(d.get("emitted_at")),
              "revision": _revision(d), "state": d.get("state")}
             for d in docs]
 

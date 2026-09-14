@@ -482,6 +482,32 @@ def eval_horizon_ok(acks, expected_detectors, deadline_wall, default_horizon=0.0
     return (not unresolved), unresolved
 
 
+def read_lifecycle_acks(project, topic="ndr.lifecycle.ack.v1", limit=5000, timeout=12):
+    """finding-service lifecycle disposition acks (§stage3): delivered-now / capture-requested /
+    pending / finalized. Read via rpk. Returns the raw list ([] if absent)."""
+    return read_sink_receipts(project, topic=topic, limit=limit, timeout=timeout)
+
+
+def lifecycle_disposition(acks):
+    """Aggregate the latest finding-service lifecycle ack PER worker and sum. None when no acks exist
+    (not armed / disabled). `pending`>0 means capture-bound findings were never finalized — undisposed
+    lifecycle work that producer exit + offset progress cannot reveal (§stage3)."""
+    latest = {}
+    for a in acks or []:
+        if not isinstance(a, dict):
+            continue
+        w = a.get("worker")
+        if w not in latest or a.get("seq", 0) > latest[w].get("seq", 0):
+            latest[w] = a
+    if not latest:
+        return None
+    return {"delivered_now": sum(a.get("delivered_now", 0) for a in latest.values()),
+            "capture_requested": sum(a.get("capture_requested", 0) for a in latest.values()),
+            "pending": sum(a.get("pending", 0) for a in latest.values()),
+            "finalized": sum(a.get("finalized", 0) for a in latest.values()),
+            "workers": len(latest)}
+
+
 def _summarize_eval_acks(acks):
     """Per-detector evaluation evidence for the completion record: latest evaluate() wall time,
     records seen, horizon, ack count. Evidence, not yet a gate."""
@@ -567,7 +593,7 @@ def _receipt_accounted(aggregate):
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
                         expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None,
-                        ledger=None, eval_ok=None):
+                        ledger=None, eval_ok=None, lifecycle_ok=None):
     """Explicit run state (R2/§21.2, §24.2 + §25.2/Rec-D + §stage3 fix). A valid outcome requires the
     COMPLETE expected inventory to report — an absent/null/unparsable status is unknown, never success:
       invalid        — an expected producer exited non-zero (a definite product/harness failure).
@@ -621,12 +647,14 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
         state = "invalid"
     elif unresolved:
         state = "inconclusive"
-    elif delivery_accounted and eval_ok is not False:
+    elif delivery_accounted and eval_ok is not False and lifecycle_ok is not False:
         state = "reconciled"
     else:
-        state = "inputs_drained"                   # consumed + baseline, but delivery/eval unconfirmed
+        state = "inputs_drained"                   # consumed + baseline, but delivery/eval/lifecycle unconfirmed
         if eval_ok is False:
             unresolved.append("detectors have not acked evaluation through the input horizon (§stage3)")
+        if lifecycle_ok is False:
+            unresolved.append("finding lifecycle has capture-bound findings still pending disposition (§stage3)")
     delivery = None
     if ledger is not None:                          # authoritative
         delivery = {"source": "obligation-ledger", "sinks": ledger.get("sinks"),
@@ -754,9 +782,15 @@ def run_full(scenario: str, out_dir: str) -> str:
     eval_ok, eval_unresolved = eval_horizon_ok(_acks, EXPECTED_EVAL_DETECTORS, drain_wall)
     if not eval_ok:
         print(f"  ! detector evaluation not confirmed through horizon: {eval_unresolved}", file=sys.stderr)
+    _lifecycle = lifecycle_disposition(read_lifecycle_acks(PROJECT))   # §stage3: pending capture disposition
+    lifecycle_ok = None if _lifecycle is None else (_lifecycle.get("pending", 0) == 0)
+    if lifecycle_ok is False:
+        print(f"  ! finding lifecycle has {_lifecycle['pending']} pending capture disposition(s)", file=sys.stderr)
     completion = classify_completion(producer_exits, group_lag, arm_counts,
-                                     sink_receipt=sink_disposition, ledger=ledger, eval_ok=eval_ok)
+                                     sink_receipt=sink_disposition, ledger=ledger,
+                                     eval_ok=eval_ok, lifecycle_ok=lifecycle_ok)
     completion["eval_acks"] = _summarize_eval_acks(_acks)          # §stage3 per-detector evidence
+    completion["lifecycle"] = _lifecycle                           # §stage3 finding-lifecycle disposition
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,

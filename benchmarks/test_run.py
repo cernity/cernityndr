@@ -166,6 +166,25 @@ def test_ledger_is_authoritative_over_an_incomplete_receipt():
     assert c["delivery"]["source"] == "obligation-ledger" and c["delivery"]["delivered"] == 3
 
 
+def test_lifecycle_disposition_aggregates_latest_per_worker():
+    acks = [{"worker": "w", "seq": 1, "delivered_now": 1, "capture_requested": 2, "pending": 2, "finalized": 0},
+            {"worker": "w", "seq": 2, "delivered_now": 3, "capture_requested": 2, "pending": 0, "finalized": 2}]
+    d = run.lifecycle_disposition(acks)
+    assert d["pending"] == 0 and d["delivered_now"] == 3 and d["finalized"] == 2   # latest (seq2) wins
+    assert run.lifecycle_disposition([]) is None                                    # not armed
+
+
+def test_lifecycle_gate_blocks_reconcile_while_capture_pending():
+    base = dict(producer_exits={"suricata-offline": 0, "arm-b-feeder": 0}, group_lag={"g1": 0, "g2": 0},
+                arm_counts={"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                ledger=run.ledger_disposition([{"finding_id": "a", "revision": None, "dest": "opensearch",
+                                                "outcome": "delivered"}]))
+    assert run.classify_completion(**base, lifecycle_ok=True)["state"] == "reconciled"
+    c = run.classify_completion(**base, lifecycle_ok=False)
+    assert c["state"] == "inputs_drained" and any("pending disposition" in u for u in c["unresolved"])
+    assert run.classify_completion(**base, lifecycle_ok=None)["state"] == "reconciled"   # not armed
+
+
 def test_eval_gate_blocks_reconcile_until_detectors_ack():
     # §stage3 armed gate: delivery accounted but detectors not yet evaluated-through-horizon ->
     # inputs_drained (still scoreable, reason recorded), NOT reconciled.

@@ -41,6 +41,8 @@ FINAL_TOPIC = "ndr.finding.final.v1"
 CAPTURE_TOPIC = "ndr.capture.request.v1"
 RESULT_TOPIC = "ndr.enrichment.result.v1"     # zeek-central outcome: ok/failed + evidence
 STATUS_TOPIC = "ndr.capture.status.v1"        # orchestrator refusal / agent completion
+LIFECYCLE_TOPIC = "ndr.lifecycle.ack.v1"      # §stage3: finding lifecycle disposition (pending capture work)
+LIFECYCLE_ON = os.environ.get("CERNITY_LIFECYCLE_ACKS", "1").strip().lower() not in ("", "0", "false", "no")
 # How long a capture-bound finding may stay unenriched before the sweep finalizes it
 # (no overlay / unavailable). Confirmed threats are already delivered; this only
 # resolves their dangling enrichment_state.
@@ -192,9 +194,28 @@ def main():
     # finding; a capture-only finding mid-flight would need a reload from ClickHouse
     # (F14) to survive a restart — add that when adjudication durability matters.
     pending: dict = {}
+    import uuid
+    worker, seq, delivered_now, capture_requested = uuid.uuid4().hex, 0, 0, 0   # §stage3 lifecycle acks
     log.info("finding-service up: %s (+%s, %s) -> ClickHouse %s (geoip=%s)",
              CANDIDATE_TOPIC, RESULT_TOPIC, STATUS_TOPIC,
              CH_HOST if CH_ENABLED else "(disabled)", "+".join(sorted(geo)) or "off")
+
+    def emit_lifecycle():
+        # §stage3: every candidate is disposed as delivered-now, capture-requested (then finalized on
+        # result/status/timeout), so `pending` == capture-bound findings not yet finalized. A reader
+        # confirms pending==0 at completion -> no undisposed lifecycle work; producer exit/offset
+        # progress cannot show this. Best-effort — never disrupts the lifecycle.
+        nonlocal seq
+        if not LIFECYCLE_ON:
+            return
+        try:
+            seq += 1
+            producer.send(LIFECYCLE_TOPIC, {"svc": "finding-service", "worker": worker, "seq": seq,
+                                            "delivered_now": delivered_now,
+                                            "capture_requested": capture_requested, "pending": len(pending),
+                                            "finalized": capture_requested - len(pending)})
+        except Exception as ex:                       # noqa: BLE001
+            log.warning("could not emit lifecycle ack: %s", ex)
 
     while _running:
         batch = consumer.poll(timeout_ms=1000, max_records=200)
@@ -204,6 +225,10 @@ def main():
                 if tp.topic == CANDIDATE_TOPIC:
                     finding, route = _handle_candidate(
                         rec.value, producer, geo, pending, ENRICH_TIMEOUT_SECS, now, ch)
+                    if route in ("final", "final_and_capture"):
+                        delivered_now += 1
+                    if route in ("capture", "final_and_capture"):
+                        capture_requested += 1
                     log.info("%s %s (%s)",
                              "CAPTURE_REQUESTED" if route == "capture" else "FINAL",
                              finding["finding_id"], finding["category"])
@@ -212,8 +237,10 @@ def main():
                 elif tp.topic == STATUS_TOPIC:
                     _handle_status(rec.value, producer, geo, pending, ch)
         _sweep_timeouts(producer, geo, pending, time.monotonic(), ch)
+        emit_lifecycle()
         producer.flush()
 
+    emit_lifecycle()                                  # final disposition on shutdown
     consumer.close()
     producer.close()
     log.info("finding-service stopped")

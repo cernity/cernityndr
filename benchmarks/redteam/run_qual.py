@@ -28,9 +28,9 @@ def default_spec(attacker, c2, resolver, targets, dataset):
     (127.0.0.11), off the captured interface, so it would be a false miss on a docker range. Add
     dns_tunnel/lateral once the range has an on-wire resolver / AD targets. attacker+targets ARE truth."""
     return {"dataset": dataset, "actions": [
-        actions.scan(attacker, targets),
-        actions.beacon(attacker, c2),
-        actions.exfil(attacker, c2),
+        actions.scan(attacker, targets, ports="445,3389,22,80"),        # one src -> many dsts = internal scan
+        actions.beacon(attacker, c2, interval=5, count=30, port=4444),  # clean port: beaconing, not proto-mismatch
+        actions.exfil(attacker, c2, mb=80, port=5555),                  # clean port: large transfer
     ]}
 
 

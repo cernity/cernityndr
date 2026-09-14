@@ -33,10 +33,14 @@ def test_truth_comes_from_the_launch_record_not_a_detector():
     r = orch.run_action(a, run=_norun, clock=_Clock())
     e = orch.truth_episode(r)
     # entities + behaviour are exactly what the orchestrator LAUNCHED — no detector involved
-    assert e["behavior"] == "recon" and e["label"] == "malicious"
+    assert e["behavior"] == "lateral" and e["label"] == "malicious"     # SMB/RDP internal scan = lateral fan-out
     assert [x["role"] for x in e["entities"]] == ["initiator", "target", "target"]
     assert e["entities"][0]["value"] == "10.9.0.5"
+    assert e["match_requires"] == ["10.9.0.5"]               # fan-out keyed on the initiator
     assert e["interval"]["end"] > e["interval"]["start"]     # wall interval stamped around the action
+    # a general recon sweep keeps recon
+    assert orch.truth_episode(orch.run_action(actions.scan("10.9.0.5", ["1.2.3.4"], behavior="recon"),
+                                              run=_norun, clock=_Clock()))["behavior"] == "recon"
 
 
 def test_campaign_writes_independent_truth_record():
@@ -47,7 +51,7 @@ def test_campaign_writes_independent_truth_record():
     with tempfile.TemporaryDirectory() as d:
         labels, results = orch.run_campaign(spec, d, run=_norun, clock=_Clock())
         assert sorted(labels["malicious"]) == ["10.9.0.5", "10.9.0.6"]
-        assert {e["behavior"] for e in labels["episodes"]} == {"recon", "c2"}
+        assert {e["behavior"] for e in labels["episodes"]} == {"lateral", "c2"}   # scan default = lateral fan-out
         assert os.path.isfile(os.path.join(d, "labels.json"))
         import json
         log = json.load(open(os.path.join(d, "run-log.json")))    # the immutable truth record

@@ -8,10 +8,14 @@ lab; the orchestrator's truth is derived from attacker/targets/behavior, not fro
 """
 
 
-def scan(attacker, targets, ports="445,3389"):
-    """SYN scan across internal hosts (recon). targets = the scanned host IPs (independent truth)."""
-    return {"id": "rt-scan", "behavior": "recon", "attacker": attacker, "targets": list(targets),
-            "cmd": ["nmap", "-sS", "-n", "-p", ports, *targets]}
+def scan(attacker, targets, ports="445,3389", behavior="lateral"):
+    """SYN scan across internal hosts. targets = the scanned host IPs (independent truth). Keyed on the
+    INITIATOR (match_requires): a fan-out is identified by the source, and a real detector finding for
+    it names the source + an aggregate count, not every dst. `behavior` defaults to "lateral" because
+    an internal scan on SMB/RDP ports is the one-host-probes-many-internal-hosts pattern the east-west
+    tier surfaces as lateral_movement / rdp_fanout; use behavior="recon" for a general port sweep."""
+    return {"id": "rt-scan", "behavior": behavior, "attacker": attacker, "targets": list(targets),
+            "match_requires": [attacker], "cmd": ["nmap", "-sS", "-n", "-p", ports, *targets]}
 
 
 def beacon(attacker, c2, interval=5, count=20, port=443):

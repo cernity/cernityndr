@@ -43,7 +43,7 @@ def run_action(action, run=None, clock=None):
     end = clock()
     return {"id": action["id"], "behavior": action["behavior"], "attacker": action["attacker"],
             "targets": list(action.get("targets") or []), "start": start, "end": end,
-            "rc": rc, "cmd": action.get("cmd")}
+            "rc": rc, "cmd": action.get("cmd"), "match_requires": action.get("match_requires")}
 
 
 def truth_episode(result):
@@ -53,6 +53,12 @@ def truth_episode(result):
     ents = [{"value": result["attacker"], "role": "initiator"}]
     ents += [{"value": t, "role": "target"} for t in result["targets"] if t]
     ep = {"id": result["id"], "label": "malicious", "behavior": result["behavior"], "entities": ents}
+    # A fan-out (scan/lateral) is identified by the INITIATOR — a real fan-out finding names the
+    # source and an aggregate ("-> 12 hosts"), not every dst — so the truth keys on the attacker and
+    # treats the targets as evidence (§stage5, matching the synthetic-scan precedent). Set via the
+    # action's match_requires; other behaviours require their full relationship.
+    if result.get("match_requires"):
+        ep["match_requires"] = list(result["match_requires"])
     if result.get("start") is not None and result.get("end") is not None:
         ep["interval"] = {"start": result["start"], "end": result["end"]}
     return ep

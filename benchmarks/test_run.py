@@ -387,6 +387,27 @@ def test_verify_export_manifest_detects_mutation_truncation_and_missing():
             assert "missing" in str(e)
 
 
+def test_verify_export_manifest_detects_altered_file_list_via_bundle_digest():
+    # §stage4: editing the manifest's file list (to hide a change) must fail the published digest.
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        od = os.path.join(d, "output")
+        os.makedirs(od)
+        fp = os.path.join(od, "cernity-findings.jsonl")
+        with open(fp, "w") as f:
+            f.write('{"a":1}\n')
+        files = {"cernity-findings.jsonl": {"sha256": run._sha256(fp), "doc_count": 1}}
+        digest = run._bundle_digest(files)
+        # tamper: drop the file from the manifest list but keep the (stale) published digest
+        with open(os.path.join(od, "export-manifest.json"), "w") as f:
+            json.dump({"consistency_basis": "t", "files": {}, "bundle_digest": digest}, f)
+        try:
+            run.verify_export_manifest(d)
+            assert False, "altered file list must fail the bundle digest"
+        except SystemExit as e:
+            assert "bundle_digest" in str(e)
+
+
 def test_verify_export_manifest_requires_a_manifest():
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, "output"))
@@ -429,7 +450,8 @@ def test_score_from_export_reconciles_with_live_scoring():
             json.dump(labels, f)
         _files["labels.json"] = {"sha256": run._sha256(lp)}
         with open(os.path.join(od, "export-manifest.json"), "w") as f:  # verified before scoring
-            json.dump({"consistency_basis": "test", "files": _files}, f)
+            json.dump({"consistency_basis": "test", "files": _files,
+                       "bundle_digest": run._bundle_digest(_files)}, f)
         recomputed = run.score_from_export(os.path.join(d, "out", "t"), "t")  # no repo/DATASETS fallback
 
     assert recomputed["episode_scoring"] == live["episode_scoring"], "episode metrics not reproducible from files"

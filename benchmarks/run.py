@@ -240,6 +240,15 @@ def _sha256(path) -> str:
     return h.hexdigest()
 
 
+def _bundle_digest(files) -> str:
+    """One digest pinning the whole export bundle: sha256 over the sorted (filename, per-file sha256)
+    pairs (§stage4). Recorded with the result and publishable as the immutable release record, so a
+    jointly-altered bundle+manifest is caught by comparing to the externally-published value."""
+    canon = json.dumps(sorted((name, rec.get("sha256")) for name, rec in (files or {}).items()),
+                       sort_keys=True).encode()
+    return hashlib.sha256(canon).hexdigest()
+
+
 def git_provenance():
     """Source revision + dirty flag of the checkout under test (M0.3)."""
     def _g(*args):
@@ -823,6 +832,9 @@ def run_full(scenario: str, out_dir: str) -> str:
             "evaluation / pending-capture / per-sink disposition not yet verified (§25.2)")
     results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
     results["run_id"] = run_id                                     # §25.1: link the result to its (immutable) spec
+    _mf = os.path.join(out_dir, "output", "export-manifest.json")  # §stage4: publish the bundle digest with the result
+    if os.path.isfile(_mf):
+        results["bundle_digest"] = _load(_mf).get("bundle_digest")
     # The frozen run-spec is NOT mutated post-run (§28 Major-2): the measured replay mapping is a
     # runtime OBSERVATION, recorded in the result (report.json) + output/replay.json, linked by run_id.
     return _write(results, out_dir)
@@ -935,7 +947,7 @@ def export_arms(endpoint, out_dir, project=None, labels_path=None):
     # snapshot is coherent — the completion gate proved the writers exited and the bus/sink settled
     # (a proven post-reconciliation write-freeze), which is Codex's accepted alternative to a PIT.
     manifest = {"consistency_basis": "post-reconciliation write-freeze (producers exited, groups "
-                "drained, sink settled)", "files": files}
+                "drained, sink settled)", "files": files, "bundle_digest": _bundle_digest(files)}
     with open(os.path.join(outdir, "export-manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
     return docs_by, counts
@@ -1007,8 +1019,9 @@ def verify_export_manifest(out_dir):
         raise SystemExit(f"benchmark abort: no export-manifest.json in {od} — cannot verify the "
                          f"exported evidence before recomputing (§25.4).")
     manifest = _load(mpath)
+    files = manifest.get("files", {})
     drift = []
-    for fname, rec in manifest.get("files", {}).items():
+    for fname, rec in files.items():
         fpath = os.path.join(od, fname)
         if not os.path.isfile(fpath):
             drift.append(f"{fname}: missing")
@@ -1018,6 +1031,12 @@ def verify_export_manifest(out_dir):
             continue
         if "doc_count" in rec and sum(1 for _l in open(fpath) if _l.strip()) != rec["doc_count"]:
             drift.append(f"{fname}: doc_count mismatch")
+    # §stage4: the manifest's own file-list must match its published bundle_digest — catches a
+    # manifest whose file list was edited (added/removed/renamed) to hide a change. The digest is
+    # recorded with the result (report.json) so a jointly-altered bundle+manifest is caught by
+    # comparing to the externally-published value.
+    if "bundle_digest" in manifest and manifest["bundle_digest"] != _bundle_digest(files):
+        drift.append("bundle_digest mismatch (manifest file list altered)")
     if drift:
         raise SystemExit("benchmark abort: exported evidence fails manifest verification (§25.4): "
                          + "; ".join(drift))

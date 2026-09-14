@@ -166,6 +166,19 @@ def test_ledger_is_authoritative_over_an_incomplete_receipt():
     assert c["delivery"]["source"] == "obligation-ledger" and c["delivery"]["delivered"] == 3
 
 
+def test_eval_gate_blocks_reconcile_until_detectors_ack():
+    # §stage3 armed gate: delivery accounted but detectors not yet evaluated-through-horizon ->
+    # inputs_drained (still scoreable, reason recorded), NOT reconciled.
+    ledger = run.ledger_disposition([{"finding_id": "a", "revision": None, "dest": "opensearch",
+                                      "outcome": "delivered"}])
+    base = dict(producer_exits={"suricata-offline": 0, "arm-b-feeder": 0}, group_lag={"g1": 0, "g2": 0},
+                arm_counts={"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G, ledger=ledger)
+    assert run.classify_completion(**base, eval_ok=True)["state"] == "reconciled"
+    c = run.classify_completion(**base, eval_ok=False)
+    assert c["state"] == "inputs_drained" and any("evaluation through the input horizon" in u for u in c["unresolved"])
+    assert run.classify_completion(**base, eval_ok=None)["state"] == "reconciled"   # gate not armed -> unchanged
+
+
 def test_readable_empty_ledger_reconciles_a_benign_run():
     ledger = run.ledger_disposition([])              # no deliveries, but the ledger was readable
     c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},

@@ -137,6 +137,7 @@ def main():
     m.set_ready("store", False)                      # /readyz waits for Redis (store-backed now)
     m.set_ready("consumer")
     log.info("dns-detector up (state=%s, dga / nxdomain-burst)", STATE_BACKEND)
+    ack = ndr_runtime.EvalAckEmitter(producer, "dns-detector", GROUP_ID, EVAL_EVERY)   # §stage3
     last = time.time()
     while _running:
         if not m.is_ready():                         # lazy store-readiness re-probe
@@ -145,6 +146,7 @@ def main():
             except Exception:
                 pass
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():
+            ack.seen(len(records))
             for rec in records:
                 try:
                     _handle(rec.value, producer, _tp.partition)
@@ -153,7 +155,7 @@ def main():
         if time.time() - last >= EVAL_EVERY:
             try:
                 dp = ndr_runtime.assigned_partitions(consumer, "suricata.dns.v1")
-                evaluate(producer, dp); producer.flush()
+                evaluate(producer, dp); ack.beat(consumer, force=True); producer.flush()
             except Exception as ex:
                 m.dropped("evaluate"); log.warning("evaluate failed: %s", ex)
             last = time.time()

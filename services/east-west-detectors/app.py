@@ -307,6 +307,7 @@ def main():
     m.set_ready("store", False)
     m.set_ready("consumer")
     log.info("east-west-detectors up (state=%s, lateral/rdp/kerberoast/dcerpc)", STATE_BACKEND)
+    ack = ndr_runtime.EvalAckEmitter(producer, "east-west-detectors", GROUP_ID, EVAL_EVERY)   # §stage3
     last = time.time()
     while _running:
         if not m.is_ready():
@@ -315,6 +316,7 @@ def main():
             except Exception:
                 pass
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():
+            ack.seen(len(records))
             for rec in records:
                 try:
                     _handle(rec.value, producer, _tp.partition)
@@ -325,7 +327,7 @@ def main():
                 fp = ndr_runtime.assigned_partitions(consumer, "suricata.flow.v1")
                 rp = ndr_runtime.assigned_partitions(consumer, "suricata.raw.v1")
                 dp = ndr_runtime.assigned_partitions(consumer, "suricata.dns.v1")
-                evaluate(producer, fp, rp, dp); producer.flush()
+                evaluate(producer, fp, rp, dp); ack.beat(consumer, force=True); producer.flush()
             except Exception as ex:
                 m.dropped("evaluate"); log.warning("evaluate failed: %s", ex)
             last = time.time()

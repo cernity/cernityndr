@@ -517,8 +517,7 @@ def main():
     # pin /readyz at 503 forever even after Redis comes up (plan 003 U4 review).
     config_source.start(BOOTSTRAP, det, on_reload=metrics.config_reloaded)
     log.info("behavioral-detectors up (state=%s window=%ss)", STATE_BACKEND, WINDOW)
-    import uuid
-    worker, records_seen = uuid.uuid4().hex, 0       # §stage3: eval-ack attribution
+    ack = ndr_runtime.EvalAckEmitter(producer, "behavioral-detectors", GROUP_ID, EVAL_EVERY)  # §stage3
     last_eval = time.time()
     while _running:
         now = time.time()
@@ -529,8 +528,8 @@ def main():
                 pass
         cfg = config_source.current()          # snapshot once per poll-batch (plan 003 U4)
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():
+            ack.seen(len(records))
             for rec in records:
-                records_seen += 1
                 try:
                     _handle(rec.value, producer, now, _tp.partition, cfg)
                 except Exception as ex:
@@ -548,10 +547,7 @@ def main():
             dp = ndr_runtime.assigned_partitions(consumer, "suricata.dns.v1")
             try:
                 _t = time.time(); evaluate(producer, fp, dp); metrics.observe_evaluate(time.time() - _t)
-                # §stage3: ack that this replica evaluated its assigned partitions through `now` — a
-                # timer-driven pass completed, not merely that offsets progressed.
-                ndr_runtime.emit_eval_ack(producer, "behavioral-detectors", GROUP_ID, fp | dp,
-                                          now, records_seen, WINDOW, worker=worker)
+                ack.beat(consumer, force=True)      # §stage3: post-evaluate ack (loop ran past input)
                 producer.flush()
             except Exception as ex:             # a Redis blip must not crash-loop the replica (U4 review)
                 metrics.dropped("evaluate"); log.warning("evaluate failed: %s", ex)

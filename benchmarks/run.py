@@ -304,6 +304,11 @@ PIPELINE_GROUPS = ("ndr-behavioral-detectors", "ndr-ids-alerts", "ndr-finding-se
                    "cernity-findings-forwarder", "ndr-dns-detector", "ndr-http-detector",
                    "ndr-protocol-detectors", "ndr-anomaly-detector", "ndr-coverage-detector",
                    "ndr-threat-intel", "ndr-east-west")
+# The TIMER-DRIVEN detectors whose evaluation is decoupled from consumption: they must ack an
+# evaluate pass past the drain instant (§stage3 gate). Per-record detectors (anomaly/protocol/http/
+# ids) evaluate on consume, so consumer-group drain already proves their evaluation. These `svc`
+# names match the eval-ack `svc` field emitted by ndr_runtime.EvalAckEmitter.
+EXPECTED_EVAL_DETECTORS = ("behavioral-detectors", "dns-detector", "east-west-detectors")
 
 
 def _redpanda_cid(project):
@@ -562,7 +567,7 @@ def _receipt_accounted(aggregate):
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
                         expected_producers=PRODUCERS, expected_groups=PIPELINE_GROUPS, sink_receipt=None,
-                        ledger=None):
+                        ledger=None, eval_ok=None):
     """Explicit run state (R2/§21.2, §24.2 + §25.2/Rec-D + §stage3 fix). A valid outcome requires the
     COMPLETE expected inventory to report — an absent/null/unparsable status is unknown, never success:
       invalid        — an expected producer exited non-zero (a definite product/harness failure).
@@ -608,14 +613,20 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     # if empty = a benign no-delivery run); the bus receipt is the fallback. Either one accounts for
     # downstream delivery -> reconciled (§stage3 fix: the ledger cannot race its own deliveries).
     delivery_accounted = ledger is not None or _receipt_accounted(sink_receipt)
+    # §stage3 gate: the timer-driven detectors must have evaluated PAST the drained input (eval acks),
+    # not merely progressed offsets. eval_ok=None = gate not armed (evidence-only); False = detectors
+    # did not evaluate through the horizon -> not reconciled (the run is inputs_drained, still
+    # scoreable, with the reason recorded). Input DID drain, so this is never inconclusive/invalid.
     if failed:
         state = "invalid"
     elif unresolved:
         state = "inconclusive"
-    elif delivery_accounted:
+    elif delivery_accounted and eval_ok is not False:
         state = "reconciled"
     else:
-        state = "inputs_drained"                   # consumed + baseline, but delivery unconfirmed
+        state = "inputs_drained"                   # consumed + baseline, but delivery/eval unconfirmed
+        if eval_ok is False:
+            unresolved.append("detectors have not acked evaluation through the input horizon (§stage3)")
     delivery = None
     if ledger is not None:                          # authoritative
         delivery = {"source": "obligation-ledger", "sinks": ledger.get("sinks"),
@@ -718,6 +729,8 @@ def run_full(scenario: str, out_dir: str) -> str:
     producer_exits = wait_for_producer_exits()
     print("[2a] R2 completion: reconciling consumer-group drain (pipeline consumed the input)")
     group_lag = wait_for_drain(PROJECT)
+    import time as _time
+    drain_wall = _time.time()                    # §stage3: detectors must evaluate PAST this instant
     print("[2b] waiting for the arms to settle (sink grace so a batched forwarder write is not raced)")
     try:
         # §25.2: after drain, allow the forwarder's batched OpenSearch write to land before trusting
@@ -735,9 +748,15 @@ def run_full(scenario: str, out_dir: str) -> str:
         print(f"  ! sink receipts not accountable: {_receipt_problems}", file=sys.stderr)
     _obl, _obl_ok = read_obligations(PROJECT)    # §stage3 fix: the durable ledger is authoritative
     ledger = ledger_disposition(_obl) if _obl_ok else None
+    _acks = read_eval_acks(PROJECT)
+    # §stage3 gate ARMED: the timer-driven detectors (evaluation decoupled from consumption) must have
+    # acked an evaluate pass past the drain instant. Per-record detectors are covered by offset-drain.
+    eval_ok, eval_unresolved = eval_horizon_ok(_acks, EXPECTED_EVAL_DETECTORS, drain_wall)
+    if not eval_ok:
+        print(f"  ! detector evaluation not confirmed through horizon: {eval_unresolved}", file=sys.stderr)
     completion = classify_completion(producer_exits, group_lag, arm_counts,
-                                     sink_receipt=sink_disposition, ledger=ledger)
-    completion["eval_acks"] = _summarize_eval_acks(read_eval_acks(PROJECT))   # §stage3 evidence (not yet gating)
+                                     sink_receipt=sink_disposition, ledger=ledger, eval_ok=eval_ok)
+    completion["eval_acks"] = _summarize_eval_acks(_acks)          # §stage3 per-detector evidence
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,

@@ -154,6 +154,37 @@ def emit_eval_ack(producer, svc, group, partitions, evaluated_wall, records_seen
             pass
 
 
+class EvalAckEmitter:
+    """Uniform evaluation-completion acks for any timer-driven consumer (§handoff stage 3 rollout).
+    Call `.seen(n)` as records are handled and `.beat(consumer)` once per loop iteration: it emits a
+    per-partition ack to ndr.eval.ack.v1 at most every `every` seconds (and on `force`), stamped with
+    a stable worker epoch. A post-drain beat proves the detector's loop ran — and thus its periodic
+    evaluate() executed — past the input, not merely that offsets advanced. Emission never disrupts
+    the loop (best-effort)."""
+
+    def __init__(self, producer, svc, group, horizon_secs, every=None):
+        import time as _t
+        import uuid as _u
+        self._producer, self._svc, self._group = producer, svc, group
+        self._horizon = horizon_secs
+        self._every = float(every if every is not None else _int("NDR_EVAL_ACK_EVERY", 15))
+        self._worker = _u.uuid4().hex
+        self._records = 0
+        self._last = 0.0
+        self._t = _t
+
+    def seen(self, n=1):
+        self._records += n
+
+    def beat(self, consumer, force=False):
+        now = self._t.time()
+        if not force and (now - self._last) < self._every:
+            return
+        self._last = now
+        emit_eval_ack(self._producer, self._svc, self._group, assigned_partitions(consumer),
+                      now, self._records, self._horizon, worker=self._worker)
+
+
 def assigned_partitions(consumer, topic=None):
     """Partition numbers this replica currently owns, read from the live consumer
     assignment. This is the seam partition-scoped evaluate() uses so each replica

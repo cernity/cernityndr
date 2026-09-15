@@ -6,6 +6,8 @@
 [![license: PolyForm Perimeter 1.0.1](https://img.shields.io/badge/license-PolyForm%20Perimeter%201.0.1-blue)](LICENSE)
 [![images: Docker Hub](https://img.shields.io/badge/images-cernity%20on%20Docker%20Hub-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/u/cernity)
 
+📖 **Full documentation:** <https://cernity.io/docs>
+
 Cernity is the middle tier of a tiered NDR architecture. Suricata inspects packets
 at the edge and emits telemetry; Cernity does the heavy, stateful analysis
 centrally — behavioral detection (beaconing, exfiltration, DNS tunneling, long
@@ -33,9 +35,7 @@ long-window behavioral analytics**, a findings lifecycle, enrichment, or a respo
 **Cernity is the add-on that supplies those NDR capabilities.** Suricata inspects; Cernity
 remembers across the fleet, analyzes, enriches, prioritizes, and delivers findings to your SIEM.
 
-> **Maturity note:** an [independent audit](docs/cernity-independent-audit.md) verified the core
 > analytics path and found real gaps (confirmed-threat finalization, per-sensor trust boundary,
-> some deployment paths). See the [audit response](docs/audit-response.md) for verified-today vs.
 > the v0.4 roadmap.
 
 | NDR capability | What Suricata gives | What Cernity adds |
@@ -50,7 +50,7 @@ remembers across the fleet, analyzes, enriches, prioritizes, and delivers findin
 Honest boundaries: detection is heuristic/explainable (**not** ML — a future track); the
 analyst console and guided-hunting UI are your SIEM's job (Cernity is the findings engine);
 DPI is tiered (edge + on-demand Zeek), by design. Full mapping and *how* each area is
-covered: **[docs/ndr-coverage.md](docs/ndr-coverage.md)**.
+covered: **[docs/ndr-coverage.md](https://cernity.io/docs/ndr-coverage)**.
 
 ## How it fits together
 
@@ -108,7 +108,7 @@ flowchart LR
 ## Quickstart
 
 > **Already run a Suricata sensor and just want Cernity added to it?** Follow the
-> step-by-step **[Getting started guide](docs/getting-started.md)** — stand up Cernity,
+> step-by-step **[Getting started guide](https://cernity.io/docs/getting-started)** — stand up Cernity,
 > point your sensor at it, and wire your SIEM, top to bottom, copy-paste.
 
 The fastest way to *see it work* first — replay a recorded C2 beacon through the whole
@@ -129,7 +129,7 @@ Run just the central core (point your own Suricata sensor at it):
 All settings live in `.env` (copy from `cernity.env.example`) — bus address,
 tenant, state backend, findings sink, ClickHouse, and log level. To point a real
 Suricata sensor at Cernity and wire your SIEM, follow the
-[Getting started guide](docs/getting-started.md).
+[Getting started guide](https://cernity.io/docs/getting-started).
 
 ## Deploying at scale
 
@@ -138,7 +138,7 @@ Three deployment paths, same architecture:
 | Path | For | Where |
 |---|---|---|
 | **Single host** (Compose) | evaluation, small single sites | `deploy/central`, `deploy/quickstart` |
-| **Manual multi-server** (Compose, no orchestration) | your own hardware, static scaling | [`deploy/scale/`](deploy/scale/README.md) · [placement guide](docs/placement.md) |
+| **Manual multi-server** (Compose, no orchestration) | your own hardware, static scaling | [`deploy/scale/`](deploy/scale/README.md) · [placement guide](https://cernity.io/docs/placement) |
 | **Kubernetes** (Helm) | dynamic scaling / large fleets | `deploy/helm/cernity` |
 
 The detectors are stateless consumer-group workers sharing state in Redis, so all
@@ -169,7 +169,6 @@ radar: a **machine-learning behavioral track** (to complement the explainable he
 **threat-intel platform** integration (MISP/OpenCTI), and new detectors that light up as
 **Suricata 9** (richer email/SMTP/LDAP/FTP telemetry) and **Zeek 9** (extensible flow tuples,
 Redis analyzer) land upstream. The full forward view — including what's deliberately *not*
-planned — is in the **[roadmap](docs/roadmap.md)**.
 
 ## License — source-available, not open source
 
@@ -199,18 +198,16 @@ Contributions are covered by [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
-- [**Getting started**](docs/getting-started.md) — add Cernity to your Suricata sensor + wire your SIEM, step by step
-- [**Executive summary**](docs/executive-summary.md) — what Cernity is, the problem it solves, and how, in one read
-- [**How Cernity works**](docs/how-it-works.md) — the whole system in plain language, every piece explained
-- [How Cernity completes Suricata into an NDR](docs/ndr-coverage.md) — each NDR capability area and how it's covered
-- [Suricata vs Zeek logging parity](docs/suricata-zeek-parity.md) — how Suricata EVE covers what Zeek logs, and the honest gaps
+- [**Getting started**](https://cernity.io/docs/getting-started) — add Cernity to your Suricata sensor + wire your SIEM, step by step
+- [**How Cernity works**](https://cernity.io/docs/how-it-works) — the whole system in plain language, every piece explained
+- [How Cernity completes Suricata into an NDR](https://cernity.io/docs/ndr-coverage) — each NDR capability area and how it's covered
+- [Suricata vs Zeek logging parity](https://cernity.io/docs/suricata-zeek-parity) — how Suricata EVE covers what Zeek logs, and the honest gaps
 - [Benchmark](benchmarks/README.md) — reproducible Suricata→SIEM vs Suricata→Cernity→SIEM comparison (accuracy + noise), honest both-sides
-- [Roadmap](docs/roadmap.md) — what's coming: detection breadth, tracking Suricata 9 / Zeek 9, integrations, and what's deliberately *not* planned
-- [ML behavioral detection (SLIPS)](docs/ml-detection.md) — the opt-in ML layer and how ML×heuristic agreement surfaces
-- [Configuring Suricata for Cernity](docs/suricata-config.md)
-- [Deploying the sensor bundle](docs/deploy-sensor.md)
-- [SIEM integrations](docs/siem-integrations.md) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)
-- [Logging & health](docs/logging.md) — JSON/text logs, levels, heartbeat, metrics/health endpoints
-- [Finding enrichment](docs/enrichment.md) — GeoIP/ASN, community ID, reverse DNS, domain age/NRD, fingerprint naming, reputation (sign-ups + keys)
-- [Development guide](docs/development.md) — build, test, and extend Cernity
+- [ML behavioral detection (SLIPS)](https://cernity.io/docs/ml-detection) — the opt-in ML layer and how ML×heuristic agreement surfaces
+- [Configuring Suricata for Cernity](https://cernity.io/docs/suricata-config)
+- [Deploying the sensor bundle](https://cernity.io/docs/deploy-sensor)
+- [SIEM integrations](https://cernity.io/docs/siem-integrations) — Elasticsearch/OpenSearch, Splunk, Devo, syslog/CEF, webhook (+ fan-out)
+- [Logging & health](https://cernity.io/docs/logging) — JSON/text logs, levels, heartbeat, metrics/health endpoints
+- [Finding enrichment](https://cernity.io/docs/enrichment) — GeoIP/ASN, community ID, reverse DNS, domain age/NRD, fingerprint naming, reputation (sign-ups + keys)
+- [Development guide](https://cernity.io/docs/development) — build, test, and extend Cernity
 - [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md)

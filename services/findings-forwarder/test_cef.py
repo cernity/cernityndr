@@ -54,6 +54,15 @@ def test_cef_carries_reverse_dns_domains():
     assert "destinationDnsDomain=evil.example" in line
 
 
+def test_cef_carries_community_id_from_source_events():
+    # U5: CEF carries the community_id pivot from source_events; the full EVE rides the JSON sink.
+    f = dict(FINDING, source_events=[{"event_type": "quic", "community_id": "1:abc=",
+                                      "record": {"quic": {"ja4": "q13d.."}}}])
+    line = cef.to_cef(f)
+    # CEF ext-value escaping turns '=' into '\=', so match the label + the escaped value.
+    assert "cs5Label=communityId" in line and "cs5=1:abc" in line
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

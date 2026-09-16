@@ -208,6 +208,7 @@ class ElasticsearchAdapter:
         user, pw = os.environ.get("ES_USER", ""), os.environ.get("ES_PASSWORD", "")
         self.auth = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode() if user else None
         self.prefix = os.environ.get("ES_INDEX_PREFIX", "ndr-findings")
+        self._template_done = False
         self.ctx = None if os.environ.get("ES_TLS_VERIFY", "true").lower() != "false" \
             else ssl._create_unverified_context()
 
@@ -232,6 +233,36 @@ class ElasticsearchAdapter:
         base = f"{tenant}:{fid}"
         return f"{base}:r{rev}" if rev is not None else base
 
+    @staticmethod
+    def _template_body(prefix):
+        """Index template that keeps the nested provenance/enrichment blocks in `_source` but
+        OUT of the dynamic mapping (`enabled:false`) — so arbitrary nDPI/extension keys inside
+        `source_events` never explode the mapping toward Elasticsearch's ~1000-field default limit.
+        The analyst still sees the full native EVE in the stored document; they just don't get a
+        mapped subfield for every key (they pivot on the finding's top-level fields + community_id)."""
+        noindex = {"type": "object", "enabled": False}
+        return {"index_patterns": [f"{prefix}-*"],
+                "template": {"mappings": {"properties": {
+                    "source_events": noindex, "summary": noindex, "iocs": noindex}}}}
+
+    def _ensure_template(self):
+        """Best-effort, idempotent PUT of the mapping guard before the first bulk. Never blocks
+        delivery — a template failure just risks dynamic mapping, not a dropped finding."""
+        if self._template_done:
+            return
+        self._template_done = True                              # attempt once; don't retry-storm
+        try:
+            body = json.dumps(self._template_body(self.prefix)).encode()
+            headers = {"Content-Type": "application/json"}
+            if self.auth:
+                headers["Authorization"] = self.auth
+            req = urllib.request.Request(self.endpoint + f"/_index_template/{self.prefix}",
+                                         data=body, method="PUT", headers=headers)
+            with urllib.request.urlopen(req, context=self.ctx, timeout=10):
+                pass
+        except Exception as e:                                  # noqa: BLE001 (guard is advisory)
+            log.warning("index-template PUT failed (dynamic mapping in effect): %s", e)
+
     def emit(self, finding):
         self.emit_batch([finding])
 
@@ -239,6 +270,7 @@ class ElasticsearchAdapter:
         findings = _live(findings)
         if not findings:
             return
+        self._ensure_template()                                 # mapping guard for source_events (U5)
         idx = self.prefix + "-" + datetime.now(timezone.utc).strftime("%Y.%m.%d")
         lines = []
         for f in findings:

@@ -203,6 +203,24 @@ def test_pending_recovery_failure_is_observable():
     assert pend == {} and ok is False
 
 
+def test_source_events_persist_roundtrip():
+    # U4: _row serializes source_events/summary/iocs to JSON strings; _pending_from_rows parses
+    # them back so a restart-recovered finding carries the same objects (not raw strings).
+    import json
+    se = [{"event_type": "quic", "community_id": "1:z=", "record": {"quic": {"ja4": "q13d.."}}}]
+    f = {"finding_id": "x-1", "tenant_id": "t", "detector_id": "beacon", "detector_version": "1.0",
+         "category": "c2", "severity": 7, "confidence": 0.9, "first_seen": "2026-09-16T00:00:00Z",
+         "last_seen": "2026-09-16T00:00:00Z", "entities": "[]", "state": "FINAL",
+         "enrichment_state": "PENDING", "devo_delivery_state": "QUEUED", "revision": 1,
+         "source_events": se, "iocs": {"ja4": ["q13d.."]}}
+    row = app._row(f)                                            # -> list aligned to COLS
+    rowd = dict(zip(app.COLS, row))
+    assert isinstance(rowd["source_events"], str) and json.loads(rowd["source_events"]) == se  # serialized
+    pend = app._pending_from_rows([rowd], 120, 0.0)              # recover
+    rec = next(iter(pend.values()))["finding"]
+    assert rec["source_events"] == se and rec["iocs"] == {"ja4": ["q13d.."]}   # parsed back to objects
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

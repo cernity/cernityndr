@@ -81,11 +81,27 @@ def reverse_dns(ip, resolver=None):
 
 
 # --- domain age / NRD via RDAP ---------------------------------------------
+# Common multi-label public suffixes where eTLD+1 needs THREE labels, not two (foo.co.uk).
+# Bounded heuristic covering the frequent ccTLD second-levels without a Public Suffix List dep.
+# ponytail: static set; swap for a PSL (publicsuffix2) if exhaustive ccTLD coverage is needed.
+_MULTI_SUFFIX = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk",
+    "com.au", "net.au", "org.au", "gov.au", "edu.au", "co.nz", "org.nz", "govt.nz",
+    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "co.za", "org.za", "gov.za",
+    "com.br", "net.br", "gov.br", "com.cn", "net.cn", "gov.cn", "co.in", "gov.in",
+    "co.kr", "or.kr", "com.mx", "com.sg", "com.tr", "gov.tr", "com.hk", "com.tw",
+})
+
+
 def registrable(domain: str) -> str:
-    """Naive eTLD+1 (last two labels). Good enough for the common gTLD case; an
-    operator with ccTLD-heavy traffic can front this with their own map."""
+    """eTLD+1 (registrable domain), public-suffix-aware for common multi-label ccTLDs
+    (foo.co.uk -> foo.co.uk, not the unregistrable "co.uk"); last-two-labels for gTLDs."""
     parts = domain.strip(".").lower().split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else domain
+    if len(parts) <= 2:
+        return ".".join(parts) if parts else domain
+    if ".".join(parts[-2:]) in _MULTI_SUFFIX:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
 
 
 def _rdap_fetch(domain):

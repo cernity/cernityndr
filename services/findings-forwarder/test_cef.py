@@ -28,8 +28,34 @@ def test_cef_escapes_pipe_in_header():
     assert "a\\|b" in line
 
 
+def test_cef_maps_slips_attacker_victim_roles():
+    # handoff §4: SLIPS entities use attacker/victim, not src/dst — the reviewed extractor
+    # produced no src/dst for every SLIPS finding. attacker->src, victim->dst.
+    f = {"finding_id": "slips-1", "detector_id": "slips_ml", "category": "c2", "severity": 8,
+         "tenant_id": "t",
+         "entities": [{"type": "ip", "role": "attacker", "value": "10.0.0.9"},
+                      {"type": "ip", "role": "victim", "value": "8.8.8.8"}]}
+    line = cef.to_cef(f)
+    assert "src=10.0.0.9" in line and "dst=8.8.8.8" in line
+
+
+def test_cef_carries_revision_and_evidence_link():
+    f = dict(FINDING, revision=3, evidence_refs=["minio://ndr-pcap/x.pcap", "minio://ndr-pcap/y"])
+    line = cef.to_cef(f)
+    assert "cs4=3" in line and "cs4Label=revision" in line
+    assert "flexString1=minio://ndr-pcap/x.pcap" in line     # first evidence pointer (companion path)
+
+
+def test_cef_carries_reverse_dns_domains():
+    # §6.5: reverse-DNS enrichment must reach the transport, mapped to CEF's DNS-domain keys.
+    f = dict(FINDING, intel={"rdns": {"10.0.0.5": "host.internal", "203.0.113.10": "evil.example"}})
+    line = cef.to_cef(f)
+    assert "sourceDnsDomain=host.internal" in line
+    assert "destinationDnsDomain=evil.example" in line
+
+
 if __name__ == "__main__":
-    test_cef_header_and_fields()
-    test_cef_entities_from_json_string()
-    test_cef_escapes_pipe_in_header()
-    print("ok test_cef")
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    for fn in fns:
+        fn(); print(f"ok  {fn.__name__}")
+    print(f"all {len(fns)} cef tests passed")

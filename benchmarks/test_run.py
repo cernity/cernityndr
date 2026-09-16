@@ -4,6 +4,7 @@ and hash the real engine outputs. No OpenSearch/Docker: fetch/count/sleep are in
 
   python3 test_run.py
 """
+import json
 import os
 import tempfile
 
@@ -52,6 +53,102 @@ def test_os_search_distinguishes_absent_index_from_query_error():
         assert "arm-b" in str(e)
 
 
+def test_score_arms_uses_per_arm_replay_clock():
+    # §41 FAIRNESS: only Arm B is fed through the reanchoring feeder, so Arm A (raw pcap clock) is scored
+    # with offset 0 and Arm B (replay clock) with the recorded offset. A Suricata alert on the ORIGINAL
+    # clock and a Cernity finding on the REPLAY clock must BOTH surface the same timed episode.
+    import datetime as _d
+    OFF = 5000.0
+    def _ts(e): return _d.datetime.fromtimestamp(e, _d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    ep = {"id": "ep1", "label": "malicious", "behavior": "c2",
+          "entities": [{"value": "10.0.0.5", "role": "initiator"}, {"value": "1.2.3.4", "role": "target"}],
+          "interval": {"start": 1000.0, "end": 1100.0}}
+    labels = {"granularity": "host", "malicious": ["10.0.0.5"], "episodes": [ep]}
+    arm_a = [{"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "1.2.3.4",
+              "alert": {"category": "A Network Trojan was detected"},
+              "flow": {"start": _ts(1000), "end": _ts(1010)}}]                 # ORIGINAL clock
+    arm_b = [{"finding_id": "f1", "category": "c2", "tenant_id": "default", "observed": True,
+              "first_seen": _ts(1000 + OFF), "last_seen": _ts(1100 + OFF),     # REPLAY clock (original + OFF)
+              "entities": json.dumps([{"type": "ip", "role": "src", "value": "10.0.0.5"},
+                                      {"type": "ip", "role": "dst", "value": "1.2.3.4"}])}]
+    es = run._score_arms(arm_a, arm_b, [], labels, {"scenario": "t"}, replay_offset=OFF)["episode_scoring"]
+    assert es["suricata_siem"]["episode_recall"] == 1.0    # Arm A surfaces on the ORIGINAL clock (offset 0)
+    assert es["cernity_siem"]["episode_recall"] == 1.0     # Arm B surfaces on the REPLAY clock (offset OFF)
+
+
+def test_per_arm_clock_invariance_armc_and_signed_offsets():
+    # §43.5 per-arm clock invariance: Arm C (Zeek, original clock) is scored with offset 0; the mapping
+    # holds under a NEGATIVE offset and mixed timestamp formats; an untimed baseline detection is
+    # ambiguous (identity ok, time unverifiable), not credited and not a false miss.
+    import datetime as _d
+    def _ts(e, fmt): return _d.datetime.fromtimestamp(e, _d.timezone.utc).strftime(fmt)
+    OFF = -3000.0                                                       # NEGATIVE reanchor offset
+    ep = {"id": "e", "label": "malicious", "behavior": "recon",
+          "entities": [{"value": "10.0.0.5", "role": "initiator"}, {"value": "10.0.0.9", "role": "target"}],
+          "interval": {"start": 2000.0, "end": 2100.0}}
+    labels = {"granularity": "host", "malicious": ["10.0.0.5"], "episodes": [ep]}
+    # Arm C zeek notice on the ORIGINAL clock, compact +0000 offset
+    arm_c = [{"src_ip": "10.0.0.5", "dest_ip": "10.0.0.9", "note": "recon",
+              "ts": _ts(2050, "%Y-%m-%dT%H:%M:%S.%f+0000")}]
+    # Arm B finding on the REPLAY clock (original + negative OFF), Z format
+    arm_b = [{"finding_id": "f", "category": "recon", "tenant_id": "default", "observed": True,
+              "first_seen": _ts(2000 + OFF, "%Y-%m-%dT%H:%M:%S.%fZ"), "last_seen": _ts(2100 + OFF, "%Y-%m-%dT%H:%M:%S.%fZ"),
+              "entities": json.dumps([{"type": "ip", "role": "src", "value": "10.0.0.5"},
+                                      {"type": "ip", "role": "dst", "value": "10.0.0.9"}])}]
+    # Arm A alert with NO timestamp -> untimed -> ambiguous (identity matches, time unverifiable)
+    arm_a = [{"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9", "alert": {"category": "scan"}}]
+    es = run._score_arms(arm_a, arm_b, arm_c, labels, {"scenario": "t"}, replay_offset=OFF)["episode_scoring"]
+    assert es["zeek_reference"]["episode_recall"] == 1.0               # Arm C surfaces on the original clock
+    assert es["cernity_siem"]["episode_recall"] == 1.0                # Arm B surfaces under a negative offset
+    assert es["suricata_siem"]["episode_recall"] == 0.0               # untimed -> not surfaced
+    assert "e" in es["suricata_siem"]["ambiguous_ids"]                # ... but ambiguous, not a false miss
+
+
+def test_labels_capture_overlap_guards_against_mismatched_pcap():
+    # §35.10 guard: labels and pcap from DIFFERENT captures must fail loud, not silently zero recall.
+    import datetime as _d
+    def _eve(path, starts):
+        with open(path, "w") as f:
+            for s in starts:
+                ts = _d.datetime.fromtimestamp(s, _d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+0000")
+                f.write(json.dumps({"event_type": "flow", "flow": {"start": ts}}) + "\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        eve = os.path.join(tmp, "source-eve.jsonl")
+        _eve(eve, [1789395520.0, 1789395590.0])                       # flows span ~70s
+        good = {"episodes": [{"id": "e", "interval": {"start": 1789395523.0, "end": 1789395598.0}}]}
+        assert run.labels_capture_overlap(good, eve)[0]               # episodes within flow window -> ok
+        bad = {"episodes": [{"id": "e", "interval": {"start": 1789394520.0, "end": 1789394590.0}}]}
+        ok, detail = run.labels_capture_overlap(bad, eve)             # ~1000s earlier -> mismatch
+        assert not ok and "DIFFERENT captures" in detail
+        assert run.labels_capture_overlap({"episodes": [{"id": "e"}]}, eve)[0]   # no timed episodes -> skip
+        assert run.labels_capture_overlap(good, os.path.join(tmp, "missing.jsonl"))[0]  # no capture -> skip
+
+
+def test_require_capture_binding_by_hash():
+    # §43.4-2: labels bound to a pcap by HASH must fail on a different pcap even if clocks would overlap;
+    # absent a binding, the check passes (temporal-overlap fallback applies).
+    with tempfile.TemporaryDirectory() as d:
+        pcap = os.path.join(d, "cap.pcap"); open(pcap, "wb").write(b"PCAPDATA")
+        other = os.path.join(d, "other.pcap"); open(other, "wb").write(b"DIFFERENT")
+        assert run.require_capture_binding({"episodes": []}, pcap)[0]       # no binding -> fallback passes
+        labels_path = os.path.join(d, "labels.json"); json.dump({"episodes": []}, open(labels_path, "w"))
+        b = run.bind_labels_pcap(labels_path, pcap)
+        assert b["pcap_sha256"] and b["capture_run_id"]
+        labels = json.load(open(labels_path))
+        assert run.require_capture_binding(labels, pcap)[0]                 # same pcap -> ok
+        ok, det = run.require_capture_binding(labels, other)               # different pcap -> mismatch
+        assert not ok and "MISMATCH" in det
+        assert not run.require_capture_binding(labels, os.path.join(d, "gone.pcap"))[0]  # missing pcap fails
+        # §49.3: refuse to silently rebind to a DIFFERENT pcap; force preserves the prior binding
+        try:
+            run.bind_labels_pcap(labels_path, other)
+            assert False, "rebinding to a different pcap must fail without force"
+        except SystemExit as e:
+            assert "refusing to rebind" in str(e)
+        forced = run.bind_labels_pcap(labels_path, other, force=True)
+        assert forced["superseded"]["pcap_sha256"] == b["pcap_sha256"]     # prior binding preserved for audit
+
+
 def test_require_scorer_inventory_enforces_mandatory_artifacts():
     # R07: scoring a bundle requires labels + baseline arm to be enumerated; an on-disk scorer-read file
     # absent from the manifest is unverified influence and also fails.
@@ -67,12 +164,31 @@ def test_require_scorer_inventory_enforces_mandatory_artifacts():
             assert "labels.json" in str(e) and "required artifact" in str(e)
         # labels + baseline enumerated, but replay.json sits on disk unenumerated -> unverified influence
         open(os.path.join(od, "replay.json"), "w").close()
-        m2 = {"files": {"labels.json": {"sha256": "x"}, "suricata-alerts.jsonl": {"sha256": "y", "doc_count": 0}}}
+        m2 = {"files": {"labels.json": {"sha256": "x"}, "suricata-alerts.jsonl": {"sha256": "y", "doc_count": 0},
+                        "cernity-findings.jsonl": {"sha256": "z", "doc_count": 0}}}
         try:
             run.require_scorer_inventory(d, m2)
             assert False, "unenumerated on-disk replay.json must fail"
         except SystemExit as e:
             assert "replay.json" in str(e) and "not enumerated" in str(e)
+        # §43.4-2: B (cernity-findings) is required for an A/B comparison
+        os.remove(os.path.join(od, "replay.json"))
+        m3 = {"files": {"labels.json": {"sha256": "x"}, "suricata-alerts.jsonl": {"sha256": "y", "doc_count": 0}}}
+        try:
+            run.require_scorer_inventory(d, m3)
+            assert False, "missing B arm (cernity-findings) must fail"
+        except SystemExit as e:
+            assert "cernity-findings.jsonl" in str(e) and "required artifact" in str(e)
+        # §49.3: replay.json is required UNCONDITIONALLY (the requirement cannot derive from the offset
+        # scalar it guards) — a bundle without the mapping fails regardless of the offset value.
+        m4 = {"files": {"labels.json": {"sha256": "x"}, "suricata-alerts.jsonl": {"sha256": "y", "doc_count": 0},
+                        "cernity-findings.jsonl": {"sha256": "z", "doc_count": 0}}}
+        for off in (0.0, 211.9):
+            try:
+                run.require_scorer_inventory(d, m4, replay_offset=off)
+                assert False, "missing replay.json must fail regardless of offset"
+            except SystemExit as e:
+                assert "replay.json" in str(e) and "required artifact" in str(e)
 
 
 def test_wait_for_completion_returns_counts_with_valid_empty_optional():
@@ -155,6 +271,141 @@ def test_classify_completion_reconciled():
     # (delivery not accounted), never a silent [] that could be mistaken for a reconciled run.
     assert c["state"] == "inputs_drained"
     assert any("delivery not accounted" in u for u in c["unresolved"])
+
+
+def test_reconcile_source_coverage():
+    # §49.3: feeder must consume ALL Suricata output with no mid-feed loss/dup (count fallback).
+    assert run.reconcile_source_coverage(100, {"read_events": 100, "fed_events": 100})[0]
+    ok, p = run.reconcile_source_coverage(100, {"read_events": 100, "fed_events": 97})  # dropped
+    assert not ok and "dropped/duplicated" in p[0]
+    ok2, p2 = run.reconcile_source_coverage(100, {"read_events": 95, "fed_events": 95})  # omission
+    assert not ok2 and "omission" in p2[0]
+    assert not run.reconcile_source_coverage(100, None)[0]                               # no manifest -> unverified
+
+
+def test_source_identity_catches_equal_count_omission_plus_dup():
+    # §59.1: the case a COUNT check misses — one record omitted and another duplicated so totals still
+    # match. Identity digests differ, so the reconciler catches it.
+    src = [{"flow_id": i, "event_type": "flow", "src_ip": "10.0.0.1"} for i in range(5)]
+    src_digest = run._identity_digest([run._event_identity(e) for e in src])
+    # feeder read a set with flow_id 4 dropped but flow_id 0 duplicated -> same COUNT (5), different set
+    corrupt = [src[0], src[0], src[1], src[2], src[3]]
+    read_digest = run._identity_digest([run._event_identity(e) for e in corrupt])
+    manifest = {"read_events": 5, "fed_events": 5,
+                "read_identity_digest": read_digest, "fed_identity_digest": read_digest}
+    ok, probs = run.reconcile_source_coverage(5, manifest, source_id_digest=src_digest)
+    assert not ok and any("omission/substitution" in p for p in probs)
+    # a clean feed with matching identities reconciles
+    good = {"read_events": 5, "fed_events": 5, "read_identity_digest": src_digest, "fed_identity_digest": src_digest}
+    assert run.reconcile_source_coverage(5, good, source_id_digest=src_digest)[0]
+    # mid-feed drop/dup: fed digest != read digest
+    bad_feed = {"read_events": 5, "fed_events": 5, "read_identity_digest": src_digest,
+                "fed_identity_digest": read_digest}
+    ok2, probs2 = run.reconcile_source_coverage(5, bad_feed, source_id_digest=src_digest)
+    assert not ok2 and any("dropped/duplicated" in p for p in probs2)
+
+
+def test_reconcile_obligations_per_destination():
+    # §49.3: every destination must account for >= the dispatched-findings inventory.
+    lifecycle = {"delivered_now": 8, "finalized": 0}
+    full = {"sinks": [{"name": "es", "delivered": 8, "dead_lettered": 0}]}
+    assert run.reconcile_obligations(lifecycle, full)[0]
+    under = {"sinks": [{"name": "es", "delivered": 3, "dead_lettered": 0}]}
+    ok, probs = run.reconcile_obligations(lifecycle, under)
+    assert not ok and "under-accounted" in probs[0]
+    # §57.5: None lifecycle is UNKNOWN (blocks), NOT a silent N/A success (see the dedicated test below)
+    assert not run.reconcile_obligations(None, full)[0]
+
+
+def test_reconcile_obligations_counts_suppressed():
+    # Delivery-suppressed findings (withheld from the analyst plane, kept for correlation) are a terminal
+    # disposition carrying NO per-sink ledger record — their count comes from the forwarder receipt and
+    # must be credited, else a healthy run that suppresses low-severity findings false-flags as a gap.
+    lifecycle = {"delivered_now": 39, "finalized": 0}
+    ledger = {"sinks": [{"name": "opensearch", "delivered": 3, "dead_lettered": 0}]}
+    assert not run.reconcile_obligations(lifecycle, ledger)[0]                     # 3 < 39 without suppressed
+    assert run.reconcile_obligations(lifecycle, ledger, suppressed=36)[0]          # 3 + 36 = 39 -> balanced
+    # a genuine gap still trips even with suppression credited
+    assert not run.reconcile_obligations(lifecycle, ledger, suppressed=30)[0]      # 3 + 30 = 33 < 39
+
+
+def test_reconcile_obligations_fails_closed_on_missing_evidence():
+    # §57.5: the defects Codex's probe found must now FAIL, not silently pass.
+    lifecycle = {"delivered_now": 39, "finalized": 0}
+    # empty sink list while work was dispatched -> UNKNOWN destination, not success
+    ok, probs = run.reconcile_obligations(lifecycle, {"sinks": []}, suppressed=0)
+    assert not ok and "NO sink outcomes" in probs[0]
+    # None lifecycle -> UNKNOWN, not N/A success
+    assert not run.reconcile_obligations(None, {"sinks": [{"name": "es", "delivered": 1}]})[0]
+    # an expected sink absent from the ledger -> fail (a missing sink cannot be assumed delivered)
+    ok2, probs2 = run.reconcile_obligations(
+        lifecycle, {"sinks": [{"name": "opensearch", "delivered": 3, "dead_lettered": 0}]},
+        suppressed=36, expected_sinks=["opensearch", "devo"])
+    assert not ok2 and any("devo" in p for p in probs2)
+
+
+def test_ledger_disposition_counts_suppressed_identities():
+    # §59.1: suppressed records ('(withheld)', outcome 'suppressed') are counted by (finding_id, revision)
+    # identity, not treated as a real sink; a duplicate identity does not double-count.
+    recs = [{"finding_id": "a", "revision": 1, "dest": "opensearch", "outcome": "delivered"},
+            {"finding_id": "b", "revision": 1, "dest": "(withheld)", "outcome": "suppressed"},
+            {"finding_id": "b", "revision": 1, "dest": "(withheld)", "outcome": "suppressed"},  # dup replay
+            {"finding_id": "c", "revision": 2, "dest": "(withheld)", "outcome": "suppressed"}]
+    d = run.ledger_disposition(recs)
+    assert d["suppressed_identities"] == 2                       # b:1 and c:2, dup collapsed
+    assert [s["name"] for s in d["sinks"]] == ["opensearch"]     # no '(withheld)' sink
+    # reconcile prefers the ledger identity count over the aggregate receipt arg
+    lifecycle = {"delivered_now": 3, "finalized": 0}
+    assert run.reconcile_obligations(lifecycle, d, suppressed=999)[0]   # 1 delivered + 2 suppressed-identity = 3
+
+
+def test_reconcile_obligations_zero_and_all_suppressed():
+    # explicit zero expected work reconciles; an all-suppressed run (net 0) reconciles with no sink record
+    assert run.reconcile_obligations({"delivered_now": 0, "finalized": 0}, {"sinks": []})[0]
+    assert run.reconcile_obligations({"delivered_now": 12, "finalized": 0}, {"sinks": []}, suppressed=12)[0]
+
+
+def test_ledger_partial_accounting_does_not_reconcile():
+    # §36.3: a NONEMPTY ledger accounting for FEWER than the receipt's live deliveries is partial and
+    # must NOT reconcile (one terminal record among 100 live items must fail closed).
+    receipt = {"consumed": 100, "suppressed": 0, "delivered_live": 100,
+               "sinks": [{"name": "es", "delivered": 100, "dead_lettered": 0}]}
+    partial = {"sinks": [{"name": "es", "delivered": 1, "dead_lettered": 0}], "delivered": 1, "dead_lettered": 0}
+    ok, detail = run._ledger_accounted(partial, receipt)
+    assert not ok and "partial" in detail                         # per-destination under-accounting (§39.2)
+    full = {"sinks": [{"name": "es", "delivered": 100, "dead_lettered": 0}], "delivered": 100, "dead_lettered": 0}
+    assert run._ledger_accounted(full, receipt)[0]                # complete ledger reconciles
+    # run8 non-racing case: receipt live=0 (stale/suppressed) but ledger has real deliveries -> reconcile
+    stale = {"consumed": 1, "suppressed": 1, "delivered_live": 0, "sinks": [{"name": "es", "delivered": 0, "dead_lettered": 0}]}
+    assert run._ledger_accounted({"delivered": 3, "dead_lettered": 0, "sinks": [{"name": "es", "delivered": 3, "dead_lettered": 0}]}, stale)[0]
+
+
+def test_classify_completion_blocks_on_ledger_receipt_conflict():
+    # §39.2 BLOCKER: an available ledger that FAILS reconciliation must NOT be overridden by an
+    # internally-balanced receipt. 1-delivery ledger vs 100-live receipt -> inputs_drained (conflict).
+    receipt = {"consumed": 100, "suppressed": 0, "delivered_live": 100,
+               "sinks": [{"name": "es", "delivered": 100, "dead_lettered": 0}]}
+    partial = run.ledger_disposition([{"finding_id": "f1", "revision": 1, "dest": "es", "outcome": "delivered"}])
+    c = run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                sink_receipt=receipt, ledger=partial)
+    assert c["state"] == "inputs_drained"                         # NOT reconciled despite the balanced receipt
+    assert any("delivery CONFLICT" in u for u in c["unresolved"])
+    # a COMPLETE ledger with the same receipt reconciles
+    full = run.ledger_disposition([{"finding_id": f"f{i}", "revision": 1, "dest": "es", "outcome": "delivered"} for i in range(100)])
+    assert run.classify_completion({"suricata-offline": 0, "arm-b-feeder": 0}, {"g1": 0, "g2": 0},
+                                   {"arm-a-suricata": 100}, expected_producers=_P, expected_groups=_G,
+                                   sink_receipt=receipt, ledger=full)["state"] == "reconciled"
+
+
+def test_ledger_missing_destination_does_not_reconcile():
+    # §39.2/§39.5 per-destination loss: two required sinks, ledger records only one -> not accounted
+    # (a global total would hide the missing sink).
+    receipt = {"consumed": 8, "suppressed": 0, "delivered_live": 8,
+               "sinks": [{"name": "es", "delivered": 8, "dead_lettered": 0}, {"name": "splunk", "delivered": 8, "dead_lettered": 0}]}
+    ledger = {"delivered": 8, "dead_lettered": 0, "sinks": [{"name": "es", "delivered": 8, "dead_lettered": 0}]}
+    ok, detail = run._ledger_accounted(ledger, receipt)
+    assert not ok and "splunk" in detail                          # missing destination caught
 
 
 def test_empty_ledger_does_not_reconcile_without_zero_proof():
@@ -563,6 +814,10 @@ def test_score_from_export_reconciles_with_live_scoring():
         with open(lp, "w") as f:
             json.dump(labels, f)
         _files["labels.json"] = {"sha256": run._sha256(lp)}
+        rp = os.path.join(od, "replay.json")                     # §49.3: transform mapping always present
+        with open(rp, "w") as f:
+            json.dump({"replay_offset_seconds": 0.0, "anchor": "none"}, f)
+        _files["replay.json"] = {"sha256": run._sha256(rp)}
         with open(os.path.join(od, "export-manifest.json"), "w") as f:  # verified before scoring
             json.dump({"consistency_basis": "test", "files": _files,
                        "bundle_digest": run._bundle_digest(_files)}, f)

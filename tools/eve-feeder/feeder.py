@@ -11,7 +11,8 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 TOPICS = {"flow": "suricata.flow.v1", "dns": "suricata.dns.v1",
-          "tls": "suricata.tls.v1", "http": "suricata.http.v1"}
+          "tls": "suricata.tls.v1", "http": "suricata.http.v1",
+          "modbus": "suricata.modbus.v1"}
 
 
 def route(event):
@@ -140,6 +141,11 @@ def main(*paths):
     if not os.environ.get("CERNITY_FEED_NO_ANCHOR"):
         events, shift = reanchor(events, anchor="start" if paced else "end")
         _record_replay(shift, "start" if paced else "end")
+    else:
+        # §49.3: ALWAYS write the replay artifact — even when NOT reanchoring, record offset 0. The scorer
+        # then requires the mapping unconditionally, so a transformed run cannot drop replay.json to escape
+        # its own requirement (the replay-inventory circularity). A missing artifact is a real gap.
+        _record_replay(0.0, "none")
     p = KafkaProducer(bootstrap_servers=os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092"),
                       value_serializer=lambda v: json.dumps(v).encode(),
                       **_security_kwargs())
@@ -167,7 +173,68 @@ def main(*paths):
             p.send(topic, key=key, value=ev)
             n += 1
     p.flush()
+    _record_feed_manifest(paths, events, n)
     print(f"fed {n} events{' (paced)' if paced else ''}")
+
+
+import hashlib as _hashlib
+
+IDENTITY_SCHEME = "v1:flow5tuple"          # §59.1: canonical per-event identity (survives re-serialization)
+_ID_CAP = 200_000                          # cap the stored id list; the digest still covers every event
+
+
+def _event_identity(e):
+    """A canonical per-event identity: the normalized event content with the REANCHORED fields removed.
+    The feeder shifts `timestamp` and `flow.start`/`flow.end` in memory for Arm B, while the harness's
+    source set (cat of the original eve files) still holds the original clock — so those fields MUST be
+    excluded or every record would appear omitted. Everything else (flow_id, 5-tuple, dns query, alert
+    signature, bytes, …) is retained, so an omission and a duplicate no longer cancel. Two records
+    identical except for their clock collide (documented; real Suricata records differ by flow_id)."""
+    e2 = {k: v for k, v in e.items() if k != "timestamp"}
+    fl = e2.get("flow")
+    if isinstance(fl, dict):
+        e2["flow"] = {k: v for k, v in fl.items() if k not in ("start", "end")}
+    return _hashlib.sha1(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def _identity_digest(ids):
+    """Order-independent MULTISET digest: sort so a permutation matches, but a drop/dup changes it."""
+    h = _hashlib.sha256()
+    for i in sorted(ids):
+        h.update(i.encode()); h.update(b"\n")
+    return h.hexdigest()
+
+
+def _record_feed_manifest(paths, events, fed):
+    """§49.3/§59.1 source coverage: record the feeder's canonical input inventory — per-source-file
+    counts, totals, AND the per-event identity multiset (as a digest, plus the raw ids when under the
+    cap). The harness reconciles the feeder's read set against Suricata's produced set by IDENTITY, so an
+    equal-count omission+duplication (which cancels under a count check) is caught. Written to
+    CERNITY_FEED_MANIFEST_OUT (default /eve/feed-manifest.json when writable)."""
+    out = os.environ.get("CERNITY_FEED_MANIFEST_OUT", "/eve/feed-manifest.json").strip()
+    if not out:
+        return
+    by_file = {}
+    for pth in paths:
+        try:
+            by_file[os.path.basename(pth)] = sum(1 for l in open(pth) if l.strip())
+        except OSError:
+            by_file[os.path.basename(pth)] = None
+    read_ids = [_event_identity(e) for e in events]
+    fed_ids = read_ids[:fed]                                 # the events actually sent (all, unless a send failed)
+    payload = {"read_events": len(events), "fed_events": fed, "by_source_file": by_file,
+               "identity_scheme": IDENTITY_SCHEME,
+               "read_identity_digest": _identity_digest(read_ids),
+               "fed_identity_digest": _identity_digest(fed_ids),
+               "recorded_at": datetime.now(timezone.utc).isoformat()}
+    if len(read_ids) <= _ID_CAP:                            # keep raw ids for a precise set-diff at bench scale
+        payload["read_ids"] = read_ids
+        payload["fed_ids"] = fed_ids
+    try:
+        with open(out, "w") as f:
+            json.dump(payload, f)
+    except OSError as e:
+        print(f"! could not record feed manifest to {out}: {e}")
 
 
 if __name__ == "__main__":

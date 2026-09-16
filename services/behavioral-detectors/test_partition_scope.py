@@ -147,6 +147,23 @@ def test_exfil_fires_from_evaluate():
     assert any(e.get("type") == "bytes" for e in json.loads(exfils[0]["entities"]))
 
 
+def test_exfil_carries_observed_interval():
+    # R06: the exfil finding must carry the OBSERVED activity interval (event times) with observed=True,
+    # separate from emission time — so it is temporally attributable to its episode, not scored ambiguous.
+    _fresh()
+    base = time.time() - 200                                # exfil flows ~200s ago (in-window)
+    for i in range(3):
+        app._handle({"event_type": "flow", "src_ip": "10.0.0.1", "dest_ip": "203.0.113.9",
+                     "flow": {"start": app._rfc3339(base + i * 10), "bytes_toserver": 100_000_000}},
+                    _P(), time.time(), part=0)
+    p = _P(); app.evaluate(p, flow_parts={0}, dns_parts=set())
+    exfil = next(m for m in p.sent if m["detector_id"] == "exfil")
+    assert exfil["observed"] is True
+    fs, ls = app._epoch(exfil["first_seen"]), app._epoch(exfil["last_seen"])
+    assert abs(fs - base) < 1.0 and abs(ls - (base + 20)) < 1.0        # observed bounds, not "now"
+    assert app._epoch(exfil["emitted_at"]) - ls > 100                  # emitted well after last observed
+
+
 def test_rare_dest_cold_burst_matches_inline():
     """Plan 007 U5 (the review's crux case): a src contacting many NEW external dsts
     in one window -- baseline accrued WITHIN the window -- must emit for every dst

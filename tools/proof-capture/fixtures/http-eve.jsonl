@@ -1,0 +1,7 @@
+{"timestamp":"2026-01-01T00:00:00+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/uploads/shell.php?cmd=id","hostname":"vhost","http_content_type":"text/html"}}
+{"timestamp":"2026-01-01T00:00:01+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/item?id=1' or '1'='1","hostname":"vhost"}}
+{"timestamp":"2026-01-01T00:00:02+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/ping?host=8.8.8.8;cat /etc/shadow","hostname":"vhost"}}
+{"timestamp":"2026-01-01T00:00:03+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/download?f=../../../../etc/passwd","hostname":"vhost"}}
+{"timestamp":"2026-01-01T00:00:04+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/login?user=admin&password=hunter2","hostname":"vhost"}}
+{"timestamp":"2026-01-01T00:00:05+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"PUT","url":"/webdav/x.jsp","hostname":"vhost"}}
+{"timestamp":"2026-01-01T00:00:06+00:00","event_type":"http","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","dest_port":80,"http":{"http_method":"GET","url":"/index.html","hostname":"vhost","http_content_type":"text/html"}}

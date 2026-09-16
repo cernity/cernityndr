@@ -101,6 +101,19 @@ def _consumer_config(group_id, **overrides):
     env_reset = os.environ.get("NDR_OFFSET_RESET")
     if env_reset:                                # ...but an explicit env setting wins over that
         conf["auto_offset_reset"] = env_reset
+    # §57.6: treat an EMPTY value and an INVALID-EXPLICIT value differently.
+    #  - Empty/unset (the `${NDR_OFFSET_RESET-}` compose passthrough, or a service override that read it)
+    #    is a benign "not configured" -> fall back to the base default. Left as "" it is an INVALID reset
+    #    policy that crash-loops the consumer on NoOffsetForPartitionError (silent zero output).
+    #  - A NON-EMPTY typo (e.g. "earliest " / "erliest") is a real misconfiguration. Do NOT silently
+    #    coerce it to `latest` — that would quietly skip existing history for a new group. Fail LOUDLY at
+    #    construction with a clear message so the operator fixes it, not an opaque partition error later.
+    reset = conf.get("auto_offset_reset")
+    if reset in ("", None):
+        conf["auto_offset_reset"] = "latest"
+    elif reset not in ("latest", "earliest", "none"):
+        raise ValueError(f"invalid auto_offset_reset {reset!r}: expected latest|earliest|none "
+                         "(check NDR_OFFSET_RESET; leave it empty to default to latest)")
     return conf
 
 

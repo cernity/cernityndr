@@ -23,6 +23,14 @@
       "items": { "type": "object" }
     },
     "evidence_refs": { "type": "array", "items": { "type": "string" } },
+    "summary": {
+      "type": "object",
+      "description": "Central-enrichment (Zeek) summary merged onto the finding on ENRICHED (U11): bounded conn/tls/x509/http/ssh/file/smb/kerberos rollups. Producer-bounded (details capped); absent unless enrichment succeeded."
+    },
+    "iocs": {
+      "type": "object",
+      "description": "Indicators extracted from the enrichment summary (file hashes, ja3/ja4/ja4s/ja4h/ja4ssh, self-signed certs). Lists are unioned across enrichments; absent unless enrichment succeeded."
+    },
     "mitre": {
       "type": "array",
       "description": "MITRE ATT&CK mapping when defensible (v2 §17).",

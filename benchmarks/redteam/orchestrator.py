@@ -155,6 +155,16 @@ def run_campaign(spec, out_dir, run=None, clock=None, capture=None):
     finally:
         if cap is not None:
             cap_status = cap.stop()
+    # §43.4-2: bind labels to the captured pcap by HASH at capture completion, plus a capture-run id, so a
+    # later score verifies labels ↔ pcap by content (not just temporal overlap) and cannot be run against
+    # a pcap from a different capture.
+    if cap_status and cap_status.get("path") and os.path.isfile(cap_status["path"]):
+        import hashlib, uuid
+        h = hashlib.sha256()
+        with open(cap_status["path"], "rb") as f:
+            for c in iter(lambda: f.read(1 << 20), b""):
+                h.update(c)
+        cap_status = {**cap_status, "pcap_sha256": h.hexdigest(), "capture_run_id": uuid.uuid4().hex}
     labels = build_labels(results, spec["dataset"], spec.get("granularity", "host"), cap_status)
     with open(os.path.join(out_dir, "labels.json"), "w") as f:
         json.dump(labels, f, indent=2, sort_keys=True)

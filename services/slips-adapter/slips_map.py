@@ -4,8 +4,9 @@ SLIPS emits an alert only after accumulated evidence for a (profile, timewindow)
 crosses its threshold, so every alert here is already a high-fidelity, per-host
 verdict -- the fidelity level Cernity wants (alerts, not raw evidence). We
 translate that verdict into the candidate contract (contracts/finding.schema.json)
-tagged detector_id=slips_ml and let finding-service run it through the same
-lifecycle as any heuristic candidate. ML-only alerts become their own findings;
+tagged by provenance (slips_ml known-ML module / slips_intel lookup / slips_alert
+unknown) and let finding-service run it through the same lifecycle as any heuristic
+candidate. ML-only alerts become their own findings;
 correlating a SLIPS verdict with an agreeing heuristic finding (merge & boost) is
 a separate concern that needs cross-detector state -- not done here.
 
@@ -78,23 +79,39 @@ def _stable(s):
 _NON_ML_MODULES = ("threatintel", "blacklist", "riskiq", "spamhaus", "abuse.ch",
                    "cesnet", "urlhaus", "whitelist")
 
+# Known SLIPS behavioral/ML modules — their alert IS an analytical verdict independent of
+# Cernity's heuristics (the ML side of an ML×heuristic corroboration, F12). Kept explicit so
+# we only claim "ML" where we actually have that provenance.
+_ML_MODULES = ("flowml", "flowmldetection", "rnn_cc", "rnn", "cc_detection")
+
 
 def _module(alert):
     """SLIPS detecting module/model (provenance). SLIPS carries it as `module`/`by`; fall
-    back to scanning the free-text Note/Description for a known lookup module name."""
+    back to scanning the free-text Note/Description for a known module name (lookup or ML)."""
     m = alert.get("module") or alert.get("by")
     if m:
         return str(m)
     text = f"{alert.get('Note', '')} {alert.get('Description', '')}".lower()
-    return next((tok for tok in _NON_ML_MODULES if tok in text), "")
+    return next((tok for tok in _NON_ML_MODULES + _ML_MODULES if tok in text), "")
+
+
+def classify_module(module):
+    """(detector_id, is_ml) from the module provenance (§6.7.5). A known blocklist/threat-intel
+    LOOKUP -> slips_intel (not ML, not independent). A known behavioral/ML module -> slips_ml. An
+    UNKNOWN or MISSING module -> slips_alert: honest neutral, NOT asserted as machine learning —
+    so correlation never counts unknown provenance as the ML side of a corroboration."""
+    m = (module or "").lower()
+    if any(tok in m for tok in _NON_ML_MODULES):
+        return "slips_intel", False
+    if any(tok in m for tok in _ML_MODULES):
+        return "slips_ml", True
+    return "slips_alert", False
 
 
 def is_ml_evidence(module):
-    """True unless the module is a known blocklist / threat-intel LOOKUP (F12). SLIPS's
-    behavioral/ML modules (flow-ML, RNN C&C, scan/behavioral) are its analytical verdict,
-    independent of Cernity's heuristics; a blocklist lookup is neither ML nor independent."""
-    m = (module or "").lower()
-    return not any(tok in m for tok in _NON_ML_MODULES)
+    """True ONLY for a known SLIPS behavioral/ML module (§6.7.5 / F12): unknown provenance and
+    lookups are not ML, so they cannot falsely corroborate a heuristic as ML×heuristic agreement."""
+    return classify_module(module)[1]
 
 
 def alert_to_candidate(alert, tenant, version="1.0"):
@@ -110,15 +127,15 @@ def alert_to_candidate(alert, tenant, version="1.0"):
     aid = str(alert.get("ID") or _stable(f"{attacker}:{alert.get('DetectTime', '')}:{desc}"))
 
     module = _module(alert)
-    ml = is_ml_evidence(module)
-    # detector_id encodes ML-ness so correlation counts only genuine ML evidence as the ML
-    # side of a corroboration (F12); the module string carries the provenance.
-    detector = "slips_ml" if ml else "slips_intel"
+    # detector_id encodes provenance so correlation counts only genuine ML evidence as the ML
+    # side of a corroboration (F12); unknown/missing module -> neutral slips_alert (§6.7.5).
+    detector, ml = classify_module(module)
+    etype = {"slips_ml": "ml", "slips_intel": "intel"}.get(detector, "slips")
 
     ents = [{"type": "ip", "role": "attacker", "value": attacker}]
     if victim:
         ents.append({"type": "ip", "role": "victim", "value": victim})
-    ents.append({"type": "ml" if ml else "intel", "source": "slips", "module": module,
+    ents.append({"type": etype, "source": "slips", "module": module,
                  "threat_level": tl, "description": desc})
 
     now = _idea_time(alert) or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

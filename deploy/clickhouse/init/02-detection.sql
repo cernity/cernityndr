@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS ndr.finding
     capture_job_ids     Array(String),
     suppression_reason  String,
     devo_delivery_state LowCardinality(String),
+    summary             String DEFAULT '',        -- JSON: central-enrichment (Zeek) summary (U4)
+    iocs                String DEFAULT '',         -- JSON: extracted IOCs (U4)
+    source_events       String DEFAULT '',         -- JSON: originating Suricata EVE — baseline provenance (U4)
     revision            UInt16 DEFAULT 1,         -- R03: monotonic lifecycle revision (state_machine.py)
     ingested_at         DateTime64(3) DEFAULT now64(3)  -- ReplacingMergeTree version: idempotent re-persist of the SAME revision
 )
@@ -49,3 +52,8 @@ TTL first_seen + INTERVAL 180 DAY;             -- findings kept longer than raw
 --   ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3) DEFAULT now64(3);
 --   -- then: CREATE ndr.finding_v2 (... ORDER BY (tenant_id, category, finding_id, revision)),
 --   --       INSERT INTO ndr.finding_v2 SELECT * FROM ndr.finding, EXCHANGE TABLES.
+-- U4: enrichment + provenance JSON columns. ADD COLUMN IF NOT EXISTS needs no rebuild (unlike the
+-- ORDER BY change above), so these run live and idempotently upgrade an existing table.
+ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS summary String DEFAULT '';
+ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS iocs String DEFAULT '';
+ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS source_events String DEFAULT '';

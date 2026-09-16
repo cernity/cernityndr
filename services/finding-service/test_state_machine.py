@@ -126,6 +126,17 @@ def test_lifecycle_issues_monotonic_revisions():
     assert timed_out["revision"] == 2
 
 
+def test_source_events_survive_lifecycle():
+    # U4: provenance rides through the lifecycle unchanged and gates no decision (R6).
+    se = [{"event_type": "quic", "community_id": "1:z=", "record": {"quic": {"ja4": "q13d.."}}}]
+    f, route = sm.build_finding(dict(SCAN, severity=7, source_events=se))
+    assert f["source_events"] == se                              # carried onto the finding
+    assert f["detector_id"] == SCAN["detector_id"]               # verdict unchanged
+    enriched = sm.apply_enrichment_result(f, {"status": "ok", "evidence_refs": []})
+    assert enriched["source_events"] == se                       # preserved through enrichment
+    assert sm.finalize_timeout(f)["source_events"] == se         # preserved through timeout finalize
+
+
 def test_finding_id_deterministic_for_dedup():
     # Same window/scanner -> same id -> ClickHouse ReplacingMergeTree dedups.
     a, _ = sm.build_finding(SCAN)

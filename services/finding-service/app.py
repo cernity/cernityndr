@@ -52,6 +52,9 @@ COLS = ["finding_id", "tenant_id", "sensor_ids", "detector_id", "detector_versio
         "category", "severity", "confidence", "first_seen", "last_seen", "entities",
         "evidence_refs", "mitre", "state", "enrichment_state", "capture_job_ids",
         "suppression_reason", "devo_delivery_state",
+        # U4: enrichment + baseline provenance, persisted as JSON strings so they survive restart
+        # recovery (the in-memory dict carries objects; _row serializes, _pending_from_rows parses back).
+        "summary", "iocs", "source_events",
         # R03: persist the lifecycle revision so each transition is a DISTINCT, searchable row
         # (the table's sort key is revision-scoped); ingested_at is the ReplacingMergeTree version
         # so re-persisting the SAME revision (Kafka replay) is idempotent.
@@ -86,6 +89,10 @@ def _row(f: dict) -> list:
         r[k] = r.get(k) or []
     for k in ("entities", "suppression_reason", "enrichment_state", "devo_delivery_state"):
         r[k] = r.get(k) or ""
+    # U4: enrichment/provenance objects -> JSON String columns (entities is already a wire string).
+    for k in ("summary", "iocs", "source_events"):
+        v = r.get(k)
+        r[k] = json.dumps(v) if v not in (None, "", [], {}) else ""
     return [r.get(c) for c in COLS]
 
 
@@ -112,6 +119,17 @@ def _pending_from_rows(rows, deadline_secs, now):
     pending = {}
     for r in rows:
         f = dict(r)
+        # U4: JSON String columns -> objects (or drop when empty), so a recovered finding carries
+        # the same shapes a live one does through re-finalization and delivery.
+        for k in ("summary", "iocs", "source_events"):
+            v = f.get(k)
+            if isinstance(v, str) and v:
+                try:
+                    f[k] = json.loads(v)
+                except (ValueError, TypeError):
+                    pass
+            elif v in ("", None):
+                f.pop(k, None)
         fid = f.get("finding_id")
         if not fid or f.get("enrichment_state") not in _UNFINALIZED:
             continue

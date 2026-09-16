@@ -81,6 +81,13 @@ def to_cef(finding, vendor="Cernity", product="NDR", version="1.0"):
     if refs:
         ext["flexString1"] = refs[0]
         ext["flexString1Label"] = "evidence"
+    # provenance pivot: CEF carries only the community_id (from the finding's source_events) — the
+    # full originating EVE (source_events) rides the JSON/ES sink; CEF is a documented subset.
+    se = finding.get("source_events") or []
+    cid = se[0].get("community_id") if se and isinstance(se[0], dict) else None
+    if cid:
+        ext["cs5"] = cid
+        ext["cs5Label"] = "communityId"
     ext_str = " ".join(f"{k}={_escape_ext(v)}" for k, v in ext.items() if v != "")
     header = f"CEF:0|{vendor}|{product}|{version}|{_escape(detector)}|{_escape(name)}|{sev}|"
     return header + ext_str

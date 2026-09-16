@@ -1,0 +1,19 @@
+{
+  "note": "Deterministic scoring rubric (§44.5). The escalation rule and evidence requirements are fixed here, BEFORE runs. An optional model judge may flag narrative quality but never manufactures labels or overrides these checks.",
+  "escalation": {
+    "critical_categories": ["c2", "exfil", "lateral"],
+    "severity_escalate_at": 7,
+    "rule": "escalate iff disposition is malicious AND (incident_category in critical_categories OR max cited severity >= severity_escalate_at)"
+  },
+  "evidence": {
+    "require_citation_for_escalation": true,
+    "citation_must_exist": true,
+    "citation_must_support_entity": true
+  },
+  "scoring": {
+    "disposition": {"correct": 1.0, "wrong": 0.0, "unknown": 0.0},
+    "scope": "f1 over affected_entities (precision*recall harmonic mean)",
+    "evidence_quality": "fraction of cited record_ids that exist AND reference a claimed affected entity",
+    "unsupported_penalty": "an escalation with zero valid citations scores evidence_quality 0 and is a false-escalation candidate"
+  }
+}

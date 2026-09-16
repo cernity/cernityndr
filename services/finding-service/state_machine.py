@@ -70,6 +70,14 @@ def decide_enrichment(cand: dict) -> str:
     # findings (c2/exfil/dns_tunnel) still adjudicate via capture when low-confidence.
     if cat in ("recon", "discovery", "credential_access", "lateral", "impact", "defense_evasion"):
         return "metadata_sufficient"
+    # Distributed low-and-slow exfil is a STRUCTURAL conclusion, not ambiguous content: the detector
+    # already established the signature from flow metadata (bytes spread across >= N materially-
+    # contributing flows, §49.4). Like the other structural detections above, deliver it DIRECTLY so it
+    # is not lost — or delayed to the enrichment-timeout sweep — in a deployment with no forensics
+    # overlay (the Parser->Cernity->SIEM MDR path). The burst exfil_check ('exfil' detector) is a
+    # different case and keeps its content-adjudication route below.
+    if det == "low_slow_exfil":
+        return "metadata_sufficient"
     if det == "ndpi_risk":
         return "metadata_sufficient"     # low-confidence feature; corroboration escalates, not capture
     if conf >= 0.9:
@@ -137,11 +145,29 @@ def build_finding(cand: dict) -> tuple[dict, str]:
 
 def apply_enrichment_result(finding: dict, result: dict) -> dict:
     """Merge an enrichment result (U11) back onto a CAPTURE_REQUESTED finding.
-    A failed enrichment still FINALizes — it never drops the finding (v2 §17)."""
+    A failed enrichment still FINALizes — it never drops the finding (v2 §17).
+
+    Propagates the Zeek worker's `summary` and extracted `iocs` onto the finding, not just
+    evidence_refs — otherwise the analyst never sees them in the SIEM (the reviewed gap). The
+    worker already bounds its result (details[:50], hash sets), so this trusts that ceiling rather
+    than re-truncating. Idempotent on a duplicate/late result: evidence_refs are deduped and iocs
+    lists are unioned, never clobbering a prior enrichment (R03)."""
     f = dict(finding)
     if result.get("status") == "ok":
         f["enrichment_state"] = "ENRICHED"
-        f["evidence_refs"] = list(f.get("evidence_refs", [])) + result.get("evidence_refs", [])
+        seen = list(f.get("evidence_refs", []))
+        for r in result.get("evidence_refs", []):
+            if r not in seen:
+                seen.append(r)
+        f["evidence_refs"] = seen
+        if isinstance(result.get("summary"), dict):
+            f["summary"] = result["summary"]                  # Zeek conn/tls/x509/http/ssh/file/smb/krb summary
+        iocs = result.get("iocs")
+        if isinstance(iocs, dict):
+            merged = dict(f.get("iocs") or {})                # union with any prior enrichment's iocs
+            for k, v in iocs.items():
+                merged[k] = sorted(set(merged.get(k, [])) | set(v)) if isinstance(v, list) else v
+            f["iocs"] = merged
     else:
         f["enrichment_state"] = "ENRICHMENT_FAILED"
     f["state"] = "FINAL"

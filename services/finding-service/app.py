@@ -51,7 +51,11 @@ ENRICH_TIMEOUT_SECS = float(os.environ.get("NDR_ENRICH_TIMEOUT_SECS", "120"))
 COLS = ["finding_id", "tenant_id", "sensor_ids", "detector_id", "detector_version",
         "category", "severity", "confidence", "first_seen", "last_seen", "entities",
         "evidence_refs", "mitre", "state", "enrichment_state", "capture_job_ids",
-        "suppression_reason", "devo_delivery_state"]
+        "suppression_reason", "devo_delivery_state",
+        # R03: persist the lifecycle revision so each transition is a DISTINCT, searchable row
+        # (the table's sort key is revision-scoped); ingested_at is the ReplacingMergeTree version
+        # so re-persisting the SAME revision (Kafka replay) is idempotent.
+        "revision", "ingested_at"]
 
 _running = True
 
@@ -74,6 +78,10 @@ def _row(f: dict) -> list:
     r["last_seen"] = _dt(r.get("last_seen"))
     r["severity"] = int(r.get("severity", 0) or 0)
     r["confidence"] = float(r.get("confidence", 0) or 0)
+    r["revision"] = int(r.get("revision") or 1)              # R03: durable per-revision row
+    # ReplacingMergeTree version — the moment THIS revision was persisted. A re-persist of the
+    # same (finding_id, revision) collapses to the latest insert; a new revision is a new row.
+    r["ingested_at"] = datetime.now(timezone.utc)
     for k in ("sensor_ids", "evidence_refs", "mitre", "capture_job_ids"):
         r[k] = r.get(k) or []
     for k in ("entities", "suppression_reason", "enrichment_state", "devo_delivery_state"):
@@ -84,6 +92,53 @@ def _row(f: dict) -> list:
 def _persist(ch, finding):
     if ch is not None:
         ch.insert("ndr.finding", [_row(finding)], column_names=COLS)
+
+
+# Enrichment states that mean a capture-bound finding is STILL awaiting finalization (F14). A finalized
+# finding is ENRICHED / ENRICHMENT_FAILED / TIMEOUT / NOT_REQUIRED and must NOT be reloaded.
+_UNFINALIZED = ("PENDING", "REQUIRED")
+
+
+def _pending_from_rows(rows, deadline_secs, now):
+    """Reconstruct the in-memory `pending` map (F14) from ClickHouse rows — the CURRENT (max-revision)
+    view of each finding whose enrichment is still un-finalized. Keyed by (tenant_id, finding_id) so two
+    tenants sharing an id do not collide (§62.6). A `FINAL` row was a deliver-now confirmed threat
+    (already on the SIEM, awaiting evidence) -> delivered=True; a `CAPTURE_REQUESTED` row is a
+    low-confidence capture-only finding not yet delivered -> delivered=False.
+
+    §62.6 deadline: a recovered finding is given an IMMEDIATE deadline (`now`), NOT a fresh full timeout —
+    it was already pending before the restart, so the next sweep finalizes it promptly. Resetting a full
+    window on every restart could postpone delivery indefinitely across a crash loop. Pure (no I/O)."""
+    pending = {}
+    for r in rows:
+        f = dict(r)
+        fid = f.get("finding_id")
+        if not fid or f.get("enrichment_state") not in _UNFINALIZED:
+            continue
+        pending[_pk(f.get("tenant_id"), fid)] = {
+            "finding": f, "delivered": f.get("state") == "FINAL", "deadline": now, "recovered": True}
+    return pending
+
+
+def _load_pending_from_ch(ch, deadline_secs, now):
+    """F14 durable recovery: on startup, reload capture-bound findings that were mid-flight when a prior
+    process stopped, so their finalization obligation survives a restart (previously the in-memory map
+    was lost and a capture-only finding could dangle forever). Returns (pending, recovery_ok): a query
+    FAILURE is OBSERVABLE (recovery_ok=False) so the caller can hold readiness and retry rather than
+    silently claim zero pending (§62.6). ClickHouse disabled -> ({}, True) (nothing to recover)."""
+    if ch is None:
+        return {}, True
+    try:
+        cols = ", ".join(f"argMax({c}, revision) AS {c}" for c in COLS if c != "finding_id")
+        res = ch.query(f"SELECT finding_id, {cols}, max(revision) AS revision "
+                       "FROM ndr.finding GROUP BY finding_id "
+                       "HAVING argMax(enrichment_state, revision) IN ('PENDING','REQUIRED')")
+        names = list(res.column_names)
+        rows = [dict(zip(names, row)) for row in res.result_rows]
+        return _pending_from_rows(rows, deadline_secs, now), True
+    except Exception as e:                                # noqa: BLE001 (recovery must not crash startup)
+        log.error("F14 pending recovery FAILED (holding readiness, will retry): %s", e)
+        return {}, False
 
 
 def _pkey(finding: dict) -> bytes:
@@ -124,6 +179,28 @@ def _emit_finalized(entry, done, producer, geo, ch):
     producer.send(FINAL_TOPIC, done, key=_pkey(done))
 
 
+def _pk(tenant, fid):
+    """§62.6 tenant-safe pending key: (tenant_id, finding_id). Two tenants can legitimately share a
+    finding_id — keying by id ALONE would collide/mix their capture state. tenant_id is the trusted,
+    detector-set field (not attacker traffic content)."""
+    return (tenant or "default", fid)
+
+
+def _pop_pending(pending, tenant, fid):
+    """Pop the pending entry for an enrichment result / capture status. Uses the composite key when the
+    message carries tenant_id; if tenant is absent (a producer that does not echo it), fall back to a
+    finding_id match ONLY when it is unambiguous across tenants — an ambiguous id is left in place and
+    reported, never finalized against the wrong tenant."""
+    if tenant is not None:
+        return pending.pop(_pk(tenant, fid), None)
+    matches = [k for k in pending if k[1] == fid]
+    if len(matches) == 1:
+        return pending.pop(matches[0])
+    if len(matches) > 1:
+        log.warning("ambiguous finalize for finding_id %s across %d tenants — deferring", fid, len(matches))
+    return None
+
+
 def _handle_candidate(cand, producer, geo, pending, deadline_secs, now, ch):
     """Build the finding, deliver-now if it is a confirmed threat, and request capture
     (tracking it for finalization) when packets are needed."""
@@ -133,7 +210,7 @@ def _handle_candidate(cand, producer, geo, pending, deadline_secs, now, ch):
         _deliver_now(finding, producer, geo)
     if route in ("capture", "final_and_capture"):
         producer.send(CAPTURE_TOPIC, sm.capture_job(finding))
-        pending[finding["finding_id"]] = {
+        pending[_pk(finding.get("tenant_id"), finding["finding_id"])] = {
             "finding": finding,
             "delivered": route == "final_and_capture",
             "deadline": now + deadline_secs,
@@ -143,8 +220,8 @@ def _handle_candidate(cand, producer, geo, pending, deadline_secs, now, ch):
 
 def _handle_result(result, producer, geo, pending, ch):
     """An enrichment result (ndr.enrichment.result.v1) attaches evidence and finalizes
-    the pending finding. Unknown/duplicate finding_id is an idempotent no-op."""
-    entry = pending.pop(result.get("finding_id"), None)
+    the pending finding. Unknown/duplicate finding is an idempotent no-op."""
+    entry = _pop_pending(pending, result.get("tenant_id"), result.get("finding_id"))
     if entry is None:
         return
     done = sm.apply_enrichment_result(entry["finding"], result)
@@ -159,7 +236,7 @@ def _handle_status(status, producer, geo, pending, ch):
                or status.get("state") in ("failed", "rejected", "refused"))
     if not refused:
         return
-    entry = pending.pop(status.get("finding_id"), None)
+    entry = _pop_pending(pending, status.get("tenant_id"), status.get("finding_id"))
     if entry is None:
         return
     done = sm.finalize_timeout(entry["finding"])
@@ -170,8 +247,8 @@ def _sweep_timeouts(producer, geo, pending, now, ch):
     """Finalize findings whose enrichment never completed (no overlay / unavailable):
     delivered rather than left dangling. A confirmed threat is already on the SIEM;
     this only resolves its enrichment_state so it does not sit PENDING forever."""
-    for fid in [fid for fid, e in pending.items() if e["deadline"] <= now]:
-        entry = pending.pop(fid)
+    for key in [k for k, e in pending.items() if e["deadline"] <= now]:
+        entry = pending.pop(key)
         done = sm.finalize_timeout(entry["finding"])
         _emit_finalized(entry, done, producer, geo, ch)
 
@@ -189,11 +266,21 @@ def main():
         group_id="ndr-finding-service", auto_offset_reset="earliest")
     geo = geoenrich.open_readers()      # offline GeoIP/ASN; {} (no-op) if DBs unmounted
     ndr_runtime.start_health()          # /healthz /readyz /metrics (plan 003 obs)
-    # ponytail: pending map is in-memory. Confirmed threats are already delivered
-    # (deliver-now), so a restart loses only a late enrichment *update*, never a
-    # finding; a capture-only finding mid-flight would need a reload from ClickHouse
-    # (F14) to survive a restart — add that when adjudication durability matters.
-    pending: dict = {}
+    # F14 durable recovery: reload capture-bound findings that were still awaiting finalization when a
+    # prior process stopped, so a restart mid-capture does not lose their finalization obligation. A
+    # recovery-query FAILURE holds readiness (§62.6) and is retried in the loop, rather than silently
+    # claiming zero pending. With ClickHouse disabled this is a no-op ({}), matching prior behaviour.
+    pending, recovery_ok = _load_pending_from_ch(ch, ENRICH_TIMEOUT_SECS, time.monotonic())
+    for _attempt in range(3):                              # §62.6: retry a FAILED required recovery, don't proceed blind
+        if recovery_ok:
+            break
+        time.sleep(2)
+        pending, recovery_ok = _load_pending_from_ch(ch, ENRICH_TIMEOUT_SECS, time.monotonic())
+    if not recovery_ok:
+        log.error("F14: pending recovery still failing after retries — proceeding DEGRADED; "
+                  "in-flight capture obligations from a prior run may not be finalized until CH recovers")
+    if pending:
+        log.info("F14: recovered %d un-finalized capture-bound finding(s) from ClickHouse", len(pending))
     import uuid
     worker, seq, delivered_now, capture_requested = uuid.uuid4().hex, 0, 0, 0   # §stage3 lifecycle acks
     log.info("finding-service up: %s (+%s, %s) -> ClickHouse %s (geoip=%s)",

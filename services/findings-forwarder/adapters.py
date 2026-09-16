@@ -166,6 +166,14 @@ class DurableSink:
         product result (delivery failure, durably captured), not lost data."""
         return {"name": self.name, "delivered": self.delivered, "dead_lettered": self.dead_lettered}
 
+    def record_suppressed(self, findings, worker=None):
+        """§59.1: record delivery-SUPPRESSED findings in the obligation ledger by (finding_id, revision)
+        identity, dest '(withheld)', so suppression is reconciled per canonical finding revision — not as
+        an aggregate receipt count. A suppressed finding is a terminal disposition (withheld from the
+        analyst plane, kept on the bus for correlation); recording it lets the harness prove EACH
+        dispatched revision reached a terminal outcome, and dedup by identity keeps a replay idempotent."""
+        self._ledger.record(findings, "(withheld)", "suppressed", worker or self._worker)
+
 
 class FileAdapter:
     def __init__(self, path, max_bytes=None):
@@ -440,6 +448,14 @@ class MultiAdapter:
 
     def receipt(self):
         return [r for a in self.adapters for r in ([a.receipt()] if hasattr(a, "receipt") else [])]
+
+    def record_suppressed(self, findings, worker=None):
+        # Suppression is global (before any sink). Record once to the first durable sink's ledger;
+        # the harness dedups by (finding_id, revision, dest='(withheld)') so this is not per-sink.
+        for a in self.adapters:
+            if hasattr(a, "record_suppressed"):
+                a.record_suppressed(findings, worker)
+                return
 
 
 def _make(kind):

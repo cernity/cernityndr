@@ -51,6 +51,33 @@ def test_offset_reset_precedence():
         del os.environ["NDR_OFFSET_RESET"]
 
 
+def test_empty_offset_reset_coerced_not_crash():
+    # §57.6: a set-but-EMPTY NDR_OFFSET_RESET (compose `${NDR_OFFSET_RESET-}` passthrough) or an empty
+    # service override must NOT reach the consumer as auto_offset_reset="" (invalid -> crash-loop); it
+    # falls back to the safe base default.
+    os.environ["NDR_OFFSET_RESET"] = ""
+    try:
+        assert rt._consumer_config("g")["auto_offset_reset"] == "latest"                    # empty env -> default
+        assert rt._consumer_config("g", auto_offset_reset="")["auto_offset_reset"] == "latest"  # empty override -> default
+    finally:
+        del os.environ["NDR_OFFSET_RESET"]
+    assert rt._consumer_config("g", auto_offset_reset="none")["auto_offset_reset"] == "none"  # valid value preserved
+
+
+def test_invalid_explicit_offset_reset_raises_not_silently_latest():
+    # §57.6: a NON-EMPTY typo is a real misconfiguration — expose it loudly rather than silently coercing
+    # to 'latest' (which would skip existing history for a new group).
+    import pytest
+    with pytest.raises(ValueError):
+        rt._consumer_config("g", auto_offset_reset="erliest")
+    os.environ["NDR_OFFSET_RESET"] = "earliest "     # trailing space typo via env
+    try:
+        with pytest.raises(ValueError):
+            rt._consumer_config("g")
+    finally:
+        del os.environ["NDR_OFFSET_RESET"]
+
+
 def test_malformed_env_falls_back_to_default():
     os.environ["NDR_MAX_POLL_RECORDS"] = "notanint"
     try:

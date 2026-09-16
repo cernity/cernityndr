@@ -1,0 +1,27 @@
+{
+  "dataset": "distributed-exfil (built-in)",
+  "granularity": "host",
+  "malicious": ["10.0.0.15"],
+  "episodes": [
+    {
+      "id": "low-slow-exfil-1",
+      "label": "malicious",
+      "behavior": "exfil",
+      "entities": [
+        {"value": "10.0.0.15", "role": "initiator"},
+        {"value": "203.0.113.200", "role": "target"}
+      ],
+      "interval": {"start": 1700000000, "end": 1700000092}
+    }
+  ],
+  "honesty": [
+    "Positive path: 10.0.0.15 spreads ~5.7MB across 11 materially-contributing flows to an external collector (203.0.113.200) — below the burst ceiling, inside the low-and-slow band, >= 5 material flows. Cernity's low_slow_exfil fires; raw Suricata (Arm A) has no signature for a benign-looking distributed trickle, so this is a behavioral-gap detection.",
+    "Matched benign control (NOT labelled malicious): the SAME host sends a comparable ~5.7MB to 198.51.100.50 concentrated in ONE bulk transfer + 12 tiny callbacks (a legitimate backup upload). It shares the surface features (external egress, elevated bytes, many connections) but has only 1 material flow, so a correct detector stays silent — the §49.4 materiality feature, not a beacon-specific exclusion. 198.51.100.50 must produce NO exfil finding.",
+    "Matched AUTHORIZED control (§59.3 selectivity, NOT labelled malicious): the SAME host sends the SAME distributed low-and-slow shape (11 material flows, ~5.7MB) to 192.0.2.100, an AUTHORIZED destination declared on NDR_EXFIL_ALLOWLIST=192.0.2. for the run. The traffic is byte-for-byte the same predicate-matching shape as the positive; the ONLY difference is authorization context. A correct detector must NOT raise low_slow_exfil for 192.0.2.100 — proving distributed material transfer is not itself proof of malice, selectivity comes from context.",
+    "Synthetic, hand-built scenario; a single engineered host is not a prevalence sample. Real precision/recall need a labelled corpus (see CIC-IDS / CTU-13 in registry.json)."
+  ],
+  "caveats": [
+    "Genuine bytes: MSS-sized TCP segments carry real payload, so Suricata's per-flow bytes_toserver reflects the actual transfer (no jumbo-frame inflation).",
+    "Offline replay measures detection + analyst-volume, not throughput."
+  ]
+}

@@ -256,6 +256,10 @@ def test_low_slow_exfil():
     assert not d.low_slow_exfil(1_000_000, 20, "8.8.8.8")[0]
     assert not d.low_slow_exfil(10_000_000, 3, "8.8.8.8")[0]
     assert not d.low_slow_exfil(10_000_000, 20, "10.0.0.5")[0]
+    # §49.4 distributed requirement: with per-flow evidence, bytes CONCENTRATED in one flow (+ many tiny
+    # callbacks) is NOT distributed low-and-slow -> no fire; bytes SPREAD across many material flows fires.
+    assert not d.low_slow_exfil(10_000_000, 20, "8.8.8.8", material_flows=1)[0]    # 1 bulk flow + callbacks
+    assert d.low_slow_exfil(10_000_000, 20, "8.8.8.8", material_flows=8)[0]        # spread across 8 flows
 
 
 if __name__ == "__main__":

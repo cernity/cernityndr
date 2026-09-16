@@ -82,6 +82,30 @@ def test_empty_log():
     assert enrich.summarize_conn_log("#fields\tts\n#close\tx")["connections"] == 0
 
 
+def test_security_kwargs_none_is_plaintext():
+    # No SASL mechanism -> local/insecure bus, no auth kwargs (handoff §4 secure-bus gate).
+    assert enrich._security_kwargs({}) == {}
+
+
+def test_security_kwargs_partial_raises():
+    # A mechanism without user+password must fail loudly, never silently fall back to plaintext.
+    try:
+        enrich._security_kwargs({"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512"})
+        raised = False
+    except SystemExit:
+        raised = True
+    assert raised
+
+
+def test_security_kwargs_sasl_plaintext_and_ssl():
+    base = {"NDR_BUS_SASL_MECHANISM": "SCRAM-SHA-512",
+            "NDR_BUS_SASL_USER": "cernity-central", "NDR_BUS_SASL_PASSWORD": "pw"}
+    kw = enrich._security_kwargs(dict(base))
+    assert kw["security_protocol"] == "SASL_PLAINTEXT" and kw["sasl_plain_username"] == "cernity-central"
+    kw_tls = enrich._security_kwargs(dict(base, NDR_BUS_TLS_CA="/certs/ca.pem"))
+    assert kw_tls["security_protocol"] == "SASL_SSL" and kw_tls["ssl_cafile"] == "/certs/ca.pem"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

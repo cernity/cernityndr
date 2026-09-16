@@ -23,6 +23,7 @@ jobs:
           - http-detector
           - protocol-detectors
           - east-west-detectors
+          - ot-detectors
           - anomaly-detector
           - coverage-detector
           - threat-intel

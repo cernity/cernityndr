@@ -13,10 +13,13 @@ ARM_LABEL = {"suricata_siem": "Suricata -> SIEM",
 
 
 def _qualified(results: dict) -> bool:
-    """A run is QUALIFIED only when its completion state is 'reconciled' with no unresolved work. Any
-    other state (inputs_drained, inconclusive, invalid) makes the numbers DIAGNOSTIC, not a qualified
-    effectiveness result (R09)."""
+    """A run is QUALIFIED only when its completion state is 'reconciled' with no unresolved work AND (for a
+    packet-derived run) the capture is HASH-BOUND to its truth (§49.3): a run whose labels carry no pcap
+    binding is diagnostic, not qualified, even if it reconciles. `capture_bound is False` blocks; True or
+    None (not packet-derived) does not. Any other completion state makes the numbers DIAGNOSTIC (R09)."""
     c = results.get("completion") or {}
+    if results.get("capture_bound") is False:
+        return False
     return c.get("state") == "reconciled" and not c.get("unresolved")
 
 

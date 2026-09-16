@@ -23,7 +23,11 @@ suricata.windows.v1
 suricata.file.v1
 suricata.anomaly.v1
 suricata.stats.v1
+suricata.modbus.v1
 ```
+
+`suricata.modbus.v1` carries Suricata's native Modbus app-layer EVE (consumed by
+`ot-detectors`); enabled per-deployment via the opt-in OT sensor profile.
 
 ## Findings (the only thing that reaches the SIEM plane)
 

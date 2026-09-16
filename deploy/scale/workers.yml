@@ -109,6 +109,16 @@ services:
     logging: *lg
     restart: unless-stopped
 
+  ot-detectors:
+    image: cernity/ot-detectors:latest
+    <<: *hardening
+    profiles: [detection]
+    environment: *wenv
+    deploy:
+      replicas: ${OT_REPLICAS:-1}
+    logging: *lg
+    restart: unless-stopped
+
   anomaly-detector:
     image: cernity/anomaly-detector:latest
     <<: *hardening

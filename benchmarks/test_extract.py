@@ -119,6 +119,18 @@ def test_detections_carry_intervals_from_real_time_fields():
     assert x.detections_from_notices([{"src_ip": "10.0.0.5", "ts": "not-a-time"}])[0]["interval"] is None
 
 
+def test_epoch_parses_suricata_plus0000_offset_fairness():
+    # FAIRNESS: Suricata EVE uses a compact +0000 offset; the scorer must parse it the same as Cernity's
+    # `Z` timestamps, or Suricata alerts drop to None (untimed) and Arm A is understated on 3.10.
+    assert x._epoch("2026-09-14T14:31:50.123456+0000") is not None
+    assert x._epoch("2026-09-14T14:31:50.123456Z") is not None
+    assert abs(x._epoch("2026-09-14T14:31:50+0000") - x._epoch("2026-09-14T14:31:50Z")) < 1e-6
+    # a Suricata alert with a +0000 timestamp now yields a usable interval (was None -> ambiguous)
+    a = x.detections_from_alerts([{"event_type": "alert", "src_ip": "10.0.0.5", "dest_ip": "1.2.3.4",
+                                   "timestamp": "2026-09-14T14:31:50.500000+0000"}])
+    assert a[0]["interval"] is not None
+
+
 def test_observed_flag_splits_observation_from_availability():
     # R06/§33.3: observed=False means first_seen/last_seen are EMISSION-derived -> interval must be None
     # (temporal attribution unknown), while emitted_at surfaces as `available` for deadline utility.

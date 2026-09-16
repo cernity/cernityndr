@@ -74,6 +74,9 @@ detectors:
   - name: east-west-detectors
     replicas: 1
     hpa: { enabled: true, min: 1, max: 8, cpu: 70 }
+  - name: ot-detectors
+    replicas: 1
+    hpa: { enabled: true, min: 1, max: 8, cpu: 70 }
   - name: anomaly-detector
     replicas: 1
     hpa: { enabled: false, min: 1, max: 8, cpu: 70 }

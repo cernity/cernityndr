@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-01T00:00:00+00:00","event_type":"anomaly","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","app_proto":"http","anomaly":{"type":"applayer","event":"http.unexpected_data"}}
+{"timestamp":"2026-01-01T00:00:01+00:00","event_type":"anomaly","src_ip":"10.0.0.5","dest_ip":"203.0.113.10","anomaly":{"type":"stream","event":"reassembly_overlap_different_data"}}

@@ -129,6 +129,7 @@ CANONICAL_TOPICS = {
     "suricata.raw.v1", "suricata.flow.v1", "suricata.dns.v1", "suricata.tls.v1",
     "suricata.http.v1", "suricata.ssh.v1", "suricata.windows.v1",
     "suricata.file.v1", "suricata.anomaly.v1", "suricata.stats.v1",
+    "suricata.modbus.v1",
     "ndr.finding.candidate.v1", "ndr.finding.final.v1",
     "ndr.capture.request.v1", "ndr.capture.status.v1",
     "ndr.enrichment.request.v1", "ndr.enrichment.result.v1",

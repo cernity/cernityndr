@@ -5,7 +5,7 @@ from slips_map import alert_to_candidate
 
 
 def test_maps_source_target_threat_level_and_technique():
-    alert = {"ID": "abc-1", "Category": ["Intrusion.Botnet"],
+    alert = {"ID": "abc-1", "Category": ["Intrusion.Botnet"], "module": "flowmldetection",
              "Source": [{"IP4": ["10.0.0.5"]}], "Target": [{"IP4": ["93.184.216.34"]}],
              "threat_level": "high", "Confidence": 0.8,
              "Description": "periodic C2 behavior", "DetectTime": "2026-09-10T12:00:00Z"}
@@ -73,6 +73,22 @@ def test_ml_module_stays_ml_evidence():
     assert c["detector_id"] == "slips_ml"
     ents = json.loads(c["entities"])
     assert any(e.get("module") == "flowmldetection" for e in ents)   # provenance preserved
+
+
+def test_unknown_or_missing_module_is_not_labeled_ml():
+    # §6.7.5: an alert with no module (or an unrecognized one) has UNKNOWN provenance — it must
+    # NOT be asserted as machine-learning (`slips_ml`). It becomes neutral `slips_alert`, so
+    # correlation cannot count it as the ML side of an ML×heuristic corroboration.
+    from slips_map import classify_module, is_ml_evidence
+    missing = {"Category": ["Intrusion.Botnet"], "Source": [{"IP4": ["10.0.0.5"]}], "threat_level": "high"}
+    c = alert_to_candidate(missing, "t")
+    assert c["detector_id"] == "slips_alert" and not is_ml_evidence("")
+    # a named but unrecognized module (heuristic, e.g. portscan) is likewise not ML
+    named = alert_to_candidate(dict(missing, module="portscan"), "t")
+    assert named["detector_id"] == "slips_alert"
+    assert classify_module("flowmldetection") == ("slips_ml", True)
+    assert classify_module("threatintelligence") == ("slips_intel", False)
+    assert classify_module("") == ("slips_alert", False)
 
 
 if __name__ == "__main__":

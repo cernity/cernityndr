@@ -38,3 +38,8 @@ docs/internal/
 
 # bus TLS certs + SCRAM creds (never commit)
 deploy/security/secrets/
+
+# fetched ET-Open ruleset (suricata-update) — not committed
+deploy/benchmark/suricata/rules/suricata.rules
+deploy/benchmark/suricata/rules/classification.config
+deploy/benchmark/suricata/rules/*.rules.bak

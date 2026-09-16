@@ -162,6 +162,25 @@ def test_finding_entities_accepts_wire_string_and_array():
     check(FINDING, as_array)
 
 
+def test_finding_source_events_provenance():
+    # Baseline provenance (U1): a finding may carry the originating Suricata EVE record(s).
+    inline = dict(VALID_FINDING)
+    inline["source_events"] = [
+        {"event_type": "quic", "community_id": "1:abc=", "flow_id": 1,
+         "timestamp": "2026-09-16T20:19:21Z",
+         "record": {"event_type": "quic", "quic": {"ja4": "q13d..."}, "ndpi": {"proto": "QUIC"}}}
+    ]
+    check(FINDING, inline)
+    aggregate = dict(VALID_FINDING)
+    aggregate["source_events"] = [
+        {"event_type": "flow", "timestamp": "2026-09-16T20:19:21Z", "representative": True,
+         "record": {"event_type": "flow"},
+         "contributors": {"count": 20, "community_ids": ["1:a=", "1:b="], "flow_ids": [1, 2]}}
+    ]
+    check(FINDING, aggregate)
+    check(FINDING, VALID_FINDING)  # additive: a finding WITHOUT source_events still validates
+
+
 def test_envelope_requires_identity():
     for missing in ("tenant_id", "sensor_id", "schema_version"):
         doc = dict(VALID_ENVELOPE)

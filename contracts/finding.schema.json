@@ -31,6 +31,11 @@
       "type": "object",
       "description": "Indicators extracted from the enrichment summary (file hashes, ja3/ja4/ja4s/ja4h/ja4ssh, self-signed certs). Lists are unioned across enrichments; absent unless enrichment succeeded."
     },
+    "source_events": {
+      "type": "array",
+      "description": "Provenance (baseline tier): the originating Suricata EVE record(s) that produced this finding, so the SIEM document is self-describing. Each entry is {event_type, community_id?, flow_id?, tx_id?, timestamp, record} where `record` is the native EVE object (verbatim, bounded by NDR_SOURCE_EVENTS_MAX_BYTES; truncated:true + preview on overflow). Single/few-record findings inline the record(s); aggregates carry a representative entry plus a `contributors` summary {count, community_ids[], flow_ids[]}. Additive: never read by detection/scoring/lifecycle; absent identifiers are omitted, never fabricated.",
+      "items": { "type": "object" }
+    },
     "mitre": {
       "type": "array",
       "description": "MITRE ATT&CK mapping when defensible (v2 §17).",

@@ -20,6 +20,9 @@ import time
 import ndr_runtime                      # shared tuned consumer/producer + metrics
 import store as store_mod
 import proto
+import provenance                       # baseline source_events (additive)
+
+_SRC = {}                               # the EVE record currently being handled (single-threaded poll)
 
 log = ndr_runtime.setup_logging("protocol-detectors")
 
@@ -83,6 +86,9 @@ def _emit(producer, detector, category, sev, conf, entities, mitre=None):
             "state": "CANDIDATE"}
     if mitre:
         cand["mitre"] = mitre                                   # precise technique; finding-service prefers it
+    se = provenance.source_event(_SRC.get("e")) if _SRC.get("e") else None
+    if se:
+        cand["source_events"] = [se]                            # baseline provenance: the originating EVE
     producer.send(CAND, cand)
     log.info("%s %s", detector.upper(), entities[:120])
 
@@ -95,6 +101,7 @@ def _cid(e):
 
 
 def _handle(e, producer):
+    _SRC["e"] = e                        # attach this record as provenance on any candidate emitted
     et = e.get("event_type")
     src, dst, dport = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
     # port/protocol mismatch (T1571): the event's own protocol IS the detected app

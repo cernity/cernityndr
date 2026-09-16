@@ -23,6 +23,9 @@ import time
 import ndr_runtime                      # shared tuned consumer/producer + metrics
 import store as store_mod
 import ot
+import provenance                       # baseline source_events (additive)
+
+_SRC = {}                               # the EVE record currently being handled (single-threaded poll)
 
 log = ndr_runtime.setup_logging("ot-detectors")
 
@@ -68,6 +71,9 @@ def _emit(producer, detector, sev, conf, entities, mitre=None):
             "first_seen": now, "last_seen": now, "entities": entities, "state": "CANDIDATE"}
     if mitre:
         cand["mitre"] = mitre                                   # precise ICS technique; finding-service prefers it
+    se = provenance.source_event(_SRC.get("e")) if _SRC.get("e") else None
+    if se:
+        cand["source_events"] = [se]                            # baseline provenance: the originating EVE
     producer.send(CAND, cand)
     log.info("%s %s", detector.upper(), entities[:120])
 
@@ -94,6 +100,7 @@ def _ent(src, dst, extra):
 
 
 def _handle(e, producer):
+    _SRC["e"] = e                        # attach this record as provenance on any candidate emitted
     modbus = e.get("modbus")
     src, dst, dport = e.get("src_ip"), e.get("dest_ip"), e.get("dest_port")
     # A record is Modbus if it says so or carries a modbus object; otherwise ignore (the

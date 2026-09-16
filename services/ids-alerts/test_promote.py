@@ -107,6 +107,15 @@ def test_finding_id_is_stable_across_processes():
     assert len(outs) == 1 and next(iter(outs)), f"finding_id varies with hash seed: {outs}"
 
 
+def test_source_events_carries_full_alert_record():
+    # U3: the promoted finding carries the originating alert EVE verbatim; verdict unchanged (R6).
+    c = p.to_candidate(dict(SPAMHAUS, community_id="1:xyz="))
+    se = c["source_events"][0]
+    assert se["record"]["event_type"] == SPAMHAUS["event_type"]   # native alert EVE preserved
+    assert se.get("community_id") == "1:xyz="                       # emitted pivot carried
+    assert c["detector_id"] == "ids_signature"                      # R6: verdict unchanged
+
+
 if __name__ == "__main__":
     for n, f in sorted(globals().items()):
         if n.startswith("test_") and callable(f):

@@ -130,6 +130,18 @@ def test_stable_hash_deterministic():
     assert app._stable("x") == app._stable("x")
 
 
+def test_source_events_provenance_attached():
+    # U3: the candidate carries the originating Modbus EVE; verdict fields unchanged (R6).
+    _fresh()
+    p = _P()
+    _warm(p, "10.0.1.20")
+    app._handle(_mb("10.0.0.250", "10.0.1.20", 6), p)   # unknown master, write single register
+    f = next(m for m in p.sent if m["detector_id"] == "unauthorized_write")
+    se = f["source_events"][0]
+    assert se["record"]["modbus"]["function"]["code"] == 6      # native EVE preserved verbatim
+    assert f["detector_id"] == "unauthorized_write" and f["severity"] == 8   # R6: verdict unchanged
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

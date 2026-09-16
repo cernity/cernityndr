@@ -66,7 +66,10 @@ def main():
             # Suppressed findings stay on the bus for correlation but are withheld from the analyst
             # plane; count them here so the receipt accounts for consumed = suppressed + delivered.
             live = [f for f in findings if f.get("state") != "SUPPRESSED"]
-            suppressed += len(findings) - len(live)
+            withheld = [f for f in findings if f.get("state") == "SUPPRESSED"]
+            suppressed += len(withheld)
+            if withheld and hasattr(adapter, "record_suppressed"):
+                adapter.record_suppressed(withheld, worker)   # §59.1: suppression by finding-revision identity
             handle_batch(live, adapter)              # DurableSink: retries + dead-letters, never drops
             total += len(findings)
             for f in findings:                       # per-finding detail: DEBUG only, off by default

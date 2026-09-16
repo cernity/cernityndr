@@ -33,6 +33,14 @@ x-hardening: &hardening
 x-hardening-infra: &hardening-infra
   security_opt: ["no-new-privileges:true"]
 
+# Central bus credential (F02) — anchors are file-scoped, so this overlay re-declares the central
+# principal. The reviewed overlay OMITTED these for the bridge and adapter, so they could not
+# authenticate to a secured (SASL/SCRAM) broker (handoff §4). Empty password in the insecure demo.
+x-central-bus-auth: &central-bus-auth
+  NDR_BUS_SASL_MECHANISM: ${CERNITY_BUS_CENTRAL_MECHANISM-SCRAM-SHA-512}
+  NDR_BUS_SASL_USER: ${CERNITY_BUS_CENTRAL_USER:-cernity-central}
+  NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
+
 services:
   # SLIPS' own Redis, isolated from Cernity's state Redis (SLIPS assumes :6379).
   slips-redis:
@@ -51,6 +59,7 @@ services:
     <<: *hardening
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
+      <<: *central-bus-auth
       EVE_BRIDGE_TOPICS: ${EVE_BRIDGE_TOPICS:-suricata.flow.v1,suricata.raw.v1}
       EVE_BRIDGE_OUT: /slips-input/eve.json
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -83,6 +92,7 @@ services:
     environment:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
+      <<: *central-bus-auth
       SLIPS_ALERTS_FILE: /slips-output/alerts.json
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes: [cernity-slips-output:/slips-output]

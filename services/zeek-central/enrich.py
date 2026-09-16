@@ -22,6 +22,28 @@ import subprocess
 import tempfile
 
 log = logging.getLogger("zeek-central")
+
+
+def _security_kwargs(env=os.environ):
+    """SASL/SCRAM producer+consumer auth when the bus is secured. zeek-central is the CENTRAL
+    enrichment principal (consumes ndr.enrichment.request.v1, produces …result.v1), so the
+    overlay supplies its central credentials via NDR_BUS_SASL_USER/PASSWORD — the reviewed worker
+    built raw Kafka clients with no auth and could not connect to a secured broker (handoff §4).
+    Mirrors shared/ndr_runtime and tools/eve-feeder (zeek-central's image ships neither). Mechanism-
+    gated: unset NDR_BUS_SASL_MECHANISM = the plaintext local bus (return nothing). A CA -> SASL_SSL,
+    none -> SASL_PLAINTEXT. A mechanism without user+password fails loudly, never silently plaintext."""
+    mech = env.get("NDR_BUS_SASL_MECHANISM")
+    if not mech:
+        return {}
+    user, pw = env.get("NDR_BUS_SASL_USER"), env.get("NDR_BUS_SASL_PASSWORD")
+    if not (user and pw):
+        raise SystemExit("zeek-central: NDR_BUS_SASL_MECHANISM set but NDR_BUS_SASL_USER/PASSWORD missing")
+    ca = env.get("NDR_BUS_TLS_CA")
+    kw = {"security_protocol": "SASL_SSL" if ca else "SASL_PLAINTEXT",
+          "sasl_mechanism": mech, "sasl_plain_username": user, "sasl_plain_password": pw}
+    if ca:
+        kw["ssl_cafile"] = ca
+    return kw
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -230,12 +252,13 @@ def _main():  # pragma: no cover (I/O shell)
     s3 = boto3.client("s3", endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
                       aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"])
+    sec = _security_kwargs()
     producer = KafkaProducer(bootstrap_servers=bootstrap,
-                             value_serializer=lambda v: json.dumps(v).encode())
+                             value_serializer=lambda v: json.dumps(v).encode(), **sec)
     consumer = KafkaConsumer("ndr.enrichment.request.v1", bootstrap_servers=bootstrap,
                              group_id="ndr-zeek-central", auto_offset_reset="earliest",
                              enable_auto_commit=True,
-                             value_deserializer=lambda b: json.loads(b.decode()))
+                             value_deserializer=lambda b: json.loads(b.decode()), **sec)
     log.info("zeek-central up (deep: conn/ssl/x509/http/ssh/files/smb/kerberos + JA3 + JA4+)")
     running = True
 

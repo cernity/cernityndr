@@ -1,0 +1,6 @@
+# Positive control (engine + match-engine liveness): fires on any HTTP GET. Present in the benign
+# control traffic so its firing proves the ET-Open ruleset LOADED and matching works end to end.
+# Absent from the raw-TCP attack pcap (scan/beacon/exfil), so it does not confound A/B scoring.
+alert http any any -> any any (msg:"POS-CONTROL HTTP GET engine-liveness"; flow:established,to_server; http.method; content:"GET"; sid:9000002; rev:1; classtype:not-suspicious;)
+# Signature-PRESERVATION control: a threat rule that fires on the C2 beacon. Arm A (Suricata) alerts;
+# Cernity ids-alerts promotes the SAME alert to a finding in Arm B -> proves both arms share signatures.

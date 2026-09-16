@@ -1,0 +1,23 @@
+{
+  "note": "Pinned investigator configuration (\u00a744.3). The SAME model/config and identical tool schema are used for every arm (A2, A3, B); only each arm's real evidence differs. CI/smoke uses the deterministic stub investigator, not a live model, so the harness is hermetically testable; a live run selects one of the model adapters below.",
+  "investigator_model": "claude-haiku-4-5-20251001",
+  "temperature": 0,
+  "max_queries": 10,
+  "termination": "final_answer_or_query_budget",
+  "tool_schema_version": "1",
+  "isolation": {
+    "investigator_sees": [
+      "task prompt",
+      "read-only SIEM tool bound to ONE arm"
+    ],
+    "investigator_never_sees": [
+      "episode truth",
+      "rubric",
+      "other arms' outputs",
+      "detector diagnostics",
+      "prior task answers"
+    ]
+  },
+  "replicates": 1,
+  "counterbalance": "arm and task order are permuted per the run manifest"
+}

@@ -82,6 +82,17 @@ def test_ja3s_object_server_fingerprint_does_not_crash():
     assert any(m["detector_id"] == "server_fp_rarity" for m in p.sent)
 
 
+def test_source_events_provenance_attached():
+    # U3: the candidate carries the originating EVE; verdict fields unchanged (R6).
+    _fresh()
+    p = _P()
+    app._handle({"event_type": "http", "src_ip": "10.0.0.5", "dest_ip": "203.0.113.9",
+                 "http": {"http_user_agent": "curl/8.4.0"}}, p)
+    f = next(m for m in p.sent if m["detector_id"] == "suspicious_ua")
+    assert f["source_events"][0]["record"]["http"]["http_user_agent"] == "curl/8.4.0"
+    assert f["detector_id"] == "suspicious_ua"                  # R6: verdict unchanged
+
+
 if __name__ == "__main__":
     for _n, _f in sorted(globals().items()):
         if _n.startswith("test_") and callable(_f):

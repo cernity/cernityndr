@@ -40,6 +40,10 @@ x-detector-env: &detector-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_FORMAT: ${LOG_FORMAT:-json}
   HEARTBEAT_SECS: ${HEARTBEAT_SECS:-300}
+  # Trusted egress prefixes (comma-separated): authorized destinations for which north-south
+  # exfil/beacon behavioural findings are suppressed as context (a sanctioned backup/CDN). Empty in
+  # production unless the operator declares them; the §59.3 selectivity control sets it for one run.
+  NDR_EXFIL_ALLOWLIST: ${NDR_EXFIL_ALLOWLIST-}
 
 # Tiered container hardening. Cernity's own (python) services drop all caps, gain
 # no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
@@ -146,6 +150,16 @@ services:
     image: cernity/east-west-detectors:latest
     build: {context: ../.., dockerfile: services/east-west-detectors/Dockerfile}
     container_name: cernity-east-west-detectors
+    <<: *hardening
+    environment: *detector-env
+    depends_on: {redpanda: {condition: service_healthy}}
+    logging: *cernity-logging
+    restart: unless-stopped
+
+  ot-detectors:
+    image: cernity/ot-detectors:latest
+    build: {context: ../.., dockerfile: services/ot-detectors/Dockerfile}
+    container_name: cernity-ot-detectors
     <<: *hardening
     environment: *detector-env
     depends_on: {redpanda: {condition: service_healthy}}

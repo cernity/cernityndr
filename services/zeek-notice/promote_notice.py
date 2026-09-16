@@ -21,6 +21,7 @@ TSV. Field names follow Zeek's notice.log: note, msg, sub, src, dst, id.orig_h,
 id.resp_h, uid.
 """
 import hashlib
+import provenance                       # baseline source_events (additive)
 import json
 import os
 import time
@@ -134,7 +135,8 @@ def to_candidate(notice: dict, tenant: str = "default") -> dict | None:
             "tenant_id": tenant, "detector_id": "zeek_notice", "detector_version": "1.0",
             "category": category, "severity": severity, "confidence": 0.8,
             "first_seen": ts, "last_seen": ts,
-            "entities": json.dumps(ents), "state": "CANDIDATE"}
+            "entities": json.dumps(ents), "state": "CANDIDATE",
+            "source_events": [provenance.source_event(notice)]}   # the full Zeek notice, verbatim
 
 
 def parse_notice_tsv(text: str) -> list[dict]:

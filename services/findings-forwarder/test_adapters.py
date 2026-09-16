@@ -54,6 +54,19 @@ def test_es_failed_items_rejects_malformed_response_structure():
     assert [f["finding_id"] for f in ElasticsearchAdapter._failed_items(fs, nostatus)] == ["a"]  # missing status
 
 
+def test_es_source_events_in_source_and_mapping_guarded():
+    # U5: source_events reaches the ES _source (whole finding is the body) and the index template
+    # keeps it (+ summary/iocs) out of dynamic mapping so nested EVE keys can't explode it.
+    d = ElasticsearchAdapter._doc({"finding_id": "x", "last_seen": "2026-09-09T03:05:00Z",
+                                   "source_events": [{"event_type": "quic", "record": {"quic": {"ja4": "q13d.."}}}]})
+    body = json.dumps(d)
+    assert '"source_events"' in body and '"ja4": "q13d.."' in body   # native EVE in the stored doc
+    tb = ElasticsearchAdapter._template_body("ndr-findings")
+    props = tb["template"]["mappings"]["properties"]
+    assert props["source_events"]["enabled"] is False
+    assert props["summary"]["enabled"] is False and props["iocs"]["enabled"] is False
+
+
 def test_es_doc_id_is_tenant_and_revision_scoped():
     # R02: two tenants sharing a finding_id must be DISTINCT documents; R03: each revision is retained.
     a = ElasticsearchAdapter._doc_id({"finding_id": "f1", "tenant_id": "t1", "revision": 1})

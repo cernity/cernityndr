@@ -85,6 +85,36 @@ def test_ok_enrichment_attaches_evidence():
     assert "minio://ndr-pcap/x" in done["evidence_refs"]
 
 
+def test_ok_enrichment_propagates_summary_and_iocs():
+    # The Zeek worker (zeek-central) emits status/summary/iocs/evidence_refs; the reviewed merge
+    # copied only evidence_refs, so the analyst never saw the Zeek summary or extracted indicators
+    # in the final SIEM finding. They must survive onto the finalized finding.
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    result = {"status": "ok", "evidence_refs": ["minio://ndr-pcap/x"],
+              "summary": {"conn": {"connections": 3}, "ssl": {"unique_ja3": ["j1"]}},
+              "iocs": {"ja3": ["j1"], "file_hashes": ["abc"]}}
+    done = sm.apply_enrichment_result(f, result)
+    assert done["summary"] == result["summary"]
+    assert done["iocs"]["ja3"] == ["j1"] and done["iocs"]["file_hashes"] == ["abc"]
+
+
+def test_duplicate_enrichment_is_idempotent():
+    # A duplicate/late result must not double-append evidence or clobber prior indicators (R03).
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    r = {"status": "ok", "evidence_refs": ["minio://ndr-pcap/x"], "iocs": {"ja3": ["j1"]}}
+    once = sm.apply_enrichment_result(f, r)
+    twice = sm.apply_enrichment_result(once, dict(r, iocs={"ja3": ["j1", "j2"]}))
+    assert twice["evidence_refs"].count("minio://ndr-pcap/x") == 1     # deduped
+    assert twice["iocs"]["ja3"] == ["j1", "j2"]                        # union, not clobber
+
+
+def test_failed_enrichment_does_not_attach_summary():
+    # A failed enrichment finalizes but must not carry a summary/iocs it never produced.
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    done = sm.apply_enrichment_result(f, {"status": "failed", "summary": {"x": 1}})
+    assert "summary" not in done and "iocs" not in done
+
+
 def test_lifecycle_issues_monotonic_revisions():
     # R03: the initial final is revision 1; an enriched update or a timeout finalization is a NEW
     # revision, so the two are distinct obligations/documents the scorer can order (latest wins).
@@ -94,6 +124,17 @@ def test_lifecycle_issues_monotonic_revisions():
     assert enriched["revision"] == 2 and f["revision"] == 1     # bump does not mutate the original
     timed_out = sm.finalize_timeout(f)
     assert timed_out["revision"] == 2
+
+
+def test_source_events_survive_lifecycle():
+    # U4: provenance rides through the lifecycle unchanged and gates no decision (R6).
+    se = [{"event_type": "quic", "community_id": "1:z=", "record": {"quic": {"ja4": "q13d.."}}}]
+    f, route = sm.build_finding(dict(SCAN, severity=7, source_events=se))
+    assert f["source_events"] == se                              # carried onto the finding
+    assert f["detector_id"] == SCAN["detector_id"]               # verdict unchanged
+    enriched = sm.apply_enrichment_result(f, {"status": "ok", "evidence_refs": []})
+    assert enriched["source_events"] == se                       # preserved through enrichment
+    assert sm.finalize_timeout(f)["source_events"] == se         # preserved through timeout finalize
 
 
 def test_finding_id_deterministic_for_dedup():
@@ -129,6 +170,11 @@ def test_g3_confirmed_threat_source_captures_evidence_regardless_of_confidence()
     for cat in ("discovery", "credential_access", "lateral", "impact", "defense_evasion"):
         assert sm.decide_enrichment({"detector_id": "kerberoasting", "category": cat, "confidence": 0.7}) == "metadata_sufficient", cat
     assert sm.decide_enrichment({"detector_id": "beacon", "category": "c2", "confidence": 0.6}) == "packets_needed"
+    # distributed low-and-slow exfil is STRUCTURAL (material-flow count from metadata, §49.4) -> deliver
+    # directly even at low confidence, so it is not lost/delayed without a forensics overlay. The burst
+    # 'exfil' detector is still content-adjudicated.
+    assert sm.decide_enrichment({"detector_id": "low_slow_exfil", "category": "exfil", "confidence": 0.22}) == "metadata_sufficient"
+    assert sm.decide_enrichment({"detector_id": "exfil", "category": "exfil", "confidence": 0.5}) == "packets_needed"
     # a confirmed-threat source still captures for evidence regardless of category
     assert sm.decide_enrichment({"detector_id": "ids_signature", "category": "lateral", "confidence": 0.9}) == "packets_needed"
 

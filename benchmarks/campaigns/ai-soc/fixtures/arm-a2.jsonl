@@ -1,0 +1,1 @@
+{"finding_id": "et-2010935-1", "category": "policy", "severity": 2, "detector_id": "ids_signature", "entities": [{"type": "ip", "role": "src", "value": "10.0.0.10"}, {"type": "ip", "role": "dst", "value": "151.101.1.140"}], "first_seen": "2026-09-14T18:41:00Z", "description": "ET POLICY outbound TLS to CDN (informational)"}

@@ -129,6 +129,7 @@ CANONICAL_TOPICS = {
     "suricata.raw.v1", "suricata.flow.v1", "suricata.dns.v1", "suricata.tls.v1",
     "suricata.http.v1", "suricata.ssh.v1", "suricata.windows.v1",
     "suricata.file.v1", "suricata.anomaly.v1", "suricata.stats.v1",
+    "suricata.modbus.v1",
     "ndr.finding.candidate.v1", "ndr.finding.final.v1",
     "ndr.capture.request.v1", "ndr.capture.status.v1",
     "ndr.enrichment.request.v1", "ndr.enrichment.result.v1",
@@ -159,6 +160,25 @@ def test_finding_entities_accepts_wire_string_and_array():
     as_array = dict(VALID_FINDING)
     as_array["entities"] = [{"type": "ip", "value": "10.0.0.5"}]
     check(FINDING, as_array)
+
+
+def test_finding_source_events_provenance():
+    # Baseline provenance (U1): a finding may carry the originating Suricata EVE record(s).
+    inline = dict(VALID_FINDING)
+    inline["source_events"] = [
+        {"event_type": "quic", "community_id": "1:abc=", "flow_id": 1,
+         "timestamp": "2026-09-16T20:19:21Z",
+         "record": {"event_type": "quic", "quic": {"ja4": "q13d..."}, "ndpi": {"proto": "QUIC"}}}
+    ]
+    check(FINDING, inline)
+    aggregate = dict(VALID_FINDING)
+    aggregate["source_events"] = [
+        {"event_type": "flow", "timestamp": "2026-09-16T20:19:21Z", "representative": True,
+         "record": {"event_type": "flow"},
+         "contributors": {"count": 20, "community_ids": ["1:a=", "1:b="], "flow_ids": [1, 2]}}
+    ]
+    check(FINDING, aggregate)
+    check(FINDING, VALID_FINDING)  # additive: a finding WITHOUT source_events still validates
 
 
 def test_envelope_requires_identity():

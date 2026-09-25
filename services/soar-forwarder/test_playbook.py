@@ -47,6 +47,28 @@ def test_correlation_incident_escalates():
     assert "escalate_incident" in a and "contain_sim" in a
 
 
+def test_ndpi_structured_low_gets_no_soar_action():
+    for cat, sev in (("observation", 2), ("unclassified", 1), ("policy", 3), ("anomaly", 5)):
+        f = {"detector_id": "ndpi_risk", "detector_version": "2.0", "category": cat, "severity": sev}
+        assert p.actions_for(f) == []          # no automatic effect (KTD6)
+
+
+def test_ndpi_structured_high_threat_notifies():
+    for cat in ("anomaly", "exploit"):
+        f = {"detector_id": "ndpi_risk", "detector_version": "2.0", "category": cat, "severity": 6}
+        assert "notify" in p.actions_for(f)
+
+
+def test_legacy_ndpi_v1_is_not_gated():
+    assert "notify" in p.actions_for({"detector_id": "ndpi_risk", "detector_version": "1.0",
+                                      "category": "malware", "severity": 6})
+
+
+def test_non_ndpi_detectors_unaffected():
+    acts = p.actions_for({"detector_id": "beacon", "category": "c2", "severity": 7})
+    assert "notify" in acts and "contain_sim" in acts
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -64,6 +64,15 @@ def is_correlation(finding: dict) -> bool:
     return finding.get("detector_id") in CORRELATION_SOURCES
 
 
+def is_structured_ndpi(finding: dict) -> bool:
+    """plan 008 KTD3/KTD6: the structured nDPI classifier (detector_version 2.0) is excluded
+    from automatic incident promotion. Its findings stay stored and delivered for investigation,
+    but a weak/observation risk must not add a kill-chain stage, inflate entity risk, or count as
+    corroboration until independent promotion exists. Keyed on the versioned contract; legacy nDPI
+    (v1.0) is unaffected. This does NOT change the legacy context that other detectors already use."""
+    return finding.get("detector_id") == "ndpi_risk" and finding.get("detector_version") == "2.0"
+
+
 def _severity(f: dict) -> float:
     try:
         return float(f.get("severity", 0) or 0)

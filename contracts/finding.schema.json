@@ -52,6 +52,9 @@
       "enum": ["NOT_REQUIRED", "REQUIRED", "PENDING", "ENRICHED", "ENRICHMENT_FAILED", "TIMEOUT"]
     },
     "capture_job_ids": { "type": "array", "items": { "type": "string" } },
-    "suppression_reason": { "type": "string" }
+    "suppression_reason": { "type": "string" },
+    "observed": { "type": "boolean" },
+    "emitted_at": { "type": "string", "format": "date-time" },
+    "revision": { "type": "integer", "minimum": 1 }
   }
 }

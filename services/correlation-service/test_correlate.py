@@ -185,6 +185,23 @@ def test_entity_key_ignores_spoofed_message_tenant():
     assert spoofed_a.get("tenant") not in ka and spoofed_b.get("tenant_id") not in ka
 
 
+def test_is_structured_ndpi_predicate():
+    assert c.is_structured_ndpi({"detector_id": "ndpi_risk", "detector_version": "2.0"}) is True
+    assert c.is_structured_ndpi({"detector_id": "ndpi_risk", "detector_version": "1.0"}) is False
+    assert c.is_structured_ndpi({"detector_id": "beacon", "detector_version": "2.0"}) is False
+
+
+def test_structured_ndpi_excluded_from_promotion_inputs():
+    # plan 008 KTD3 / review R01+§3.5: a delivered v2.0 nDPI anomaly must not join a kill chain.
+    now = 1000.0
+    beacon = {"detector_id": "beacon", "category": "c2", "severity": 7, "mitre": [], "ts": now}
+    ndpi_anom = {"detector_id": "ndpi_risk", "detector_version": "2.0", "category": "anomaly",
+                 "severity": 2, "mitre": [], "ts": now}
+    assert c.is_structured_ndpi(ndpi_anom) is True
+    kept = [x for x in [beacon, ndpi_anom] if not c.is_structured_ndpi(x)]
+    assert kept == [beacon]                          # the app loop/reload filter drops the nDPI item
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

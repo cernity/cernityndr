@@ -224,6 +224,23 @@ def test_timeout_finalizes_without_dropping():
     assert done["enrichment_state"] == "TIMEOUT"
 
 
+def test_ndpi_structured_delivery_bypass():
+    obs = {"detector_id": "ndpi_risk", "detector_version": "2.0", "category": "observation", "severity": 2}
+    sm.NDPI_DELIVER_ALL = False                      # default: low-sev structured nDPI is suppressed
+    assert sm.suppress_delivery(obs) is True
+    sm.NDPI_DELIVER_ALL = True                        # toggle on: delivered past the ceiling
+    try:
+        assert sm.suppress_delivery(obs) is False
+        # legacy v1.0 nDPI is NOT exempted (only the structured contract)
+        assert sm.suppress_delivery({"detector_id": "ndpi_risk", "detector_version": "1.0",
+                                     "category": "malware", "severity": 3}) is True
+        # malformed structured candidate (no category) -> normal suppression, never a blind bypass
+        assert sm.suppress_delivery({"detector_id": "ndpi_risk", "detector_version": "2.0",
+                                     "severity": 2}) is True
+    finally:
+        sm.NDPI_DELIVER_ALL = False
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

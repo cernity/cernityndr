@@ -70,8 +70,10 @@ def main():
             for rec in records:
                 result = playbook.playbook(rec.value)
                 producer.send(ACTION_TOPIC, result)
-                notify(result["notification"])
-                handoff(result)
+                if "notify" in result["actions"]:     # R01/KTD6: an empty actions list fires no shell effect
+                    notify(result["notification"])
+                if result["actions"]:
+                    handoff(result)
                 log.info("PLAYBOOK %s actions=%s", result["finding_id"], result["actions"])
         producer.flush()
 

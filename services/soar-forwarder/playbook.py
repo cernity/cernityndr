@@ -18,8 +18,19 @@ def _priority(sev: int) -> int:
     return 2
 
 
+def _ndpi_soar_ineligible(f: dict) -> bool:
+    """plan 008 KTD6: a structured nDPI (v2.0) finding gets NO automatic SOAR effect unless it is a
+    verified suspected-threat/attempt at severity >= 6. observation / unclassified / policy never
+    notify. Legacy nDPI (v1.0) and other detectors are unaffected."""
+    if not (f.get("detector_id") == "ndpi_risk" and f.get("detector_version") == "2.0"):
+        return False
+    return not (int(f.get("severity", 0) or 0) >= 6 and f.get("category") in ("anomaly", "exploit"))
+
+
 def actions_for(f: dict) -> list[str]:
     """Which playbook actions fire for this finding."""
+    if _ndpi_soar_ineligible(f):
+        return []                            # no automatic effect for a low-priority structured nDPI finding
     acts = ["notify"]
     if f.get("detector_id") == "correlation_incident":
         acts.append("escalate_incident")    # correlated multi-stage incident (plan U10): top priority

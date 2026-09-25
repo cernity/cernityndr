@@ -39,6 +39,22 @@ LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
 
 CONFIRMED_THREAT_SOURCES = ("ids_signature", "threat_intel", "file_malware_hash")
 
+# plan 008 KTD6: the structured nDPI classifier (detector_version below) emits honest,
+# often low-severity findings. NDR_NDPI_DELIVER_ALL lets a well-formed structured-nDPI
+# finding past the sev<=5 delivery ceiling so it reaches the SIEM/Vantage (which hides
+# low severity by default, reversibly). Default OFF: enabled only in the canary after the
+# correlation/SOAR eligibility guards are verified — the toggle is a rollout switch, not
+# the safety mechanism. Legacy nDPI (v1.0) and other detectors are unaffected.
+NDPI_STRUCTURED_VERSION = "2.0"
+NDPI_DELIVER_ALL = os.environ.get("NDR_NDPI_DELIVER_ALL", "0").strip().lower() not in ("", "0", "false", "no")
+
+
+def _ndpi_deliver_exempt(cand: dict) -> bool:
+    """A well-formed structured-nDPI finding delivered past the ceiling when the toggle is on."""
+    return bool(NDPI_DELIVER_ALL and cand.get("detector_id") == "ndpi_risk"
+                and cand.get("detector_version") == NDPI_STRUCTURED_VERSION
+                and isinstance(cand.get("category"), str) and cand.get("category"))
+
 # Entity type -> capture profile the orchestrator/gates understand (ip/ja4/sni/dns).
 _ENTITY_PROFILE = {"ip": "ip", "domain": "sni", "sni": "sni", "dns": "dns",
                    "fingerprint": "ja4", "ja3": "ja4", "ja4": "ja4"}
@@ -93,6 +109,8 @@ def suppress_delivery(cand: dict) -> bool:
     threat gate raised above the ceiling (because the destination looked hostile)
     is delivered."""
     if cand.get("detector_id") in CONFIRMED_THREAT_SOURCES:
+        return False
+    if _ndpi_deliver_exempt(cand):
         return False
     return int(cand.get("severity", 10) or 10) <= SUPPRESS_MAX_SEVERITY
 

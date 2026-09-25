@@ -15,7 +15,6 @@ Tenant is resolved per record (U2), so two tenants never share a window.
 """
 import hashlib
 import json
-import logging
 import os
 import re
 import signal
@@ -28,6 +27,7 @@ import detectors as det
 import store as store_mod
 import metrics
 import config_source
+import ndpi_policy as ndpi_pol
 
 log = ndr_runtime.setup_logging("behavioral-detectors")
 
@@ -37,8 +37,9 @@ WINDOW = float(os.environ.get("WINDOW_SECS", "600"))
 EVAL_EVERY = float(os.environ.get("EVAL_SECS", "30"))
 CUM_LONGCONN_SECS = float(os.environ.get("LONGCONN_CUM_SECS", str(0.5 * WINDOW)))
 CANDIDATE_TOPIC = os.environ.get("NDR_CANDIDATE_TOPIC", "ndr.finding.candidate.v1")
+NDPI_MODE = os.environ.get("NDR_NDPI_CLASSIFICATION_MODE", "legacy")   # plan 008: legacy | structured
 GROUP_ID = os.environ.get("NDR_GROUP_ID", "ndr-behavioral-detectors")
-OFFSET_RESET = os.environ.get("NDR_OFFSET_RESET", "latest")
+OFFSET_RESET = os.environ.get("NDR_OFFSET_RESET") or "latest"   # empty (unset compose passthrough) -> default, never ""
 STATE_BACKEND = os.environ.get("NDR_STATE_BACKEND", "memory")
 REDIS_URL = os.environ.get("NDR_REDIS_URL", "redis://redis:6379/0")
 PREV_CAP = 9
@@ -153,9 +154,14 @@ def _rfc3339(ep):
     return datetime.fromtimestamp(ep, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def _candidate(detector_id, category, severity, confidence, entities, tenant, obs=(None, None)):
+def _candidate(detector_id, category, severity, confidence, entities, tenant, obs=(None, None),
+               *, detector_version="1.0", identity=None):
     bucket = int(time.time() // WINDOW)
-    if not _store.dedup_seen(f"emit:{tenant}:{detector_id}:{_stable(entities) % 10**12}:{bucket}", WINDOW):
+    # An explicit identity string (plan 008 KTD4) keeps mutable evidence in `entities` (scores,
+    # timestamps, raw records) out of the finding identity; the digest is 128-bit. Legacy callers
+    # pass no identity and keep the original entities hash.
+    dedup_key = hashlib.sha256(identity.encode()).hexdigest()[:32] if identity is not None else str(_stable(entities) % 10**12)
+    if not _store.dedup_seen(f"emit:{tenant}:{detector_id}:{dedup_key}:{bucket}", WINDOW):
         return None
     metrics.finding(detector_id, tenant)
     emitted = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())     # when the aggregate was EMITTED
@@ -166,8 +172,9 @@ def _candidate(detector_id, category, severity, confidence, entities, tenant, ob
     # in-window match (R06/§33.3). `emitted_at` is the availability signal, kept separate from observation.
     fs = _rfc3339(omin) if observed else emitted
     ls = _rfc3339(omax if omax is not None else omin) if observed else emitted
-    return {"finding_id": f"{detector_id}-{_stable(entities) % 10**10}-{bucket}",
-            "tenant_id": tenant, "detector_id": detector_id, "detector_version": "1.0",
+    fid = f"{detector_id}-{dedup_key}-{bucket}" if identity is not None else f"{detector_id}-{_stable(entities) % 10**10}-{bucket}"
+    return {"finding_id": fid,
+            "tenant_id": tenant, "detector_id": detector_id, "detector_version": detector_version,
             "category": category, "severity": severity, "confidence": confidence,
             "first_seen": fs, "last_seen": ls, "observed": observed, "emitted_at": emitted,
             "entities": entities, "state": "CANDIDATE"}
@@ -368,6 +375,10 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
         total = _store.counter_get(key, "b")
         if not total:
             _prune_index(key); continue
+        exo = _store.window_range("exo:" + key[len("ex:"):], floor)          # R06: observed exfil event times
+        obs = (exo[0][0], exo[-1][0]) if exo else (None, None)
+        exb = _store.window_range("exb:" + key[len("ex:"):], floor)          # §49.4: per-flow bytes-to-server
+        material_flows = sum(1 for _, v in exb if (v or 0) >= cfg.get("exfil_material_flow_bytes", 100_000))
         is_e, escore = det.exfil_check(int(total), dst, threshold_bytes=cfg["exfil_bytes"])
         if is_e:
             breed, risks = _store.kv_get(f"ctx:{ten}:{src}|{dst}") or ["", []]
@@ -375,19 +386,20 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst},
                               {"type": "bytes", "value": int(total)}])
-            c = _candidate("exfil", "exfil", sev, escore, ent, ten)
+            c = _candidate("exfil", "exfil", sev, escore, ent, ten, obs=obs)
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("EXFIL %s->%s bytes=%d", src, dst, int(total))
         else:
             # low-and-slow exfil: sustained trickle below the burst ceiling (T1030)
             conns = int(_store.counter_get(key, "c") or 0)
-            is_ls, lscore = det.low_slow_exfil(int(total), conns, dst, threshold_bytes=cfg["exfil_bytes"])
+            is_ls, lscore = det.low_slow_exfil(int(total), conns, dst, threshold_bytes=cfg["exfil_bytes"],
+                                               material_flows=material_flows)   # §49.4: require distributed flows
             if is_ls:
                 ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                                   {"type": "ip", "role": "dst", "value": dst},
                                   {"type": "bytes", "value": int(total)},
                                   {"type": "connections", "value": conns}])
-                c = _candidate("low_slow_exfil", "exfil", 6, lscore, ent, ten)
+                c = _candidate("low_slow_exfil", "exfil", 6, lscore, ent, ten, obs=obs)
                 if c:
                     producer.send(CANDIDATE_TOPIC, c); log.info("LOW_SLOW_EXFIL %s->%s bytes=%d conns=%d", src, dst, int(total), conns)
     # cumulative long-connection (moved from _handle, plan 007)
@@ -482,6 +494,8 @@ def _handle(e, producer, now, part=0, cfg=None):
             _sadd_add(f"pv:{ten}:{dst}", src)                               # fleet prevalence (uncapped; env bucket unaffected)
             _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "b", b2s)  # exfil bytes -> threshold in evaluate()
             _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "c", 1)    # connection count -> low-slow exfil in evaluate()
+            _win_add("exo:", part, f"exo:{part}:{ten}:{src}|{dst}", evt, 0)  # R06: observed event times for the exfil interval
+            _win_add("exb:", part, f"exb:{part}:{ten}:{src}|{dst}", evt, b2s)  # §49.4: per-flow bytes (distributed-exfil evidence)
             _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "s", age)  # cumulative long-conn secs -> evaluate()
             _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "n", 1)    # ... and conn count
             _znx_add("kd:", part, f"kd:{part}:{ten}:{src}", dst, time.time())  # first-seen dst -> rare-dest in evaluate().
@@ -500,15 +514,24 @@ def _handle(e, producer, now, part=0, cfg=None):
                 _win_add("bf:", part, f"bf:{part}:{ten}:{src}|{dom[0]}", evt, b2s + b2c)
                 _sadd_add(f"fi:{ten}:{src}|{dom[0]}", dst)
         # inline stateless detectors (no Redis state): ndpi risk + age-based long connection
-        hit, matched = det.ndpi_risk_hit([str(r) for r in risks])
-        if not hit and det.ndpi_breed_hit(breed):
-            hit, matched = True, [f"breed:{breed} proto:{n.get('proto', '?')}"]
-        if hit:
-            ent = json.dumps([{"type": "ip", "role": "src", "value": src},
-                              {"type": "ndpi_risk", "value": sorted(matched)}])
-            c = _candidate("ndpi_risk", "malware", 6, 0.6, ent, ten)
-            if c:
-                producer.send(CANDIDATE_TOPIC, c); log.info("NDPI_RISK %s %s", src, matched)
+        if NDPI_MODE == "structured":                        # plan 008: honest per-category classification
+            for fnd in ndpi_pol.ndpi_findings(n, src, dst, ten):
+                c = _candidate("ndpi_risk", fnd["category"], fnd["severity"], fnd["confidence"],
+                               json.dumps(fnd["entities"]), ten,
+                               detector_version=ndpi_pol.DETECTOR_VERSION, identity=fnd["identity"])
+                if c:
+                    producer.send(CANDIDATE_TOPIC, c)
+                    log.info("NDPI %s %s->%s sev=%s rules=%s", fnd["category"], src, dst, fnd["severity"], fnd["rules"])
+        else:                                                # legacy substring behavior (default; unchanged)
+            hit, matched = det.ndpi_risk_hit([str(r) for r in risks])
+            if not hit and det.ndpi_breed_hit(breed):
+                hit, matched = True, [f"breed:{breed} proto:{n.get('proto', '?')}"]
+            if hit:
+                ent = json.dumps([{"type": "ip", "role": "src", "value": src},
+                                  {"type": "ndpi_risk", "value": sorted(matched)}])
+                c = _candidate("ndpi_risk", "malware", 6, 0.6, ent, ten)
+                if c:
+                    producer.send(CANDIDATE_TOPIC, c); log.info("NDPI_RISK %s %s", src, matched)
         is_l, ls = det.longconn_check(age, dst)
         if is_l:
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},

@@ -88,6 +88,14 @@ def test_candidate_is_schema_complete_and_deterministic():
     assert c["finding_id"] == p.to_candidate(INTEL)["finding_id"]
 
 
+def test_source_events_carries_full_notice_record():
+    # U3: the promoted finding carries the originating Zeek notice verbatim; verdict unchanged (R6).
+    c = p.to_candidate(INTEL)
+    se = c["source_events"][0]
+    assert se["record"]["note"] == "Intel::Notice" and se["record"]["sub"] == "45.9.148.2"
+    assert c["detector_id"] == "zeek_notice"                    # R6: verdict unchanged
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

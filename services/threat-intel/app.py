@@ -4,7 +4,6 @@ flow/tls telemetry against them -> ndr.finding.candidate.v1. Matching logic is
 covered by test_ti.py; this is the fetch + consume shell.
 """
 import json
-import logging
 import os
 import signal
 import ssl

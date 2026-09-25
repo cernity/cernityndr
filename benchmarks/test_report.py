@@ -62,6 +62,18 @@ def test_unreconciled_run_renders_diagnostic_not_qualified():
     assert not r._qualified(unfinished)
 
 
+def test_delivery_conflict_run_cannot_render_qualified():
+    # §39.5 report-level negative control: a delivery CONFLICT (ledger present but not reconciled) must
+    # render DIAGNOSTIC with the disagreement shown, never a qualified effectiveness table.
+    conflict = dict(RESULTS, completion={
+        "state": "inputs_drained",
+        "unresolved": ["downstream delivery CONFLICT — durable ledger present but does not reconcile; NOT overridden by the bus receipt (§39.2): ledger accounts 1 of 100"],
+        "delivery": {"source": "obligation-ledger", "delivered": 1, "dead_lettered": 0}})
+    md = r.render_markdown(conflict)
+    assert not r._qualified(conflict)
+    assert "DIAGNOSTIC" in md and "delivery CONFLICT" in md
+
+
 def test_reconciled_run_is_qualified():
     # R09: a reconciled run with no unresolved work IS a qualified result (no diagnostic banner).
     done = dict(RESULTS, completion={"state": "reconciled", "unresolved": [],
@@ -70,6 +82,15 @@ def test_reconciled_run_is_qualified():
     assert r._qualified(done)
     assert "DIAGNOSTIC" not in md
     assert "Qualified effectiveness result: **yes**" in md
+
+
+def test_unbound_capture_run_is_not_qualified():
+    # §49.3: a reconciled run whose capture is NOT hash-bound is diagnostic, not qualified.
+    reconciled_unbound = dict(RESULTS, completion={"state": "reconciled", "unresolved": []}, capture_bound=False)
+    assert not r._qualified(reconciled_unbound)
+    assert "DIAGNOSTIC" in r.render_markdown(reconciled_unbound)
+    bound = dict(RESULTS, completion={"state": "reconciled", "unresolved": []}, capture_bound=True)
+    assert r._qualified(bound)
 
 
 if __name__ == "__main__":

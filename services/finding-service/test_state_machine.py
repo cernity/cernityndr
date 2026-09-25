@@ -24,7 +24,6 @@ def test_recon_low_severity_is_delivery_suppressed():
     assert route == "final"                       # still on the bus for correlation
     assert f["state"] == "SUPPRESSED"
     assert f["enrichment_state"] == "NOT_REQUIRED"
-    assert f["state"] == "SUPPRESSED" and f["devo_delivery_state"] == "NONE"  # SUPPRESSED is a state; delivery-state stays a valid enum
     assert f["suppression_reason"]
     assert f["mitre"] == ["T1046"]
 
@@ -49,7 +48,7 @@ def test_finding_above_suppression_ceiling_is_delivered():
     # is delivered normally.
     f, route = sm.build_finding(dict(SCAN, severity=7))
     assert route == "final" and f["state"] == "FINAL"
-    assert f["devo_delivery_state"] == "QUEUED" and f["suppression_reason"] == ""
+    assert f["suppression_reason"] == ""
 
 
 def test_suppress_delivery_predicate():
@@ -75,7 +74,6 @@ def test_failed_enrichment_still_finalizes():
     done = sm.apply_enrichment_result(f, {"status": "failed"})
     assert done["state"] == "FINAL"                   # not dropped
     assert done["enrichment_state"] == "ENRICHMENT_FAILED"
-    assert done["devo_delivery_state"] == "QUEUED"
 
 
 def test_ok_enrichment_attaches_evidence():
@@ -83,6 +81,36 @@ def test_ok_enrichment_attaches_evidence():
     done = sm.apply_enrichment_result(f, {"status": "ok", "evidence_refs": ["minio://ndr-pcap/x"]})
     assert done["enrichment_state"] == "ENRICHED"
     assert "minio://ndr-pcap/x" in done["evidence_refs"]
+
+
+def test_ok_enrichment_propagates_summary_and_iocs():
+    # The Zeek worker (zeek-central) emits status/summary/iocs/evidence_refs; the reviewed merge
+    # copied only evidence_refs, so the analyst never saw the Zeek summary or extracted indicators
+    # in the final SIEM finding. They must survive onto the finalized finding.
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    result = {"status": "ok", "evidence_refs": ["minio://ndr-pcap/x"],
+              "summary": {"conn": {"connections": 3}, "ssl": {"unique_ja3": ["j1"]}},
+              "iocs": {"ja3": ["j1"], "file_hashes": ["abc"]}}
+    done = sm.apply_enrichment_result(f, result)
+    assert done["summary"] == result["summary"]
+    assert done["iocs"]["ja3"] == ["j1"] and done["iocs"]["file_hashes"] == ["abc"]
+
+
+def test_duplicate_enrichment_is_idempotent():
+    # A duplicate/late result must not double-append evidence or clobber prior indicators (R03).
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    r = {"status": "ok", "evidence_refs": ["minio://ndr-pcap/x"], "iocs": {"ja3": ["j1"]}}
+    once = sm.apply_enrichment_result(f, r)
+    twice = sm.apply_enrichment_result(once, dict(r, iocs={"ja3": ["j1", "j2"]}))
+    assert twice["evidence_refs"].count("minio://ndr-pcap/x") == 1     # deduped
+    assert twice["iocs"]["ja3"] == ["j1", "j2"]                        # union, not clobber
+
+
+def test_failed_enrichment_does_not_attach_summary():
+    # A failed enrichment finalizes but must not carry a summary/iocs it never produced.
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)
+    done = sm.apply_enrichment_result(f, {"status": "failed", "summary": {"x": 1}})
+    assert "summary" not in done and "iocs" not in done
 
 
 def test_lifecycle_issues_monotonic_revisions():
@@ -94,6 +122,17 @@ def test_lifecycle_issues_monotonic_revisions():
     assert enriched["revision"] == 2 and f["revision"] == 1     # bump does not mutate the original
     timed_out = sm.finalize_timeout(f)
     assert timed_out["revision"] == 2
+
+
+def test_source_events_survive_lifecycle():
+    # U4: provenance rides through the lifecycle unchanged and gates no decision (R6).
+    se = [{"event_type": "quic", "community_id": "1:z=", "record": {"quic": {"ja4": "q13d.."}}}]
+    f, route = sm.build_finding(dict(SCAN, severity=7, source_events=se))
+    assert f["source_events"] == se                              # carried onto the finding
+    assert f["detector_id"] == SCAN["detector_id"]               # verdict unchanged
+    enriched = sm.apply_enrichment_result(f, {"status": "ok", "evidence_refs": []})
+    assert enriched["source_events"] == se                       # preserved through enrichment
+    assert sm.finalize_timeout(f)["source_events"] == se         # preserved through timeout finalize
 
 
 def test_finding_id_deterministic_for_dedup():
@@ -129,6 +168,11 @@ def test_g3_confirmed_threat_source_captures_evidence_regardless_of_confidence()
     for cat in ("discovery", "credential_access", "lateral", "impact", "defense_evasion"):
         assert sm.decide_enrichment({"detector_id": "kerberoasting", "category": cat, "confidence": 0.7}) == "metadata_sufficient", cat
     assert sm.decide_enrichment({"detector_id": "beacon", "category": "c2", "confidence": 0.6}) == "packets_needed"
+    # distributed low-and-slow exfil is STRUCTURAL (material-flow count from metadata, §49.4) -> deliver
+    # directly even at low confidence, so it is not lost/delayed without a forensics overlay. The burst
+    # 'exfil' detector is still content-adjudicated.
+    assert sm.decide_enrichment({"detector_id": "low_slow_exfil", "category": "exfil", "confidence": 0.22}) == "metadata_sufficient"
+    assert sm.decide_enrichment({"detector_id": "exfil", "category": "exfil", "confidence": 0.5}) == "packets_needed"
     # a confirmed-threat source still captures for evidence regardless of category
     assert sm.decide_enrichment({"detector_id": "ids_signature", "category": "lateral", "confidence": 0.9}) == "packets_needed"
 
@@ -146,7 +190,6 @@ def test_confirmed_threat_delivered_immediately_and_still_captures():
     assert route == "final_and_capture"
     assert f["state"] == "FINAL"                    # on the SIEM now
     assert f["enrichment_state"] == "PENDING"       # evidence follows; it does not gate
-    assert f["devo_delivery_state"] == "QUEUED"
 
 
 def test_capture_job_carries_sensor_and_value():
@@ -179,7 +222,23 @@ def test_timeout_finalizes_without_dropping():
     done = sm.finalize_timeout(f)
     assert done["state"] == "FINAL"                 # delivered, never dropped
     assert done["enrichment_state"] == "TIMEOUT"
-    assert done["devo_delivery_state"] == "QUEUED"
+
+
+def test_ndpi_structured_delivery_bypass():
+    obs = {"detector_id": "ndpi_risk", "detector_version": "2.0", "category": "observation", "severity": 2}
+    sm.NDPI_DELIVER_ALL = False                      # default: low-sev structured nDPI is suppressed
+    assert sm.suppress_delivery(obs) is True
+    sm.NDPI_DELIVER_ALL = True                        # toggle on: delivered past the ceiling
+    try:
+        assert sm.suppress_delivery(obs) is False
+        # legacy v1.0 nDPI is NOT exempted (only the structured contract)
+        assert sm.suppress_delivery({"detector_id": "ndpi_risk", "detector_version": "1.0",
+                                     "category": "malware", "severity": 3}) is True
+        # malformed structured candidate (no category) -> normal suppression, never a blind bypass
+        assert sm.suppress_delivery({"detector_id": "ndpi_risk", "detector_version": "2.0",
+                                     "severity": 2}) is True
+    finally:
+        sm.NDPI_DELIVER_ALL = False
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@ deliver them unchanged (plan KTD7). Incident-typed inputs are ignored so an
 incident never re-correlates into another incident.
 """
 import json
-import logging
 import os
 import signal
 import time
@@ -91,6 +90,7 @@ def _entity_of(f, ch):
 
 def _normalize(f, now):
     return {"finding_id": f.get("finding_id"), "detector_id": f.get("detector_id", ""),
+            "detector_version": f.get("detector_version", ""),
             "category": f.get("category", ""), "severity": f.get("severity", 0),
             "mitre": f.get("mitre") or [], "ts": now}
 
@@ -120,8 +120,8 @@ def _reload(ch):
         r = ch.query("SELECT entity, findings_json FROM ndr.entity_risk_state FINAL "
                      "WHERE tenant_id=%(t)s", parameters={"t": TENANT})
         for ent, js in r.result_rows:
-            try:
-                _state[ent] = json.loads(js)
+            try:                             # plan 008 KTD3: never restore ineligible v2.0 nDPI contributions
+                _state[ent] = [x for x in json.loads(js) if not corr.is_structured_ndpi(x)]
             except ValueError:
                 pass
         log.info("reloaded window state for %d entities", len(_state))
@@ -180,6 +180,8 @@ def main():
             for rec in recs:
                 f = rec.value
                 if corr.is_correlation(f):       # never re-correlate incidents/corroborations (no loop)
+                    continue
+                if corr.is_structured_ndpi(f):   # plan 008 KTD3: v2.0 nDPI is not promotion-eligible
                     continue
                 ent = _entity_of(f, ch)
                 if ent:

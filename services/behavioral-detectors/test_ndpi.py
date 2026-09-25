@@ -1,11 +1,14 @@
 """nDPI risk-set normalization: Suricata emits `flow_risk` (dict or list); the
 detector must read it (not just fall back to breed)."""
 import os
+import json
+from pathlib import Path
 
 os.environ["NDR_TENANT"] = "default"
 
 import app
 import detectors as det
+import ndpi_policy as ndpi_pol
 
 
 def test_flow_risk_dict_id_to_name():
@@ -37,11 +40,52 @@ def test_risk_feeds_the_detector():
     assert hit and matched
 
 
+# --- U3/R15: emitted candidates must conform to the strict finding schema ---
+_SCHEMA = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "finding.schema.json").read_text())
+_PROPS = set(_SCHEMA["properties"])
+_REQ = set(_SCHEMA["required"])
+
+
+def _conforms(cand):
+    # finding.schema.json is additionalProperties:false -> every key must be declared, required present
+    assert cand is not None, "candidate was dedup-suppressed; use a unique identity/entities per test"
+    extra = set(cand) - _PROPS
+    assert not extra, f"undeclared fields (schema additionalProperties:false): {extra}"
+    assert _REQ <= set(cand), f"missing required: {_REQ - set(cand)}"
+
+
+def test_legacy_candidate_conforms_to_schema():
+    ent = json.dumps([{"type": "ip", "role": "src", "value": "10.0.0.9"}])
+    _conforms(app._candidate("ndpi_risk", "malware", 6, 0.6, ent, "schema-legacy"))
+
+
+def test_structured_candidate_conforms_to_schema():
+    fnds = ndpi_pol.ndpi_findings({"flow_risk": {"35": {"risk": "Susp Entropy", "severity": "Low"}}},
+                                  "10.0.0.1", "10.0.0.2", "schema-structured")
+    assert len(fnds) == 1
+    fnd = fnds[0]
+    c = app._candidate("ndpi_risk", fnd["category"], fnd["severity"], fnd["confidence"],
+                       json.dumps(fnd["entities"]), "schema-structured",
+                       detector_version=ndpi_pol.DETECTOR_VERSION, identity=fnd["identity"])
+    _conforms(c)
+    assert c["detector_version"] == "2.0" and c["category"] == "observation" and c["severity"] == 2
+
+
+def test_r15_fields_are_declared_in_schema():
+    # the fields the emitter actually sets, previously rejected by additionalProperties:false
+    assert {"observed", "emitted_at", "revision"} <= _PROPS
+
+
+def test_structured_mode_default_is_legacy():
+    assert app.NDPI_MODE == "legacy"       # inert until explicitly enabled (plan 008 KTD6)
+
+
 if __name__ == "__main__":
-    test_flow_risk_dict_id_to_name()
-    test_flow_risk_dict_name_to_bool()
-    test_flow_risk_list_passthrough()
-    test_legacy_risk_field_still_works()
-    test_empty_when_no_ndpi()
-    test_risk_feeds_the_detector()
-    print("all nDPI tests passed")
+    import inspect
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    ran = 0
+    for fn in fns:
+        if inspect.getfullargspec(fn).args:
+            continue
+        fn(); print(f"ok  {fn.__name__}"); ran += 1
+    print(f"\nall {ran} nDPI tests passed")

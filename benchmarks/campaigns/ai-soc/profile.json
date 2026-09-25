@@ -1,0 +1,24 @@
+{
+  "name": "reference-mdr-smb-egress",
+  "kind": "reference",
+  "note": "REFERENCE profile, not a validated operator requirement set. Assumptions are stated and targets are frozen BEFORE any held-out run (§44.2). Do not fit thresholds to observed results.",
+  "assumptions": [
+    "single-tenant SMB network, egress-monitored, no forensics/pcap overlay deployed (Parser -> Cernity -> SIEM MDR path)",
+    "investigator operates the arm's normal analyst surface only; no access to raw suppressed evidence the deployment does not expose",
+    "traffic mix is mostly benign with a small number of planted incidents and benign mimics"
+  ],
+  "asset_roles": {
+    "10.0.0.15": {"role": "workstation", "criticality": "medium"},
+    "10.0.0.10": {"role": "workstation", "criticality": "low"},
+    "10.0.0.11": {"role": "workstation", "criticality": "low"},
+    "10.0.0.5":  {"role": "workstation", "criticality": "medium"}
+  },
+  "incident_taxonomy": ["c2", "exfil", "recon", "lateral", "benign"],
+  "critical_categories": ["c2", "exfil", "lateral"],
+  "evidence_sources": ["arm findings/alerts index (read-only)"],
+  "review_budget": 5,
+  "acceptable_critical_misses": 0,
+  "acceptable_false_escalations": 1,
+  "availability_deadline_secs": 3600,
+  "frozen_at": "2026-09-14"
+}

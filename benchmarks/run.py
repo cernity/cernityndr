@@ -451,7 +451,7 @@ def ledger_disposition(records):
     obligations per destination (deduped by finding_id+revision+dest — a record appears once even if the
     ledger was appended to across restarts). dead_lettered>0 is a recorded delivery FAILURE (valid
     negative), still accounted."""
-    seen, sinks = set(), {}
+    seen, sinks, suppressed = set(), {}, set()
     for r in records or []:
         if not isinstance(r, dict):
             continue
@@ -459,6 +459,11 @@ def ledger_disposition(records):
         if key in seen:
             continue
         seen.add(key)
+        # §59.1: a suppressed record ('(withheld)', outcome 'suppressed') is a per-(finding_id, revision)
+        # terminal disposition, NOT a real sink — count its identity, don't invent a '(withheld)' sink.
+        if r.get("outcome") == "suppressed" or r.get("dest") == "(withheld)":
+            suppressed.add((r.get("finding_id"), r.get("revision")))
+            continue
         s = sinks.setdefault(r.get("dest"), {"name": r.get("dest"), "delivered": 0, "dead_lettered": 0})
         if r.get("outcome") == "delivered":
             s["delivered"] += 1
@@ -466,7 +471,8 @@ def ledger_disposition(records):
             s["dead_lettered"] += 1
     return {"sinks": list(sinks.values()),
             "delivered": sum(s["delivered"] for s in sinks.values()),
-            "dead_lettered": sum(s["dead_lettered"] for s in sinks.values())}
+            "dead_lettered": sum(s["dead_lettered"] for s in sinks.values()),
+            "suppressed_identities": len(suppressed)}
 
 
 def read_eval_acks(project, topic="ndr.eval.ack.v1", limit=5000, timeout=12):
@@ -536,6 +542,123 @@ def lifecycle_disposition(acks):
             "pending": sum(a.get("pending", 0) for a in latest.values()),
             "finalized": sum(a.get("finalized", 0) for a in latest.values()),
             "workers": len(latest)}
+
+
+def _event_identity(e):
+    """§59.1: canonical per-event identity — MUST match tools/eve-feeder/feeder.py `_event_identity`.
+    Normalized event content with the REANCHORED fields (timestamp, flow.start/end) removed, so the
+    feeder's reanchored read set and the harness's original-clock source set compare on stable content."""
+    import hashlib
+    e2 = {k: v for k, v in e.items() if k != "timestamp"}
+    fl = e2.get("flow")
+    if isinstance(fl, dict):
+        e2["flow"] = {k: v for k, v in fl.items() if k not in ("start", "end")}
+    return hashlib.sha1(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def _identity_digest(ids):
+    """Order-independent multiset digest (matches the feeder): a permutation matches, a drop/dup does not."""
+    import hashlib
+    h = hashlib.sha256()
+    for i in sorted(ids):
+        h.update(i.encode()); h.update(b"\n")
+    return h.hexdigest()
+
+
+def source_identity_digest(source_eve_path):
+    """The identity multiset digest of the events Suricata PRODUCED (from the exported source-eve.jsonl).
+    None if the file is unavailable. Uses the same identity scheme as the feeder so digests are comparable."""
+    if not source_eve_path or not os.path.isfile(source_eve_path):
+        return None
+    ids = []
+    with open(source_eve_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ids.append(_event_identity(json.loads(line)))
+            except (ValueError, TypeError):
+                return None
+    return _identity_digest(ids)
+
+
+def reconcile_source_coverage(source_eve_count, feed_manifest, source_id_digest=None):
+    """§49.3/§59.1 source coverage: reconcile what the feeder CONSUMED against what Suricata produced, by
+    IDENTITY when available (not just counts). The feeder records a per-event identity multiset digest;
+    the harness computes the same digest over the exported source events. Identity comparison catches an
+    equal-count omission+duplication that a count check misses:
+      * fed_identity_digest != read_identity_digest -> the feeder dropped AND/OR duplicated mid-feed;
+      * read_identity_digest != source_identity_digest -> the feeder's read set differs from Suricata's
+        produced set (omission or substitution), even if the totals match.
+    Counts remain a coarse fallback when identities are absent. A missing manifest is unverified, not ok."""
+    if not isinstance(feed_manifest, dict):
+        return False, ["no feed manifest — source coverage unverified (§49.3)"]
+    read, fed = feed_manifest.get("read_events"), feed_manifest.get("fed_events")
+    if not _is_count(read) or not _is_count(fed):
+        return False, [f"feed manifest missing counts (read={read!r}, fed={fed!r})"]
+    problems = []
+    rd, fd = feed_manifest.get("read_identity_digest"), feed_manifest.get("fed_identity_digest")
+    if rd and fd:
+        if fd != rd:
+            problems.append("feeder fed a DIFFERENT identity multiset than it read — dropped/duplicated "
+                            "mid-feed (identity digest mismatch, §59.1)")
+        if source_id_digest and rd != source_id_digest:
+            problems.append("feeder's read identity multiset != Suricata's produced set — source omission/"
+                            "substitution even though counts may match (§59.1)")
+    else:                                                    # no identity evidence -> coarse count fallback
+        if fed != read:
+            problems.append(f"feeder fed {fed} of {read} read events — dropped/duplicated mid-feed")
+        if _is_count(source_eve_count) and read != source_eve_count:
+            problems.append(f"feeder read {read} events but Suricata produced {source_eve_count} — source omission")
+    return (not problems), problems
+
+
+def reconcile_obligations(lifecycle, ledger, suppressed=0, expected_sinks=None):
+    """§49.3 destination-obligation coverage (hardened per §57.5): reconcile the ACCEPTED-work inventory
+    (finding-service lifecycle: delivered_now + finalized = findings dispatched to the sink plane)
+    against each destination's terminal outcomes. A dispatched finding reaches a terminal disposition
+    three ways: DELIVERED to the sink, DEAD-LETTERED at the sink (both in the durable ledger), or
+    DELIVERY-SUPPRESSED at the forwarder (withheld from the analyst plane, kept on the bus for
+    correlation; no per-sink ledger record — its count comes from the forwarder receipt). The NET
+    obligation each sink must terminally account for is (dispatched - suppressed).
+
+    Fails closed (returns ok=False), never a silent success, when:
+      * work was dispatched but the ledger records NO sink outcomes (missing/empty ledger != delivered);
+      * an `expected_sinks` destination is ABSENT from the ledger (a missing sink cannot be assumed
+        delivered — §57.5 acceptance);
+      * a present sink accounts for fewer than the net obligation.
+    Explicit zero expected work (nothing dispatched, no sinks) reconciles; an all-suppressed run (net 0)
+    reconciles on its own disposition inventory without any per-sink delivery record. `lifecycle` unknown
+    while findings exist is UNKNOWN, not success — return (False) so the qualification gate blocks."""
+    if lifecycle is None:
+        return False, ["obligation reconciliation UNKNOWN — no lifecycle disposition available (§57.5)"]
+    deliverable = int(lifecycle.get("delivered_now", 0) or 0) + int(lifecycle.get("finalized", 0) or 0)
+    # §59.1: prefer the ledger's PER-(finding_id, revision) suppressed IDENTITY count over the aggregate
+    # receipt count — identity accounting proves each suppressed revision is a distinct terminal record,
+    # not a bare tally that a duplicate/omission could distort. Fall back to the receipt count if the
+    # forwarder did not record suppression identities (older build).
+    supp = int((ledger or {}).get("suppressed_identities", None)
+               if (ledger or {}).get("suppressed_identities", None) is not None else (suppressed or 0))
+    net = deliverable - supp                              # obligations that must reach a sink
+    sinks = (ledger or {}).get("sinks") or []
+    problems = []
+    if net <= 0 and not sinks:
+        return True, [f"zero net obligations to deliver (dispatched={deliverable}, suppressed={supp})"]
+    if net > 0 and not sinks:
+        return False, [f"{net} net obligations dispatched but the ledger records NO sink outcomes — "
+                       "missing destination evidence is UNKNOWN, not delivered (§57.5)"]
+    seen = {s.get("name") for s in sinks}
+    for name in (expected_sinks or []):
+        if name not in seen:
+            problems.append(f"expected sink {name!r} ABSENT from the ledger — a missing destination "
+                            "cannot be assumed delivered (§57.5)")
+    for s in sinks:
+        acc = int(s.get("delivered", 0) or 0) + int(s.get("dead_lettered", 0) or 0) + supp
+        if acc < deliverable:
+            problems.append(f"{s.get('name')}: accounts {acc} obligations (delivered+dead_lettered+"
+                            f"suppressed) < {deliverable} dispatched (lifecycle) — under-accounted destination")
+    return (not problems), problems
 
 
 def lifecycle_ok_gate(lifecycle, produced_count):
@@ -648,11 +771,30 @@ def _ledger_accounted(ledger, aggregate):
     if ledger is None:
         return False, "no ledger"
     accounted = ledger.get("delivered", 0) + ledger.get("dead_lettered", 0)
-    if accounted > 0:
-        return True, ""
-    if aggregate is not None and _is_count(aggregate.get("delivered_live")) and aggregate["delivered_live"] == 0:
-        return True, ""                              # independently-proven zero-delivery run
-    return False, "empty durable ledger with no independent proof of a zero-delivery run (R01)"
+    live = aggregate.get("delivered_live") if aggregate else None
+    if _is_count(live):
+        # §36.3/§39.2 accounting: the durable ledger must account for AT LEAST the forwarder's live
+        # deliveries — checked PER DESTINATION, not just as a global total (a global sum can hide a
+        # missing sink: 100 live to sink A can mask 0 to sink B). Every destination the receipt describes
+        # must have the ledger record >= live terminal obligations for it. `>=` (not `==`) tolerates
+        # prior-run entries; the bounded bench starts fresh so it is normally `==`. A NONEMPTY-but-partial
+        # ledger (1 of 100), or a ledger missing a destination, must NOT reconcile just because positive.
+        led_sinks = {s.get("name"): s.get("delivered", 0) + s.get("dead_lettered", 0)
+                     for s in ledger.get("sinks", [])}
+        rec_sinks = [s.get("name") for s in (aggregate.get("sinks") or [])]
+        if rec_sinks:
+            short = {n: led_sinks.get(n, 0) for n in rec_sinks if led_sinks.get(n, 0) < live}
+            if short:
+                return False, f"ledger under-accounts per destination vs live={live}: {short} — partial/missing-sink (§39.2)"
+            return True, ""
+        # receipt has no per-sink breakdown: fall back to the global-total check.
+        if accounted >= live:
+            return True, ""
+        return False, f"ledger accounts {accounted} of {live} live deliveries — partial accounting (§36.3)"
+    # No valid receipt to bound the expectation: a NONEMPTY ledger is authoritative (the §stage3 run8
+    # non-racing case — the ledger cannot race its own synchronous writes); an EMPTY ledger cannot prove
+    # a zero-delivery run without independent corroboration.
+    return (accounted > 0, "" if accounted > 0 else "empty durable ledger with no independent proof of a zero-delivery run (R01/§36.3)")
 
 
 def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-suricata",),
@@ -699,12 +841,18 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
     empty_baseline = [i for i in required if arm_counts.get(i, 0) < 1]
     if empty_baseline:
         unresolved.append(f"baseline arm empty: {empty_baseline}")
-    # Delivery is accounted authoritatively by the durable ledger — but only when the ledger actually
-    # ACCOUNTS for the expected deliveries (R01: a readable-but-empty ledger no longer reconciles a run
-    # that delivered findings). The independent expected inventory is the forwarder's validated receipt;
-    # the receipt is also the fallback account when the ledger is unreadable.
+    # Delivery accounting (§39.2 fix): the durable ledger is AUTHORITATIVE when present. An available
+    # ledger that FAILS reconciliation is CONFLICTING evidence, not missing evidence — it must block
+    # qualification and must NOT be overridden by an internally-balanced bus receipt (the §39.2 blocker:
+    # `ledger_ok or _receipt_accounted(receipt)` let a 100-item receipt erase a 1-delivery ledger
+    # contradiction). Receipt-only mode applies solely when the ledger is genuinely absent.
     ledger_ok, ledger_reason = _ledger_accounted(ledger, sink_receipt)
-    delivery_accounted = ledger_ok or _receipt_accounted(sink_receipt)
+    if ledger is not None:
+        delivery_accounted = ledger_ok                     # ledger present -> it decides; no receipt fallback
+        delivery_conflict = not ledger_ok                  # present-but-unreconciled = conflicting evidence
+    else:
+        delivery_accounted = _receipt_accounted(sink_receipt)   # no ledger -> receipt-only mode (scoped)
+        delivery_conflict = False
     # §stage3 gate: the timer-driven detectors must have evaluated PAST the drained input (eval acks),
     # not merely progressed offsets. eval_ok=None = gate not armed (evidence-only); False = detectors
     # did not evaluate through the horizon -> not reconciled (the run is inputs_drained, still
@@ -717,7 +865,10 @@ def classify_completion(producer_exits, group_lag, arm_counts, required=("arm-a-
         state = "reconciled"
     else:
         state = "inputs_drained"                   # consumed + baseline, but delivery/eval/lifecycle unconfirmed
-        if not delivery_accounted:
+        if delivery_conflict:
+            unresolved.append(f"downstream delivery CONFLICT — durable ledger present but does not reconcile; "
+                              f"NOT overridden by the bus receipt (§39.2): {ledger_reason}")
+        elif not delivery_accounted:
             unresolved.append(f"downstream delivery not accounted (R01): {ledger_reason or 'no accountable receipt'}")
         if eval_ok is False:
             unresolved.append("detectors have not acked evaluation through the input horizon (§stage3)")
@@ -758,8 +909,18 @@ def run_from_docs(spec: dict, out_dir: str) -> str:
 def run_full(scenario: str, out_dir: str) -> str:
     """Docker path. Sequences the offline engines, ships both arms, queries, scores."""
     labels = _load(os.path.join(DATASETS, scenario, "labels.json"))
+    # §43.4-2 FAST-FAIL: verify the labels↔pcap hash binding BEFORE bringing up the stack, so a
+    # labels/pcap mismatch aborts immediately instead of after a full run (the §35.10 error class).
+    _bp, _bpd = os.environ.get("BENCH_PCAP", ""), os.environ.get("BENCH_PCAP_DIR")
+    _bind_ok0, _bind_detail0 = require_capture_binding(labels, os.path.join(_bpd, os.path.basename(_bp)) if (_bpd and _bp) else None)
+    if not _bind_ok0:
+        raise SystemExit(f"benchmark abort (pre-run capture binding): {_bind_detail0}")
     endpoint = os.environ.get("BENCH_OPENSEARCH", "http://localhost:9200")
     run_id = _run_id()
+    # §49.3: export the run id so the compose interpolates it into the producer completion file
+    # (`/eve/completion-<run_id>.json`). The feeder waits for THIS run's completion file, so a stale
+    # marker from a prior run on a reused volume is ignored (not the bare `.suricata-complete` sentinel).
+    os.environ["CERNITY_RUN_ID"] = run_id
     overwrite = os.environ.get("BENCH_OVERWRITE", "").strip() not in ("", "0", "false", "no")
     if os.path.isfile(os.path.join(out_dir, "report.json")) and not overwrite:
         raise SystemExit(f"benchmark abort: {out_dir} already holds a scored run — refusing to "
@@ -864,6 +1025,19 @@ def run_full(scenario: str, out_dir: str) -> str:
                                      eval_ok=eval_ok, lifecycle_ok=lifecycle_ok)
     completion["eval_acks"] = _summarize_eval_acks(_acks)          # §stage3 per-detector evidence
     completion["lifecycle"] = _lifecycle                           # §stage3 finding-lifecycle disposition
+    # §49.3 destination-obligation coverage (needs only the ledger + lifecycle, available now): reconcile
+    # the dispatched-findings inventory against the ledger's per-destination terminal outcomes. Source
+    # coverage (needs the export) is reconciled after export_arms below.
+    # §57.5: the sinks the forwarder receipt claims delivery to are the EXPECTED destinations — each must
+    # appear in the durable ledger, so a sink cannot vanish by being omitted from the observed ledger.
+    _expected_sinks = [s.get("name") for s in (sink_disposition or {}).get("sinks", []) if s.get("name")]
+    _obl_ok, _obl_probs = reconcile_obligations(_lifecycle, ledger,
+                                                suppressed=(sink_disposition or {}).get("suppressed", 0),
+                                                expected_sinks=_expected_sinks)
+    completion["obligation_reconciliation"] = {"ok": _obl_ok, "problems": _obl_probs}
+    if not _obl_ok and completion["state"] == "reconciled":
+        completion["state"] = "inputs_drained"
+        completion.setdefault("unresolved", []).extend(f"obligation: {p}" for p in _obl_probs)
     SCOREABLE = ("inputs_drained", "reconciled")   # reconciled needs an accountable sink receipt (Rec-D)
     if completion["state"] not in SCOREABLE:
         # A run whose inputs did not drain is NOT scored (§9/R2/§24.2): a producer failed/was unknown,
@@ -877,6 +1051,29 @@ def run_full(scenario: str, out_dir: str) -> str:
     print("[3] exporting the immutable snapshot, then scoring FROM it (R4)")
     exported, _export_counts = export_arms(endpoint, out_dir, PROJECT,
                                            labels_path=os.path.join(DATASETS, scenario, "labels.json"))
+    # §49.3 source coverage: reconcile what the feeder CONSUMED (feed-manifest) against what Suricata
+    # PRODUCED (source-eve count). A gap fails closed — a reconciled run is downgraded to inputs_drained.
+    _feed_manifest = _read_jsonl_or_json(os.path.join(out_dir, "output", "feed-manifest.json"))
+    _src_digest = source_identity_digest(os.path.join(out_dir, "output", "source-eve.jsonl"))   # §59.1
+    _src_ok, _src_probs = reconcile_source_coverage(_export_counts.get("source-eve.jsonl"),
+                                                    _feed_manifest, source_id_digest=_src_digest)
+    completion["source_coverage"] = {"ok": _src_ok, "problems": _src_probs, "manifest": _feed_manifest}
+    if not _src_ok and completion["state"] == "reconciled":
+        completion["state"] = "inputs_drained"
+        completion.setdefault("unresolved", []).extend(f"source coverage: {p}" for p in _src_probs)
+    # §43.4-2 capture binding (hash) + §35.10 overlap (plausibility): refuse to score if labels and the
+    # pcap are from DIFFERENT captures. The hash binding is authoritative when present (catches a mismatch
+    # even when clocks overlap); the temporal overlap is the fallback when labels carry no binding.
+    _pcap_host = os.path.join(_pcap_dir, os.path.basename(_pcap)) if (_pcap_dir and _pcap) else None
+    _bind_ok, _bind_detail = require_capture_binding(labels, _pcap_host)
+    if not _bind_ok:
+        raise SystemExit(f"benchmark abort: {_bind_detail}")
+    _cap_ok, _cap_detail = labels_capture_overlap(labels, os.path.join(out_dir, "output", "source-eve.jsonl"))
+    if not _cap_ok:
+        raise SystemExit(f"benchmark abort: {_cap_detail}")
+    # §49.3: a run whose labels carry NO capture hash binding is explicitly diagnostic, not a qualified
+    # packet-derived result (the temporal overlap is only a plausibility check). Recorded as a caveat.
+    _capture_unbound = not (labels.get("capture") or {}).get("pcap_sha256")
     arm_a = exported["arm-a-suricata"]           # scored docs ARE the exported files (§20.3)
     arm_b = exported["arm-b-findings-*"]
     arm_c = exported["arm-c-zeek"]
@@ -894,6 +1091,11 @@ def run_full(scenario: str, out_dir: str) -> str:
         results.setdefault("caveats", []).append(
             "completion=inputs_drained: inputs consumed + baseline shipped; downstream detector "
             "evaluation / pending-capture / per-sink disposition not yet verified (§25.2)")
+    results["capture_bound"] = not _capture_unbound               # §49.3: a qualified packet run must be bound
+    if _capture_unbound:                                           # §49.3: no capture hash binding -> diagnostic
+        results.setdefault("caveats", []).append(
+            "capture NOT hash-bound: labels carry no pcap sha256 binding, only a temporal-overlap "
+            "plausibility check — this run is DIAGNOSTIC, not a qualified packet-derived result (§49.3)")
     results["exports"] = _export_counts                            # M3/R4: counts from the scored snapshot
     results["run_id"] = run_id                                     # §25.1: link the result to its (immutable) spec
     _mf = os.path.join(out_dir, "output", "export-manifest.json")  # §stage4: publish the bundle digest with the result
@@ -971,11 +1173,19 @@ ARM_EXPORTS = (("arm-a-suricata", "suricata-alerts.jsonl"),
 # R07: the artifacts a valid recompute cannot proceed without — the frozen answer key and the baseline
 # arm. Their absence from the manifest inventory fails verification (an omitted labels entry can't
 # silently rescore against a changed answer key).
-REQUIRED_EXPORT_ARTIFACTS = ("labels.json", "suricata-alerts.jsonl")
+# §43.4-2: the mandatory inventory is DERIVED FROM THE ENABLED ARMS + clock transforms. labels + the
+# baseline A arm + the B arm (cernity-findings) are required for an A/B comparison; the replay mapping is
+# required when clocks were transformed (a nonzero reanchor offset). B being empty is fine (the file must
+# still be enumerated); B being ABSENT means the comparison's second arm was never exported.
+# §49.3 replay-inventory circularity fix: the transform mapping (`replay.json`) is required UNCONDITIONALLY,
+# not derived from the offset scalar it guards (a missing mapping would otherwise read as offset 0 and
+# remove its own requirement). The feeder always writes replay.json — offset 0 when it did not reanchor —
+# so its ABSENCE is a real gap, never a legitimately-transformless run.
+REQUIRED_EXPORT_ARTIFACTS = ("labels.json", "suricata-alerts.jsonl", "cernity-findings.jsonl", "replay.json")
 # Every file score_from_export reads: each must be manifest-enumerated + hash-verified if present in the
 # bundle, so no unverified file can influence the score (labels/replay/the three arm exports).
 _SCORER_READ_FILES = ("labels.json", "replay.json", "suricata-alerts.jsonl",
-                      "cernity-findings.jsonl", "zeek-notices.jsonl")
+                      "cernity-findings.jsonl", "zeek-notices.jsonl", "feed-manifest.json")
 
 
 def export_arms(endpoint, out_dir, project=None, labels_path=None):
@@ -1020,6 +1230,15 @@ def export_arms(endpoint, out_dir, project=None, labels_path=None):
                 with open(rpath, "w") as f:
                     f.write(rep)
                 files["replay.json"] = {"sha256": _sha256(rpath)}
+            # §49.3: the feeder's canonical source-coverage inventory (read/fed/per-file counts).
+            fm = subprocess.run(["docker", "run", "--rm", "-v", f"{vol}:/eve:ro", "alpine",
+                                 "sh", "-c", "cat /eve/feed-manifest.json 2>/dev/null"],
+                                capture_output=True, text=True, timeout=60).stdout
+            if fm.strip():
+                fmpath = os.path.join(outdir, "feed-manifest.json")
+                with open(fmpath, "w") as f:
+                    f.write(fm)
+                files["feed-manifest.json"] = {"sha256": _sha256(fmpath)}
             spath = os.path.join(outdir, "source-eve.jsonl")
             if os.path.isfile(spath):
                 files["source-eve.jsonl"] = {"sha256": _sha256(spath),
@@ -1085,10 +1304,17 @@ def _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=0.0):
         # (order-independent), but deadline-GATING of late revisions is deferred until the product
         # exposes reliable delivery timing (§25.2/§25.3) — recency is only a proxy for delivery.
         deadline = labels.get("eval_deadline")
+        # FAIRNESS — per-arm clock (§25.3 asymmetry): only ARM B (Cernity) is fed through the reanchoring
+        # feeder, so only its detection times live on the REPLAY clock and need the recorded offset. ARM A
+        # (Suricata alerts shipped straight from the raw EVE) and ARM C (Zeek notices) keep the ORIGINAL
+        # pcap timestamps — the SAME clock the episode truth is authored on — so they are scored with
+        # offset 0. Applying the feeder offset to A/C compared them against the episode on the wrong clock
+        # and made every Suricata/Zeek detection score temporally OUT, systematically understating the
+        # baseline arms (surfaced by the signature-preservation control).
         results["episode_scoring"] = {
-            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps, replay_offset=replay_offset, deadline=deadline),
+            "suricata_siem": _epmod.score(extract.detections_from_alerts(arm_a), truth_eps, replay_offset=0.0, deadline=deadline),
             "cernity_siem": _epmod.score(extract.detections_from_findings(arm_b), truth_eps, replay_offset=replay_offset, deadline=deadline),
-            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps, replay_offset=replay_offset, deadline=deadline),
+            "zeek_reference": _epmod.score(extract.detections_from_notices(arm_c), truth_eps, replay_offset=0.0, deadline=deadline),
         }
         results["replay_offset_seconds"] = replay_offset
     return results
@@ -1099,6 +1325,111 @@ def _read_jsonl(path):
         return []
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+import re as _re                                          # noqa: E402
+_TS_OFFSET = _re.compile(r'([+-]\d{2})(\d{2})$')          # +0000 -> +00:00 (fromisoformat rejects the compact form)
+
+
+def _ts_epoch(s):
+    """RFC3339/EVE timestamp -> epoch seconds, or None. Normalises Suricata's compact `+0000` offset,
+    which datetime.fromisoformat rejects on the host's Python (3.10 here)."""
+    if not s:
+        return None
+    import datetime as _dt
+    t = _TS_OFFSET.sub(r'\1:\2', str(s).replace("Z", "+00:00"))
+    try:
+        return _dt.datetime.fromisoformat(t).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def labels_capture_overlap(labels, source_eve_path, tol=300.0):
+    """Guard against scoring a pcap against labels from a DIFFERENT capture run (the §35.10 operator
+    error, where labels came from a 14:18 campaign but the pcap was a 14:31 one, ~13 min apart, so every
+    correct detection scored temporally 'out'). The labelled episodes' time range must OVERLAP the
+    captured flows' `flow.start` range — both on the ORIGINAL clock (the exported source-eve is
+    Suricata's pre-reanchor output). Returns (ok, detail). `tol` seconds absorbs boundary skew. Skips
+    (ok=True) when either side has no usable times, so the check only fires on a real, provable mismatch."""
+    eps = [e.get("interval") for e in labels.get("episodes", []) if e.get("interval")]
+    if not eps:
+        return True, "no timed episodes to check"
+    ep_min = min(iv["start"] for iv in eps)
+    ep_max = max(iv["end"] for iv in eps)
+    starts = []
+    try:
+        with open(source_eve_path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("event_type") == "flow":
+                    s = _ts_epoch((e.get("flow") or {}).get("start"))
+                    if s is not None:
+                        starts.append(s)
+    except OSError:
+        return True, "no source-eve to check"
+    if not starts:
+        return True, "no flow.start in capture to check"
+    fl_min, fl_max = min(starts), max(starts)
+    if ep_min <= fl_max + tol and fl_min <= ep_max + tol:
+        return True, ""
+    gap = min(abs(ep_min - fl_max), abs(fl_min - ep_max))
+    return False, (f"labelled episodes [{ep_min:.0f},{ep_max:.0f}] do not overlap captured flows "
+                   f"[{fl_min:.0f},{fl_max:.0f}] (~{gap:.0f}s apart) — labels.json and the pcap are from "
+                   "DIFFERENT captures (§35.10 guard); re-stage labels from the run that produced the pcap")
+
+
+def pcap_binding(pcap_path, capture_run_id=None):
+    """The capture-completion binding for a pcap: a stable capture-run id + the pcap's sha256, so labels
+    and pcap can be bound by HASH at capture time (§43.4-2), not merely by temporal overlap. Returns a
+    dict suitable for `labels['capture']`."""
+    import uuid, datetime as _dt
+    return {"capture_run_id": capture_run_id or uuid.uuid4().hex, "pcap_sha256": _sha256(pcap_path),
+            "pcap": os.path.basename(pcap_path),
+            "bound_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def bind_labels_pcap(labels_path, pcap_path, force=False):
+    """Stamp an existing labels.json with the capture binding for `pcap_path` (§43.4-2). §49.3: REFUSE to
+    silently rebind labels that are already bound to a DIFFERENT pcap — a hash attached after the fact
+    cannot prove the labels describe that capture, and an accidental rebind hides the mismatch the binding
+    exists to catch. A correction must be a new versioned labels artifact; `force=True` supersedes but
+    PRESERVES the prior binding under `capture.superseded` for audit."""
+    labels = _load(labels_path)
+    prior = (labels.get("capture") or {}).get("pcap_sha256")
+    new = pcap_binding(pcap_path)
+    if prior and prior != new["pcap_sha256"]:
+        if not force:
+            raise SystemExit(f"benchmark abort: labels already bound to pcap {prior[:12]}… — refusing to "
+                             f"rebind to {new['pcap_sha256'][:12]}… (§49.3). Create a NEW versioned labels "
+                             f"artifact, or pass force=True to supersede (the prior binding is preserved).")
+        new["superseded"] = {"pcap_sha256": prior, "bound_at": (labels.get("capture") or {}).get("bound_at")}
+    labels["capture"] = {**(labels.get("capture") or {}), **new}
+    with open(labels_path, "w") as f:
+        json.dump(labels, f, indent=2, sort_keys=True)
+    return labels["capture"]
+
+
+def require_capture_binding(labels, pcap_path):
+    """§43.4-2: bind labels ↔ pcap by HASH, not just temporal overlap. When labels carry a capture
+    binding (`capture.pcap_sha256`, recorded at capture completion), the scored pcap's sha256 MUST match —
+    a mismatch means labels and pcap are from DIFFERENT captures and fails hard, catching the class of
+    operator error §35.10 hit even when the clocks happen to overlap. Absent a binding this returns
+    (True, note) so the weaker temporal-overlap plausibility check still applies. Never requires a
+    detection to validate alignment (§36.2 #3). Returns (ok, detail)."""
+    cap = labels.get("capture") or {}
+    want = cap.get("pcap_sha256")
+    if not want:
+        return True, "no capture hash binding in labels (temporal-overlap plausibility fallback only)"
+    if not pcap_path or not os.path.isfile(pcap_path):
+        return False, f"labels bind to pcap sha256 {want[:12]}… but the scored pcap is unavailable to verify"
+    got = _sha256(pcap_path)
+    if got != want:
+        return False, (f"capture binding MISMATCH: labels bind pcap {want[:12]}… but the scored pcap is "
+                       f"{got[:12]}… — labels and pcap are from DIFFERENT captures (§43.4-2)")
+    return True, ""
 
 
 def verify_export_manifest(out_dir):
@@ -1138,23 +1469,26 @@ def verify_export_manifest(out_dir):
     return manifest
 
 
-def require_scorer_inventory(out_dir, manifest):
-    """R07: before scoring FROM a bundle, enforce that the manifest ENUMERATES every artifact the scorer
-    reads — a mandatory inventory, not just whatever files it happens to list. A missing required entry
-    (e.g. labels.json dropped to hide a changed answer key) fails; any scorer-read file present in the
-    bundle but absent from the manifest is unverified influence and also fails. Existence of a
+def require_scorer_inventory(out_dir, manifest, replay_offset=0.0):
+    """R07/§43.4-2: before scoring FROM a bundle, enforce that the manifest ENUMERATES every artifact the
+    scorer reads — a mandatory inventory DERIVED FROM THE ENABLED ARMS + clock transform, not just
+    whatever files it happens to list. labels + the A baseline + the B arm (cernity-findings) are required
+    for an A/B comparison; the replay MAPPING is required when clocks were transformed (nonzero offset) so
+    the transform is auditable, not implicit. A missing required entry fails; any scorer-read file present
+    in the bundle but absent from the manifest is unverified influence and also fails. Existence of a
     bundle-local file is not proof it was hashed. Raises SystemExit on a gap."""
     od = os.path.join(out_dir, "output")
     files = manifest.get("files", {})
     missing = []
-    for req in REQUIRED_EXPORT_ARTIFACTS:
+    required = list(REQUIRED_EXPORT_ARTIFACTS)          # replay.json is now unconditionally required (§49.3)
+    for req in required:
         if req not in files:
             missing.append(f"{req}: required artifact missing from manifest inventory")
     for fn in _SCORER_READ_FILES:
         if fn not in files and os.path.isfile(os.path.join(od, fn)):
             missing.append(f"{fn}: present in bundle but not enumerated/hashed in the manifest")
     if missing:
-        raise SystemExit("benchmark abort: bundle inventory incomplete for scoring (R07): "
+        raise SystemExit("benchmark abort: bundle inventory incomplete for scoring (R07/§43.4-2): "
                          + "; ".join(missing))
 
 
@@ -1164,7 +1498,8 @@ def score_from_export(out_dir, scenario):
     NOT the repo datasets dir — a recompute needs only the bundle and cannot be rescored against a
     changed answer key. Fails if the bundle carries no frozen truth."""
     manifest = verify_export_manifest(out_dir)         # refuse to score mutated/truncated evidence
-    require_scorer_inventory(out_dir, manifest)        # R07: every scorer-read artifact must be enumerated + hashed
+    _off = _replay_offset(out_dir)                     # clock transform (if any) drives the inventory
+    require_scorer_inventory(out_dir, manifest, replay_offset=_off)   # R07/§43.4-2: enabled-arm + transform-derived
     od = os.path.join(out_dir, "output")
     labels_path = os.path.join(od, "labels.json")
     if not os.path.isfile(labels_path):
@@ -1176,7 +1511,9 @@ def score_from_export(out_dir, scenario):
     arm_c = _read_jsonl(os.path.join(od, "zeek-notices.jsonl"))
     meta = {"scenario": scenario, "dataset": labels.get("dataset", scenario),
             "granularity": f"per-{labels.get('granularity', 'host')}", "source": "file-only recompute"}
-    return _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=_replay_offset(out_dir))
+    res = _score_arms(arm_a, arm_b, arm_c, labels, meta, replay_offset=_off)
+    res["capture_bound"] = bool((labels.get("capture") or {}).get("pcap_sha256"))   # §49.3
+    return res
 
 
 def _write(results: dict, out_dir: str) -> str:

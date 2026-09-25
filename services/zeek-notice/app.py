@@ -5,8 +5,6 @@ reach the SIEM through the findings-first path. Dedups per (finding_id, window)
 so a chatty notice does not flood. Promotion logic is covered by
 test_promote_notice.py; this is the Kafka I/O shell.
 """
-import json
-import logging
 import os
 import signal
 import time

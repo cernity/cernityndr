@@ -15,6 +15,8 @@ import hashlib
 import json
 import time
 
+import provenance                       # baseline source_events (additive)
+
 THREAT_SEVERITY_MAX = 2
 
 
@@ -120,4 +122,5 @@ def to_candidate(eve: dict, tenant: str = "homelab") -> dict | None:
         "category": category_for(alert), "severity": our_sev, "confidence": 0.9,
         "first_seen": ts, "last_seen": ts,
         "entities": entities, "state": "CANDIDATE",
+        "source_events": [provenance.source_event(eve)],   # the full triggering alert EVE, verbatim
     }

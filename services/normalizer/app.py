@@ -5,7 +5,6 @@ in models.py at the trusted-ingress boundary, and batch-inserts into ClickHouse.
 Transform correctness is covered by test_normalize.py; this file is the I/O shell.
 """
 import json
-import logging
 import os
 import signal
 import time

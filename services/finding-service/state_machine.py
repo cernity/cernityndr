@@ -34,10 +34,26 @@ CATEGORY_MITRE = {
 }
 
 LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
-             "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL", "DEVO_QUEUED", "DEVO_SENT"}
+             "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL"}
 
 
 CONFIRMED_THREAT_SOURCES = ("ids_signature", "threat_intel", "file_malware_hash")
+
+# plan 008 KTD6: the structured nDPI classifier (detector_version below) emits honest,
+# often low-severity findings. NDR_NDPI_DELIVER_ALL lets a well-formed structured-nDPI
+# finding past the sev<=5 delivery ceiling so it reaches the SIEM/Vantage (which hides
+# low severity by default, reversibly). Default OFF: enabled only in the canary after the
+# correlation/SOAR eligibility guards are verified — the toggle is a rollout switch, not
+# the safety mechanism. Legacy nDPI (v1.0) and other detectors are unaffected.
+NDPI_STRUCTURED_VERSION = "2.0"
+NDPI_DELIVER_ALL = os.environ.get("NDR_NDPI_DELIVER_ALL", "0").strip().lower() not in ("", "0", "false", "no")
+
+
+def _ndpi_deliver_exempt(cand: dict) -> bool:
+    """A well-formed structured-nDPI finding delivered past the ceiling when the toggle is on."""
+    return bool(NDPI_DELIVER_ALL and cand.get("detector_id") == "ndpi_risk"
+                and cand.get("detector_version") == NDPI_STRUCTURED_VERSION
+                and isinstance(cand.get("category"), str) and cand.get("category"))
 
 # Entity type -> capture profile the orchestrator/gates understand (ip/ja4/sni/dns).
 _ENTITY_PROFILE = {"ip": "ip", "domain": "sni", "sni": "sni", "dns": "dns",
@@ -70,6 +86,14 @@ def decide_enrichment(cand: dict) -> str:
     # findings (c2/exfil/dns_tunnel) still adjudicate via capture when low-confidence.
     if cat in ("recon", "discovery", "credential_access", "lateral", "impact", "defense_evasion"):
         return "metadata_sufficient"
+    # Distributed low-and-slow exfil is a STRUCTURAL conclusion, not ambiguous content: the detector
+    # already established the signature from flow metadata (bytes spread across >= N materially-
+    # contributing flows, §49.4). Like the other structural detections above, deliver it DIRECTLY so it
+    # is not lost — or delayed to the enrichment-timeout sweep — in a deployment with no forensics
+    # overlay (the Parser->Cernity->SIEM MDR path). The burst exfil_check ('exfil' detector) is a
+    # different case and keeps its content-adjudication route below.
+    if det == "low_slow_exfil":
+        return "metadata_sufficient"
     if det == "ndpi_risk":
         return "metadata_sufficient"     # low-confidence feature; corroboration escalates, not capture
     if conf >= 0.9:
@@ -85,6 +109,8 @@ def suppress_delivery(cand: dict) -> bool:
     threat gate raised above the ceiling (because the destination looked hostile)
     is delivered."""
     if cand.get("detector_id") in CONFIRMED_THREAT_SOURCES:
+        return False
+    if _ndpi_deliver_exempt(cand):
         return False
     return int(cand.get("severity", 10) or 10) <= SUPPRESS_MAX_SEVERITY
 
@@ -111,13 +137,11 @@ def build_finding(cand: dict) -> tuple[dict, str]:
             # Still emitted to final.v1 (correlation sees it) and persisted for
             # audit/hunting, but not delivered to the analyst/SIEM plane.
             f["state"] = "SUPPRESSED"
-            f["devo_delivery_state"] = "NONE"      # not delivered; SUPPRESSED is a state, not a delivery-state (schema enum: NONE/QUEUED/SENT)
             f["suppression_reason"] = (
                 f"low-severity ({f.get('severity')}) non-threat finding; kept for "
                 "correlation and audit, not delivered")
         else:
             f["state"] = "FINAL"
-            f["devo_delivery_state"] = "QUEUED"
         return f, "final"
     # packets_needed. A confirmed threat is delivered to the SIEM immediately
     # (deliver-now, F01): the capture path ENRICHES it later, it never GATES delivery —
@@ -125,27 +149,42 @@ def build_finding(cand: dict) -> tuple[dict, str]:
     if policy == "packets_needed" and cand.get("detector_id") in CONFIRMED_THREAT_SOURCES:
         f["state"] = "FINAL"
         f["enrichment_state"] = "PENDING"        # delivered; evidence to follow
-        f["devo_delivery_state"] = "QUEUED"
         return f, "final_and_capture"
     # A low-confidence *content* finding still captures to ADJUDICATE; the result loop
     # (or a timeout) finalizes it so it never dangles unenriched (F01).
     f["enrichment_state"] = "REQUIRED"
     f["state"] = "CAPTURE_REQUESTED"
-    f["devo_delivery_state"] = "NONE"
     return f, "capture"
 
 
 def apply_enrichment_result(finding: dict, result: dict) -> dict:
     """Merge an enrichment result (U11) back onto a CAPTURE_REQUESTED finding.
-    A failed enrichment still FINALizes — it never drops the finding (v2 §17)."""
+    A failed enrichment still FINALizes — it never drops the finding (v2 §17).
+
+    Propagates the Zeek worker's `summary` and extracted `iocs` onto the finding, not just
+    evidence_refs — otherwise the analyst never sees them in the SIEM (the reviewed gap). The
+    worker already bounds its result (details[:50], hash sets), so this trusts that ceiling rather
+    than re-truncating. Idempotent on a duplicate/late result: evidence_refs are deduped and iocs
+    lists are unioned, never clobbering a prior enrichment (R03)."""
     f = dict(finding)
     if result.get("status") == "ok":
         f["enrichment_state"] = "ENRICHED"
-        f["evidence_refs"] = list(f.get("evidence_refs", [])) + result.get("evidence_refs", [])
+        seen = list(f.get("evidence_refs", []))
+        for r in result.get("evidence_refs", []):
+            if r not in seen:
+                seen.append(r)
+        f["evidence_refs"] = seen
+        if isinstance(result.get("summary"), dict):
+            f["summary"] = result["summary"]                  # Zeek conn/tls/x509/http/ssh/file/smb/krb summary
+        iocs = result.get("iocs")
+        if isinstance(iocs, dict):
+            merged = dict(f.get("iocs") or {})                # union with any prior enrichment's iocs
+            for k, v in iocs.items():
+                merged[k] = sorted(set(merged.get(k, [])) | set(v)) if isinstance(v, list) else v
+            f["iocs"] = merged
     else:
         f["enrichment_state"] = "ENRICHMENT_FAILED"
     f["state"] = "FINAL"
-    f["devo_delivery_state"] = "QUEUED"
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: enriched update is a new revision
     return f
 
@@ -160,7 +199,6 @@ def finalize_timeout(finding: dict) -> dict:
     f = dict(finding)
     f["state"] = "FINAL"
     f["enrichment_state"] = "TIMEOUT"
-    f["devo_delivery_state"] = "QUEUED"
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: timeout-finalization is a new revision
     return f
 

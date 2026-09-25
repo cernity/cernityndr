@@ -1,7 +1,6 @@
 """Protocol-anomaly promotion service (re-eval gap G4). Consumes
 suricata.anomaly.v1, promotes threat-relevant anomalies (anomaly.py) to
 ndr.finding.candidate.v1. Dedups per (finding_id, window)."""
-import logging
 import os
 import signal
 import time

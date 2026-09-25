@@ -5,7 +5,6 @@ the ruleset current. This catches novel malware a hash blocklist cannot, which
 is the one packet-only capability worth having regardless of the bake-off.
 """
 import json
-import logging
 import os
 import ndr_runtime
 import re

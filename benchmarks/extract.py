@@ -7,9 +7,12 @@ infrastructure. `flagged_from_*` pull the set of entities each arm implicates;
 """
 from __future__ import annotations
 import json
+import re
 from datetime import datetime
 
 import scorer
+
+_TZ_OFFSET = re.compile(r'([+-]\d{2})(\d{2})$')    # +0000 -> +00:00 (fromisoformat rejects the compact form)
 
 
 def _ips(*vals):
@@ -17,16 +20,21 @@ def _ips(*vals):
 
 
 def _epoch(v):
-    """A timestamp field -> epoch seconds (float), or None. Accepts RFC3339 UTC strings (the
-    finding/flow contract format, incl. a trailing 'Z') and numeric epochs. Unparsable -> None so a
-    missing/malformed time stays absent (the scorer then treats a time-bounded episode as ambiguous,
-    never silently in-window)."""
+    """A timestamp field -> epoch seconds (float), or None. Accepts RFC3339 UTC strings and numeric
+    epochs. CRITICAL FAIRNESS FIX: Suricata EVE stamps a COMPACT `+0000` offset (no colon), which
+    datetime.fromisoformat REJECTS on Python < 3.11 (the scorer runs on the host, 3.10 here). Cernity
+    findings use a trailing `Z` (which the old `.replace("Z","+00:00")` handled), so WITHOUT normalising
+    `+0000` the scorer parsed Cernity timestamps but SILENTLY dropped Suricata alert timestamps to None
+    -> Suricata alerts scored ambiguous/untimed and Arm A was asymmetrically UNDERSTATED. Normalise the
+    compact offset so BOTH arms are timed on the same clock. Unparsable -> None (time-bounded episode
+    then ambiguous, never silently in-window)."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
         return float(v)
+    s = _TZ_OFFSET.sub(r'\1:\2', str(v).replace("Z", "+00:00"))
     try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(s).timestamp()
     except (ValueError, TypeError):
         return None
 

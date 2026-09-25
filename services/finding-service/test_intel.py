@@ -21,6 +21,12 @@ def test_registrable():
     assert intel.registrable("a.b.evil.com") == "evil.com"
     assert intel.registrable("evil.com") == "evil.com"
     assert intel.registrable("localhost") == "localhost"
+    # §6.6: multi-label public suffixes must not collapse to the suffix itself — the last-two-labels
+    # bug turned foo.co.uk into "co.uk" (an unregistrable eTLD), breaking domain-age lookups.
+    assert intel.registrable("foo.co.uk") == "foo.co.uk"
+    assert intel.registrable("mail.foo.co.uk") == "foo.co.uk"
+    assert intel.registrable("shop.example.com.au") == "example.com.au"
+    assert intel.registrable("plain.co.uk") == "plain.co.uk"   # already registrable
 
 
 def test_registration_date_parse():

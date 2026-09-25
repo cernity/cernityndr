@@ -354,10 +354,19 @@ def exfil_check(bytes_to_server: int, dst_ip: str,
 
 def low_slow_exfil(bytes_to_server: int, conn_count: int, dst_ip: str,
                    low_floor: int = 5_000_000, threshold_bytes: int = 50_000_000,
-                   min_conns: int = 10) -> tuple[bool, float]:
-    """Low-and-slow exfil (T1029/T1030): cumulative outbound that stays BELOW the burst
-    ceiling (so exfil_check ignores it) but exceeds a floor spread over many connections
-    — the sustained-trickle band the burst detector misses. Skips internal/allowlisted."""
+                   min_conns: int = 10, material_flows: int | None = None,
+                   min_material_flows: int = 5) -> tuple[bool, float]:
+    """DISTRIBUTED low-and-slow exfil (T1029/T1030): cumulative outbound BELOW the burst ceiling (so
+    exfil_check ignores it) but spread across MANY materially-contributing flows — the sustained-trickle
+    band the burst detector misses. Skips internal/allowlisted.
+
+    §49.4 specification: the claim is *distributed* transfer, so the bytes must be spread across
+    >= `min_material_flows` flows that each carry material bytes — NOT concentrated in one bulk transfer
+    alongside tiny signalling/callback connections that merely inflate `conn_count` while sharing the
+    src->dst key. When per-flow evidence (`material_flows`) is supplied it is required; this rejects a
+    single large transfer + beacon callbacks (the §47 factorial artefact) via a MATERIALITY feature, not a
+    beacon-specific exclusion. Absent per-flow evidence the detector falls back to the aggregate band and
+    the finding must be described as cumulative outbound, not demonstrated distributed low-and-slow."""
     if not is_external(dst_ip):
         return False, 0.0
     if _EXFIL_ALLOW and any(dst_ip.startswith(p) for p in _EXFIL_ALLOW):
@@ -366,6 +375,8 @@ def low_slow_exfil(bytes_to_server: int, conn_count: int, dst_ip: str,
         return False, 0.0
     if bytes_to_server < low_floor or conn_count < min_conns:
         return False, 0.0
+    if material_flows is not None and material_flows < min_material_flows:
+        return False, 0.0                            # not distributed: bytes concentrated, not spread
     return True, round(min(1.0, conn_count / (min_conns * 5)), 3)
 
 

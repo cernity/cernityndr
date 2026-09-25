@@ -166,3 +166,16 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\nall {len(fns)} durable-delivery tests passed")
+
+
+def test_record_suppressed_writes_withheld_obligation_by_identity():
+    # §59.1: a delivery-suppressed finding is recorded in the obligation ledger by (finding_id, revision)
+    # identity with dest '(withheld)', so suppression is reconciled per revision, not as an aggregate count.
+    with tempfile.TemporaryDirectory() as d:
+        s = DurableSink(FlakySink(), "test", dlq_dir=d, sleep=lambda _s: None)
+        s.record_suppressed([{"finding_id": "lo", "revision": 1, "tenant_id": "t"}], worker="w")
+        s.record_suppressed([{"finding_id": "lo", "revision": 1, "tenant_id": "t"}], worker="w")  # replay
+        rows = [json.loads(l) for l in open(os.path.join(d, "obligations-test.jsonl"))]
+        assert len(rows) == 1                                          # idempotent by identity
+        assert rows[0]["outcome"] == "suppressed" and rows[0]["dest"] == "(withheld)"
+        assert rows[0]["finding_id"] == "lo" and rows[0]["revision"] == 1

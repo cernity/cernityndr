@@ -18,6 +18,15 @@ x-minio-creds: &minio-creds
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-cernity}
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-cernitydemo}
 
+# Central bus credential (F02) — anchors are file-scoped, so this overlay re-declares the same
+# central principal the base compose uses. Every bus-connected service here needs it; without it
+# these services could not authenticate to a secured (SASL/SCRAM) broker. Empty password in the
+# insecure demo (CERNITY_INSECURE_BUS=1 sets CERNITY_BUS_CENTRAL_MECHANISM= so clients skip SASL).
+x-central-bus-auth: &central-bus-auth
+  NDR_BUS_SASL_MECHANISM: ${CERNITY_BUS_CENTRAL_MECHANISM-SCRAM-SHA-512}
+  NDR_BUS_SASL_USER: ${CERNITY_BUS_CENTRAL_USER:-cernity-central}
+  NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
+
 # Tiered container hardening. Cernity's own (python) services drop all caps, gain
 # no-new-privileges, and run read-only with a tmpfs /tmp. Infra (redpanda/redis/
 # clickhouse/minio/opensearch/etc.) gets no-new-privileges but stays writable.
@@ -73,6 +82,7 @@ services:
     container_name: cernity-capture-orchestrator
     <<: *hardening
     environment:
+      <<: *central-bus-auth
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on: {redpanda: {condition: service_healthy}}
@@ -85,7 +95,7 @@ services:
     container_name: cernity-zeek-central
     <<: *hardening
     environment:
-      <<: *minio-creds
+      <<: [*minio-creds, *central-bus-auth]
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -100,6 +110,7 @@ services:
     container_name: cernity-zeek-notice
     <<: *hardening
     environment:
+      <<: *central-bus-auth
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -113,6 +124,7 @@ services:
     container_name: cernity-file-threat
     <<: *hardening
     environment:
+      <<: *central-bus-auth
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -126,7 +138,7 @@ services:
     container_name: cernity-file-yara
     <<: *hardening
     environment:
-      <<: *minio-creds
+      <<: [*minio-creds, *central-bus-auth]
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

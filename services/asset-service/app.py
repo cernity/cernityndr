@@ -3,7 +3,6 @@ carry L2 identity), resolves each observation to a stable asset_key
 (resolution.py), and upserts the ndr.asset entity table. Resolution correctness
 is covered by test_resolution.py; this is the I/O shell.
 """
-import logging
 import os
 import ndr_runtime
 import signal

@@ -211,7 +211,7 @@ def test_source_events_persist_roundtrip():
     f = {"finding_id": "x-1", "tenant_id": "t", "detector_id": "beacon", "detector_version": "1.0",
          "category": "c2", "severity": 7, "confidence": 0.9, "first_seen": "2026-09-16T00:00:00Z",
          "last_seen": "2026-09-16T00:00:00Z", "entities": "[]", "state": "FINAL",
-         "enrichment_state": "PENDING", "devo_delivery_state": "QUEUED", "revision": 1,
+         "enrichment_state": "PENDING", "revision": 1,
          "source_events": se, "iocs": {"ja4": ["q13d.."]}}
     row = app._row(f)                                            # -> list aligned to COLS
     rowd = dict(zip(app.COLS, row))

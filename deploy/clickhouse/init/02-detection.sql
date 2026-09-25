@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS ndr.finding
     enrichment_state    LowCardinality(String),
     capture_job_ids     Array(String),
     suppression_reason  String,
-    devo_delivery_state LowCardinality(String),
     summary             String DEFAULT '',        -- JSON: central-enrichment (Zeek) summary (U4)
     iocs                String DEFAULT '',         -- JSON: extracted IOCs (U4)
     source_events       String DEFAULT '',         -- JSON: originating Suricata EVE — baseline provenance (U4)
@@ -57,3 +56,6 @@ TTL first_seen + INTERVAL 180 DAY;             -- findings kept longer than raw
 ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS summary String DEFAULT '';
 ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS iocs String DEFAULT '';
 ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS source_events String DEFAULT '';
+-- devo_delivery_state dropped: it was write-only (never read/gated on; redundant with `state`,
+-- never advanced past QUEUED). Delivery outcome lives in the forwarder's durable ledger.
+ALTER TABLE ndr.finding DROP COLUMN IF EXISTS devo_delivery_state;

@@ -8,7 +8,6 @@ Assembly logic is covered by test_reconstruct.py; this is the I/O shell.
   GET /graph?tenant=homelab&asset=<ip>&window_min=60
 """
 import json
-import logging
 import os
 import ndr_runtime
 import threading

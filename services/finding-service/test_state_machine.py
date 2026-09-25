@@ -24,7 +24,6 @@ def test_recon_low_severity_is_delivery_suppressed():
     assert route == "final"                       # still on the bus for correlation
     assert f["state"] == "SUPPRESSED"
     assert f["enrichment_state"] == "NOT_REQUIRED"
-    assert f["state"] == "SUPPRESSED" and f["devo_delivery_state"] == "NONE"  # SUPPRESSED is a state; delivery-state stays a valid enum
     assert f["suppression_reason"]
     assert f["mitre"] == ["T1046"]
 
@@ -49,7 +48,7 @@ def test_finding_above_suppression_ceiling_is_delivered():
     # is delivered normally.
     f, route = sm.build_finding(dict(SCAN, severity=7))
     assert route == "final" and f["state"] == "FINAL"
-    assert f["devo_delivery_state"] == "QUEUED" and f["suppression_reason"] == ""
+    assert f["suppression_reason"] == ""
 
 
 def test_suppress_delivery_predicate():
@@ -75,7 +74,6 @@ def test_failed_enrichment_still_finalizes():
     done = sm.apply_enrichment_result(f, {"status": "failed"})
     assert done["state"] == "FINAL"                   # not dropped
     assert done["enrichment_state"] == "ENRICHMENT_FAILED"
-    assert done["devo_delivery_state"] == "QUEUED"
 
 
 def test_ok_enrichment_attaches_evidence():
@@ -192,7 +190,6 @@ def test_confirmed_threat_delivered_immediately_and_still_captures():
     assert route == "final_and_capture"
     assert f["state"] == "FINAL"                    # on the SIEM now
     assert f["enrichment_state"] == "PENDING"       # evidence follows; it does not gate
-    assert f["devo_delivery_state"] == "QUEUED"
 
 
 def test_capture_job_carries_sensor_and_value():
@@ -225,7 +222,6 @@ def test_timeout_finalizes_without_dropping():
     done = sm.finalize_timeout(f)
     assert done["state"] == "FINAL"                 # delivered, never dropped
     assert done["enrichment_state"] == "TIMEOUT"
-    assert done["devo_delivery_state"] == "QUEUED"
 
 
 if __name__ == "__main__":

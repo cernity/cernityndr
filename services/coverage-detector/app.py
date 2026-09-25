@@ -3,7 +3,6 @@ finding when a sensor's visibility is degraded (capture loss or app-layer
 blindness). Dedups per (sensor, kind, window) so a persistent condition does not
 spam. See coverage.py for the pure detection logic.
 """
-import logging
 import os
 import signal
 import time

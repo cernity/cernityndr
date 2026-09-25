@@ -34,7 +34,7 @@ CATEGORY_MITRE = {
 }
 
 LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
-             "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL", "DEVO_QUEUED", "DEVO_SENT"}
+             "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL"}
 
 
 CONFIRMED_THREAT_SOURCES = ("ids_signature", "threat_intel", "file_malware_hash")
@@ -119,13 +119,11 @@ def build_finding(cand: dict) -> tuple[dict, str]:
             # Still emitted to final.v1 (correlation sees it) and persisted for
             # audit/hunting, but not delivered to the analyst/SIEM plane.
             f["state"] = "SUPPRESSED"
-            f["devo_delivery_state"] = "NONE"      # not delivered; SUPPRESSED is a state, not a delivery-state (schema enum: NONE/QUEUED/SENT)
             f["suppression_reason"] = (
                 f"low-severity ({f.get('severity')}) non-threat finding; kept for "
                 "correlation and audit, not delivered")
         else:
             f["state"] = "FINAL"
-            f["devo_delivery_state"] = "QUEUED"
         return f, "final"
     # packets_needed. A confirmed threat is delivered to the SIEM immediately
     # (deliver-now, F01): the capture path ENRICHES it later, it never GATES delivery —
@@ -133,13 +131,11 @@ def build_finding(cand: dict) -> tuple[dict, str]:
     if policy == "packets_needed" and cand.get("detector_id") in CONFIRMED_THREAT_SOURCES:
         f["state"] = "FINAL"
         f["enrichment_state"] = "PENDING"        # delivered; evidence to follow
-        f["devo_delivery_state"] = "QUEUED"
         return f, "final_and_capture"
     # A low-confidence *content* finding still captures to ADJUDICATE; the result loop
     # (or a timeout) finalizes it so it never dangles unenriched (F01).
     f["enrichment_state"] = "REQUIRED"
     f["state"] = "CAPTURE_REQUESTED"
-    f["devo_delivery_state"] = "NONE"
     return f, "capture"
 
 
@@ -171,7 +167,6 @@ def apply_enrichment_result(finding: dict, result: dict) -> dict:
     else:
         f["enrichment_state"] = "ENRICHMENT_FAILED"
     f["state"] = "FINAL"
-    f["devo_delivery_state"] = "QUEUED"
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: enriched update is a new revision
     return f
 
@@ -186,7 +181,6 @@ def finalize_timeout(finding: dict) -> dict:
     f = dict(finding)
     f["state"] = "FINAL"
     f["enrichment_state"] = "TIMEOUT"
-    f["devo_delivery_state"] = "QUEUED"
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: timeout-finalization is a new revision
     return f
 

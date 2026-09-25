@@ -15,7 +15,6 @@ each is scoped by that topic's partition assignment.
 """
 import hashlib
 import json
-import logging
 import os
 import re
 import signal

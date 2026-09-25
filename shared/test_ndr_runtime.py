@@ -67,13 +67,17 @@ def test_empty_offset_reset_coerced_not_crash():
 def test_invalid_explicit_offset_reset_raises_not_silently_latest():
     # §57.6: a NON-EMPTY typo is a real misconfiguration — expose it loudly rather than silently coercing
     # to 'latest' (which would skip existing history for a new group).
-    import pytest
-    with pytest.raises(ValueError):
+    try:
         rt._consumer_config("g", auto_offset_reset="erliest")
+        assert False, "typo'd offset reset should raise ValueError"
+    except ValueError:
+        pass
     os.environ["NDR_OFFSET_RESET"] = "earliest "     # trailing space typo via env
     try:
-        with pytest.raises(ValueError):
-            rt._consumer_config("g")
+        rt._consumer_config("g")
+        assert False, "env offset typo should raise ValueError"
+    except ValueError:
+        pass
     finally:
         del os.environ["NDR_OFFSET_RESET"]
 

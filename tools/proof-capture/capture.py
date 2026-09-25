@@ -56,7 +56,7 @@ def _deliver(candidate):
     rec = {"finding_id": candidate.get("finding_id"), "detector_id": candidate.get("detector_id"),
            "route": route, "delivered": delivered,
            "lifecycle": {k: final.get(k) for k in
-                         ("state", "enrichment_state", "devo_delivery_state", "revision", "suppression_reason")}}
+                         ("state", "enrichment_state", "revision", "suppression_reason")}}
     if delivered:
         d = ES._doc(dict(final))                  # adds @timestamp, normalizes first/last_seen (as stored)
         idx = "ndr-findings-" + datetime.now(timezone.utc).strftime("%Y.%m.%d")

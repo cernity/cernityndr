@@ -44,7 +44,7 @@
     "state": {
       "type": "string",
       "description": "Canonical lifecycle (v2 §17).",
-      "enum": ["CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED", "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL", "DEVO_QUEUED", "DEVO_SENT"]
+      "enum": ["CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED", "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL"]
     },
     "enrichment_state": {
       "type": "string",
@@ -52,11 +52,6 @@
       "enum": ["NOT_REQUIRED", "REQUIRED", "PENDING", "ENRICHED", "ENRICHMENT_FAILED", "TIMEOUT"]
     },
     "capture_job_ids": { "type": "array", "items": { "type": "string" } },
-    "suppression_reason": { "type": "string" },
-    "devo_delivery_state": {
-      "type": "string",
-      "description": "SIEM (Devo-analog / ES) delivery tracking.",
-      "enum": ["NONE", "QUEUED", "SENT"]
-    }
+    "suppression_reason": { "type": "string" }
   }
 }

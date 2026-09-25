@@ -13,7 +13,6 @@ Lifecycle correctness is covered by test_state_machine.py; the finalization wiri
 test_finalization.py; this is the I/O shell.
 """
 import json
-import logging
 import os
 import signal
 import time
@@ -47,11 +46,16 @@ LIFECYCLE_ON = os.environ.get("CERNITY_LIFECYCLE_ACKS", "1").strip().lower() not
 # (no overlay / unavailable). Confirmed threats are already delivered; this only
 # resolves their dangling enrichment_state.
 ENRICH_TIMEOUT_SECS = float(os.environ.get("NDR_ENRICH_TIMEOUT_SECS", "120"))
+# F14 recovery scaling guard: only reload PENDING/REQUIRED findings still within this window and
+# capped at this many. Reloading ALL historical un-finalized findings (e.g. a large CAPTURE_REQUESTED
+# backlog when no capture path is deployed) loads millions into memory and floods finalization on start.
+RECOVERY_WINDOW_SECS = int(os.environ.get("NDR_RECOVERY_WINDOW_SECS", "21600"))   # 6h
+RECOVERY_MAX = int(os.environ.get("NDR_RECOVERY_MAX", "10000"))
 
 COLS = ["finding_id", "tenant_id", "sensor_ids", "detector_id", "detector_version",
         "category", "severity", "confidence", "first_seen", "last_seen", "entities",
         "evidence_refs", "mitre", "state", "enrichment_state", "capture_job_ids",
-        "suppression_reason", "devo_delivery_state",
+        "suppression_reason",
         # U4: enrichment + baseline provenance, persisted as JSON strings so they survive restart
         # recovery (the in-memory dict carries objects; _row serializes, _pending_from_rows parses back).
         "summary", "iocs", "source_events",
@@ -87,7 +91,7 @@ def _row(f: dict) -> list:
     r["ingested_at"] = datetime.now(timezone.utc)
     for k in ("sensor_ids", "evidence_refs", "mitre", "capture_job_ids"):
         r[k] = r.get(k) or []
-    for k in ("entities", "suppression_reason", "enrichment_state", "devo_delivery_state"):
+    for k in ("entities", "suppression_reason", "enrichment_state"):
         r[k] = r.get(k) or ""
     # U4: enrichment/provenance objects -> JSON String columns (entities is already a wire string).
     for k in ("summary", "iocs", "source_events"):
@@ -147,10 +151,13 @@ def _load_pending_from_ch(ch, deadline_secs, now):
     if ch is None:
         return {}, True
     try:
-        cols = ", ".join(f"argMax({c}, revision) AS {c}" for c in COLS if c != "finding_id")
-        res = ch.query(f"SELECT finding_id, {cols}, max(revision) AS revision "
-                       "FROM ndr.finding GROUP BY finding_id "
-                       "HAVING argMax(enrichment_state, revision) IN ('PENDING','REQUIRED')")
+        # Current (max-revision) row per finding via ReplacingMergeTree's documented view pattern
+        # (LIMIT 1 BY finding_id ORDER BY revision DESC), then keep only the un-finalized ones.
+        # Avoids the argMax alias-shadowing on `revision` (CH errors 179/184) the GROUP BY form hit.
+        res = ch.query(f"SELECT * FROM (SELECT * FROM ndr.finding "
+                       f"WHERE last_seen > now() - INTERVAL {RECOVERY_WINDOW_SECS} SECOND "
+                       f"ORDER BY revision DESC LIMIT 1 BY finding_id) "
+                       f"WHERE enrichment_state IN ('PENDING', 'REQUIRED') LIMIT {RECOVERY_MAX}")
         names = list(res.column_names)
         rows = [dict(zip(names, row)) for row in res.result_rows]
         return _pending_from_rows(rows, deadline_secs, now), True

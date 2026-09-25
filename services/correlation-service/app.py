@@ -13,7 +13,6 @@ deliver them unchanged (plan KTD7). Incident-typed inputs are ignored so an
 incident never re-correlates into another incident.
 """
 import json
-import logging
 import os
 import signal
 import time

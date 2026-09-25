@@ -12,7 +12,6 @@ seeded). Detection is otherwise stateless per record.
 """
 import hashlib
 import json
-import logging
 import os
 import signal
 import time

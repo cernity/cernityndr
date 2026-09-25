@@ -15,7 +15,6 @@ Tenant is resolved per record (U2), so two tenants never share a window.
 """
 import hashlib
 import json
-import logging
 import os
 import re
 import signal

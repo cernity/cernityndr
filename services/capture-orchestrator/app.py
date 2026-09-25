@@ -11,7 +11,6 @@ onto the authenticated bus; each sensor's agent owns local actuation. Gate logic
 is covered by test_gates.py.
 """
 import json
-import logging
 import os
 import ndr_runtime
 import signal

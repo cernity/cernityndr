@@ -2,8 +2,6 @@
 abuse.ch MalwareBazaar recent-hash feed (refreshed periodically) + EICAR + any
 NDR_MALWARE_HASHES, and emits ndr.finding.candidate.v1 for known-bad file hashes
 or risky executable delivery. Matching is covered by test_filematch.py."""
-import json
-import logging
 import os
 import signal
 import ssl

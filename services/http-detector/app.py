@@ -10,7 +10,6 @@ replicas / on rebalance). This makes http-detector horizontally scalable (plan 0
 """
 import hashlib
 import json
-import logging
 import os
 import signal
 import time

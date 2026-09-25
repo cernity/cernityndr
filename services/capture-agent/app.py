@@ -8,8 +8,6 @@ so the orchestrator frees the budget). Pure logic + policy live in agent.py.
 Deployed ON the sensor. No inbound SSH, no network-exposed Suricata socket:
 directives arrive over the same authenticated Kafka bus as everything else.
 """
-import json
-import logging
 import os
 import ndr_runtime
 import signal

@@ -8,7 +8,6 @@ Env (all optional):
   SOAR_WEBHOOK  e.g. Shuffle/n8n webhook URL         (hand off to a real SOAR)
 """
 import json
-import logging
 import os
 import signal
 

@@ -1,0 +1,32 @@
+# Alternate-store proof (plan 011 U6): InfluxDB 3 Core + Telegraf. Telegraf scrapes the SAME
+# :9108 /metrics (and redpanda) and writes line protocol to InfluxDB 3; Vantage's InfluxBackend
+# (METRICS_BACKEND=influxdb3) queries it via InfluxQL. Reproducible config (review R5/R6) — pinned
+# images, checked-in Telegraf config, no manual undocumented seeding. Run alongside the Prometheus
+# stack to prove the metrics seam is store-agnostic; not required for the default deploy.
+x-logging: &log {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+services:
+  influxdb3:
+    image: influxdb:3.0-core
+    container_name: cernity-influxdb3
+    command: ["influxdb3", "serve", "--node-id=cernity-node-0", "--object-store=file", "--data-dir=/var/lib/influxdb3"]
+    environment:
+      INFLUXDB3_AUTH_TOKEN: ${INFLUX_TOKEN:-}   # create via `influxdb3 create token --admin`; set here + in Telegraf/Vantage
+    volumes: [cernity-influxdb3-data:/var/lib/influxdb3]
+    ports: ["8181:8181"]
+    networks: [ndr]
+    restart: unless-stopped
+    logging: *log
+  telegraf:
+    image: telegraf:1.32
+    container_name: cernity-telegraf
+    environment:
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-}
+    volumes: ["./telegraf.conf:/etc/telegraf/telegraf.conf:ro"]
+    networks: [ndr]
+    restart: unless-stopped
+    depends_on: [influxdb3]
+    logging: *log
+networks:
+  ndr: {name: ndr, external: true}
+volumes:
+  cernity-influxdb3-data: {}

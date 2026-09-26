@@ -9,7 +9,7 @@ import uuid
 
 import ndr_runtime
 
-from adapters import get_adapter
+from adapters import DLQ_DIR, SinkDurabilityError, dlq_writable, get_adapter
 from forwarder import handle_batch, build_receipt
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -34,6 +34,11 @@ def main():
     import metrics                                    # lazy: /healthz /readyz /metrics
     # Sink health drives readiness (F15): a wedged/dead-lettering sink flips /readyz false.
     adapter = get_adapter(on_health=lambda name, ok: metrics.set_ready(f"sink:{name}", ok))
+    ok, err = dlq_writable()                          # B-U1: fail fast on an unwritable DLQ/ledger dir
+    if not ok:
+        log.error("FATAL: DLQ/ledger dir %r is not writable (%s). Set CERNITY_DLQ_DIR to a mounted, "
+                  "writable volume — refusing to start rather than crash-loop mid-batch.", DLQ_DIR, err)
+        raise SystemExit(1)
     ndr_runtime.start_health(ready=("consumer",))    # start the health server (F15)
     # enable_auto_commit=False: offsets are committed only AFTER durable delivery (F07),
     # so a crash/redeploy before a finding is delivered replays it instead of losing it.
@@ -61,21 +66,29 @@ def main():
 
     while _running:
         batch = consumer.poll(timeout_ms=1000)
+        batch_durable = True                         # B-U1: only commit when the whole batch is durably handled
         for _tp, records in batch.items():
             findings = [r.value for r in records]
             # Suppressed findings stay on the bus for correlation but are withheld from the analyst
             # plane; count them here so the receipt accounts for consumed = suppressed + delivered.
             live = [f for f in findings if f.get("state") != "SUPPRESSED"]
             withheld = [f for f in findings if f.get("state") == "SUPPRESSED"]
+            try:
+                if withheld and hasattr(adapter, "record_suppressed"):
+                    adapter.record_suppressed(withheld, worker)   # §59.1: suppression by finding-revision identity
+                handle_batch(live, adapter)          # DurableSink: retries + dead-letters, never drops
+            except (SinkDurabilityError, OSError) as e:   # B-U1: a ledger/DLQ write failed
+                batch_durable = False
+                metrics.set_ready("consumer", False)
+                log.error("batch NOT durably handled (%s) — NOT committing offset; replays on restart", e)
+                continue
             suppressed += len(withheld)
-            if withheld and hasattr(adapter, "record_suppressed"):
-                adapter.record_suppressed(withheld, worker)   # §59.1: suppression by finding-revision identity
-            handle_batch(live, adapter)              # DurableSink: retries + dead-letters, never drops
             total += len(findings)
             for f in findings:                       # per-finding detail: DEBUG only, off by default
                 log.debug("forwarded finding %s (%s)", f.get("finding_id", "?"), f.get("category", "?"))
-        if batch:
-            consumer.commit()                        # explicit ack AFTER durable delivery (F07)
+        if batch and batch_durable:
+            consumer.commit()                        # explicit ack AFTER durable delivery (F07/B-U1)
+            metrics.set_ready("consumer", True)
             emit_receipt()                           # refresh the receipt after each committed batch
         now = time.monotonic()
         if now - last_beat >= HEARTBEAT_SECS:

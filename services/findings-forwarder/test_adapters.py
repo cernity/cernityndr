@@ -136,6 +136,9 @@ def test_get_adapter_single_and_fanout():
 
 
 def test_multiadapter_isolates_failure():
+    # B-U1: a sink whose durability write fails no longer blocks the others (isolation preserved),
+    # but MultiAdapter now RAISES SinkDurabilityError so the caller does not commit the source offset.
+    from adapters import SinkDurabilityError
     class Boom:
         def emit_batch(self, fs):
             raise RuntimeError("down")
@@ -143,8 +146,12 @@ def test_multiadapter_isolates_failure():
     class OK:
         def emit_batch(self, fs):
             seen.extend(fs)
-    MultiAdapter([Boom(), OK()]).emit_batch([F])   # must not raise
-    assert seen == [F]
+    try:
+        MultiAdapter([Boom(), OK()]).emit_batch([F])
+        assert False, "a durability failure must surface, not be swallowed"
+    except SinkDurabilityError:
+        pass
+    assert seen == [F]                             # healthy sink still received the batch
 
 
 def test_unknown_sink_raises():

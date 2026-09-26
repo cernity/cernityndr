@@ -22,6 +22,31 @@ import time                                        # noqa: E402 (kept near the d
 MAX_RETRIES = int(os.environ.get("CERNITY_DELIVER_RETRIES", "4"))
 BACKOFF_SECS = float(os.environ.get("CERNITY_DELIVER_BACKOFF_SECS", "1.0"))
 DLQ_DIR = os.environ.get("CERNITY_DLQ_DIR", "/var/lib/cernity/dlq")
+
+
+class SinkDurabilityError(Exception):
+    """A sink's durable-obligation write (ledger/DLQ) failed, so the batch is NOT durably handled and
+    the source offset must NOT be committed (B-U1). Distinct from a delivery failure, which DurableSink
+    handles internally by dead-lettering — this is the ledger/DLQ store itself failing (disk/permission)."""
+
+    def __init__(self, sinks):
+        super().__init__("durability write failed for sink(s): %s" % ", ".join(sinks))
+        self.sinks = sinks
+
+
+def dlq_writable(dlq_dir=DLQ_DIR):
+    """B-U1: verify the DLQ/ledger dir is creatable+writable. Called at startup so a missing/unwritable
+    volume fails fast with a clear message instead of crash-looping mid-batch in DurableLedger.record
+    (the .155 incident: os.makedirs on a non-writable /var/lib/cernity/dlq, 293 restarts)."""
+    try:
+        os.makedirs(dlq_dir, exist_ok=True)
+        probe = os.path.join(dlq_dir, ".writecheck")
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        return True, None
+    except OSError as e:
+        return False, str(e)
 DEDUP_MAX = int(os.environ.get("CERNITY_DEDUP_MAX", "100000"))
 
 
@@ -117,6 +142,8 @@ class DurableSink:
         with open(self._dlq_path, "a") as fh:
             for f in findings:
                 fh.write(json.dumps({"sink": self.name, "error": str(err), "finding": f}) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())               # B-U1: DLQ payload durable BEFORE the ledger records dead_lettered
         log.error("%s: dead-lettered %d finding(s) after %d retries: %s",
                   self.name, len(findings), self._retries, err)
 
@@ -472,11 +499,18 @@ class MultiAdapter:
         self.emit_batch([finding])
 
     def emit_batch(self, findings):
+        # A sink's emit_batch only raises when its OWN durability write (ledger/DLQ) failed — delivery
+        # failures are dead-lettered internally. Continue to the other sinks, but collect the failures
+        # and raise so the caller does NOT commit the source offset (B-U1).
+        failed = []
         for a in self.adapters:
             try:
                 a.emit_batch(findings)
-            except Exception as e:
-                log.error("sink %s failed (continuing): %s", type(a).__name__, e)
+            except Exception as e:              # noqa: BLE001
+                log.error("sink %s durability write failed (continuing to other sinks): %s", type(a).__name__, e)
+                failed.append(type(a).__name__)
+        if failed:
+            raise SinkDurabilityError(failed)
 
     def receipt(self):
         return [r for a in self.adapters for r in ([a.receipt()] if hasattr(a, "receipt") else [])]

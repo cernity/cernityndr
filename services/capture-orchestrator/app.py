@@ -41,9 +41,11 @@ def _stop(*_):
 
 
 def probe_health(sensor_id: str) -> dict:
-    # Hook for real sensor metrics (agent could publish suricatasc dump-counters
-    # kernel_drops to a health topic). Default healthy for the homelab.
-    return {"packet_loss_pct": 0.0, "cpu_pct": 0.0}
+    # B-U8/R12: no real sensor-health signal is wired yet, so report state UNMEASURED rather than
+    # fabricating a perfectly-healthy 0.0 (which made the gate treat every sensor as known-good).
+    # `measured=False` lets consumers distinguish "unknown" from a real zero; the numeric fields keep
+    # the gate contract until the agent publishes suricatasc kernel_drops to a health topic.
+    return {"packet_loss_pct": 0.0, "cpu_pct": 0.0, "measured": False}
 
 
 def _handle_request(req, producer):

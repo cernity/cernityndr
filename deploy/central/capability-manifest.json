@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "purpose": "B-U8/R12: the DECLARED producer -> topic -> consumer matrix plus the capture-control credential and carve-scope contracts. This is the contract to verify real service/ACL config against (not an auto-derived scan); a route or credential that does not match it is a bug.",
+    "plan": "cernity-forge 2026-09-25-010 Track B U8"
+  },
+  "topics": [
+    {"topic": "suricata.flow.v1",   "producers": ["fluent-bit"], "consumers": ["behavioral-detectors", "threat-intel"]},
+    {"topic": "suricata.dns.v1",    "producers": ["fluent-bit"], "consumers": ["behavioral-detectors"]},
+    {"topic": "suricata.tls.v1",    "producers": ["fluent-bit"], "consumers": ["threat-intel"]},
+    {"topic": "suricata.http.v1",   "producers": ["fluent-bit"], "consumers": []},
+    {"topic": "suricata.modbus.v1", "producers": ["fluent-bit"], "consumers": ["ot-detectors"],
+     "note": "requires the route.lua modbus route (B-U8); previously Modbus fell through to suricata.raw.v1 and ot-detectors never fired"},
+    {"topic": "suricata.stats.v1",  "producers": ["fluent-bit"], "consumers": ["coverage-detector"]},
+    {"topic": "suricata.anomaly.v1","producers": ["fluent-bit"], "consumers": []},
+    {"topic": "suricata.alert (in eve stream)", "producers": ["fluent-bit"], "consumers": ["ids-alerts"]},
+    {"topic": "ndr.finding.candidate.v1", "producers": ["behavioral-detectors", "ids-alerts", "threat-intel", "ot-detectors", "coverage-detector", "slips-adapter"], "consumers": ["finding-service"]},
+    {"topic": "ndr.finding.final.v1", "producers": ["finding-service"], "consumers": ["correlation-service", "findings-forwarder", "soar-forwarder"]},
+    {"topic": "ndr.capture.request.v1", "producers": ["finding-service"], "consumers": ["capture-orchestrator"]},
+    {"topic": "ndr.capture.arm.v1", "producers": ["capture-orchestrator"], "consumers": ["capture-agent"]},
+    {"topic": "ndr.capture.status.v1", "producers": ["capture-agent"], "consumers": ["finding-service"]},
+    {"topic": "ndr.enrichment.request.v1", "producers": ["capture-agent"], "consumers": ["zeek-central"]},
+    {"topic": "ndr.enrichment.result.v1", "producers": ["zeek-central"], "consumers": ["finding-service"]},
+    {"topic": "ndr.lifecycle.ack.v1", "producers": ["finding-service"], "consumers": ["(operator/audit)"]},
+    {"topic": "ndr.sink.receipt.v1", "producers": ["findings-forwarder"], "consumers": ["(operator/audit)"]}
+  ],
+  "capture_control_credential": {
+    "requirement": "capture-agent must NOT reuse the produce-only telemetry shipper credential (which is write-only under the telemetry prefix, per deploy/central/redpanda/entrypoint.sh). It needs a dedicated least-privilege capture credential.",
+    "read": ["ndr.capture.arm.v1"],
+    "write": ["ndr.capture.status.v1", "ndr.enrichment.request.v1"]
+  },
+  "carve_scope_disclosure": {
+    "requirement": "when no BPF applies or the carve is empty, capture-agent may upload the broad shared capture window. The resulting finding MUST disclose broad-window scope (never labelled isolated exact-session evidence) and bound the uploaded bytes."
+  }
+}

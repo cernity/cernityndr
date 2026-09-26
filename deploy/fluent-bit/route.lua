@@ -23,6 +23,7 @@ function route(tag, timestamp, record)
     elseif et == "fileinfo" then topic = "suricata.file.v1"
     elseif et == "anomaly" then topic = "suricata.anomaly.v1"
     elseif et == "stats" then topic = "suricata.stats.v1"
+    elseif et == "modbus" then topic = "suricata.modbus.v1"   -- B-U8/R12: wire Modbus explicitly so ot-detectors is exercised (was falling through to raw)
     end
     record["_topic"] = topic
 

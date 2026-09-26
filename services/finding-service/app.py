@@ -16,6 +16,7 @@ import json
 import os
 import signal
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U6 rollout)
@@ -226,6 +227,20 @@ def _pop_pending(pending, tenant, fid):
     return None
 
 
+# B-U2: bounded cache of recently-finalized capture-bound findings so a late enrichment result
+# (arriving after a timeout/failed finalization) re-opens as a NEW revision instead of being dropped.
+_MAX_FINALIZED = int(os.environ.get("NDR_FINALIZED_CACHE", "5000"))
+_finalized_capture = OrderedDict()          # (tenant, finding_id) -> {finding, delivered}
+
+
+def _remember_finalized(finding, delivered):
+    k = _pk(finding.get("tenant_id"), finding.get("finding_id"))
+    _finalized_capture[k] = {"finding": finding, "delivered": delivered}
+    _finalized_capture.move_to_end(k)
+    while len(_finalized_capture) > _MAX_FINALIZED:
+        _finalized_capture.popitem(last=False)
+
+
 def _handle_candidate(cand, producer, geo, pending, deadline_secs, now, ch):
     """Build the finding, deliver-now if it is a confirmed threat, and request capture
     (tracking it for finalization) when packets are needed."""
@@ -248,24 +263,39 @@ def _handle_result(result, producer, geo, pending, ch):
     the pending finding. Unknown/duplicate finding is an idempotent no-op."""
     entry = _pop_pending(pending, result.get("tenant_id"), result.get("finding_id"))
     if entry is None:
+        # B-U2/R02: a late enrichment result after a timeout/failed finalization -> a NEW revision,
+        # not a silent drop. Unknown/duplicate (not in the finalized cache) stays an idempotent no-op.
+        prev = _finalized_capture.pop(_pk(result.get("tenant_id"), result.get("finding_id")), None)
+        if prev is None:
+            return
+        done = sm.apply_enrichment_result(prev["finding"], result)
+        log.info("late enrichment result for %s: re-emitting as revision %s",
+                 result.get("finding_id"), done.get("revision"))
+        _emit_finalized({"finding": prev["finding"], "delivered": True}, done, producer, geo, ch)
         return
     done = sm.apply_enrichment_result(entry["finding"], result)
     _emit_finalized(entry, done, producer, geo, ch)
 
 
 def _handle_status(status, producer, geo, pending, ch):
-    """A capture status (ndr.capture.status.v1). Only a refusal (orchestrator gate) or
-    an agent failure finalizes early — no enrichment result will follow. 'armed' True
-    and 'completed' mean the evidence is still coming on the result topic."""
-    refused = (status.get("armed") is False
-               or status.get("state") in ("failed", "rejected", "refused"))
-    if not refused:
-        return
+    """A capture status (ndr.capture.status.v1). B-U2/R02 state precedence: 'completed' means the
+    capture SUCCEEDED and the enrichment result is still coming — do NOT finalize (a timeout-finalize
+    here drops that result; the agent sets armed=False on completion, so 'armed' is not a refusal
+    signal). Only a terminal state with no result to follow finalizes early: failed/rejected/refused/
+    no_data."""
+    state = status.get("state")
+    if state == "completed":
+        return                                   # capture succeeded — await the enrichment result
+    # every OTHER terminal status finalizes early (no result will follow): an explicit
+    # failed/rejected/refused/no_data, or a bare armed=False orchestrator refusal.
+    if not (status.get("armed") is False or state in ("failed", "rejected", "refused", "no_data")):
+        return                                   # armed / in-progress: nothing to finalize yet
     entry = _pop_pending(pending, status.get("tenant_id"), status.get("finding_id"))
     if entry is None:
         return
     done = sm.finalize_timeout(entry["finding"])
     _emit_finalized(entry, done, producer, geo, ch)
+    _remember_finalized(done, entry["delivered"])    # a late result can still re-open this as a new revision
 
 
 def _sweep_timeouts(producer, geo, pending, now, ch):
@@ -276,6 +306,7 @@ def _sweep_timeouts(producer, geo, pending, now, ch):
         entry = pending.pop(key)
         done = sm.finalize_timeout(entry["finding"])
         _emit_finalized(entry, done, producer, geo, ch)
+        _remember_finalized(done, entry["delivered"])   # B-U2: a late result re-opens as a new revision
 
 
 def main():

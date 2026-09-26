@@ -216,7 +216,7 @@ def test_capture_target_prefers_peer_and_maps_domain_to_sni():
 
 def test_capture_job_defaults_when_no_usable_entity():
     job = sm.capture_job({"finding_id": "x", "entities": "[]"})
-    assert job == {"finding_id": "x", "sensor_id": "sensor-1",
+    assert job == {"finding_id": "x", "tenant_id": None, "sensor_id": "sensor-1",  # B-U5: tenant carried
                    "capture_profile": "ip", "value": "", "entities": "[]"}
 
 

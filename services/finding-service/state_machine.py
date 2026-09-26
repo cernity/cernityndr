@@ -253,6 +253,7 @@ def capture_job(finding: dict) -> dict:
     pcap_ref."""
     profile, value = _capture_target(finding)
     return {"finding_id": finding.get("finding_id"),
-            "sensor_id": _first_sensor(finding),
+            "tenant_id": finding.get("tenant_id"),      # B-U5/R09: carry tenant so the result/status
+            "sensor_id": _first_sensor(finding),        # is tenant-qualified, not fid-only-ambiguous
             "capture_profile": profile, "value": value,
             "entities": finding.get("entities")}

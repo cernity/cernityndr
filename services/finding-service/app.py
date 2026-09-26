@@ -51,7 +51,8 @@ ENRICH_TIMEOUT_SECS = float(os.environ.get("NDR_ENRICH_TIMEOUT_SECS", "120"))
 # capped at this many. Reloading ALL historical un-finalized findings (e.g. a large CAPTURE_REQUESTED
 # backlog when no capture path is deployed) loads millions into memory and floods finalization on start.
 RECOVERY_WINDOW_SECS = int(os.environ.get("NDR_RECOVERY_WINDOW_SECS", "21600"))   # 6h
-RECOVERY_MAX = int(os.environ.get("NDR_RECOVERY_MAX", "10000"))
+RECOVERY_MAX = int(os.environ.get("NDR_RECOVERY_MAX", "10000"))      # safety ceiling across all pages
+RECOVERY_PAGE = int(os.environ.get("NDR_RECOVERY_PAGE", "5000"))     # B-U5: page size for paginated recovery
 
 COLS = ["finding_id", "tenant_id", "sensor_ids", "detector_id", "detector_version",
         "category", "severity", "confidence", "first_seen", "last_seen", "entities",
@@ -152,16 +153,34 @@ def _load_pending_from_ch(ch, deadline_secs, now):
     if ch is None:
         return {}, True
     try:
-        # Current (max-revision) row per finding via ReplacingMergeTree's documented view pattern
-        # (LIMIT 1 BY finding_id ORDER BY revision DESC), then keep only the un-finalized ones.
-        # Avoids the argMax alias-shadowing on `revision` (CH errors 179/184) the GROUP BY form hit.
-        res = ch.query(f"SELECT * FROM (SELECT * FROM ndr.finding "
-                       f"WHERE last_seen > now() - INTERVAL {RECOVERY_WINDOW_SECS} SECOND "
-                       f"ORDER BY revision DESC LIMIT 1 BY finding_id) "
-                       f"WHERE enrichment_state IN ('PENDING', 'REQUIRED') LIMIT {RECOVERY_MAX}")
-        names = list(res.column_names)
-        rows = [dict(zip(names, row)) for row in res.result_rows]
-        return _pending_from_rows(rows, deadline_secs, now), True
+        # B-U5/R09: dedup the current (max-revision) row per (tenant_id, finding_id) — NOT finding_id
+        # alone, which collapsed two tenants sharing an id before the tenant-keyed map ever saw them.
+        # Paginate so overflow beyond one page is still recovered (was a silent LIMIT 10000 truncation);
+        # a hard safety cap yields OBSERVABLE degraded readiness rather than a silent partial recovery.
+        pending = {}
+        offset, overflow = 0, False
+        while True:
+            res = ch.query(f"SELECT * FROM (SELECT * FROM ndr.finding "
+                           f"WHERE last_seen > now() - INTERVAL {RECOVERY_WINDOW_SECS} SECOND "
+                           f"ORDER BY revision DESC LIMIT 1 BY tenant_id, finding_id) "
+                           f"WHERE enrichment_state IN ('PENDING', 'REQUIRED') "
+                           f"ORDER BY tenant_id, finding_id LIMIT {RECOVERY_PAGE} OFFSET {offset}")
+            names = list(res.column_names)
+            rows = [dict(zip(names, row)) for row in res.result_rows]
+            if not rows:
+                break
+            pending.update(_pending_from_rows(rows, deadline_secs, now))
+            offset += len(rows)
+            if len(rows) < RECOVERY_PAGE:
+                break
+            if offset >= RECOVERY_MAX:                    # safety ceiling
+                overflow = True
+                break
+        if overflow:
+            log.error("F14 pending recovery hit the safety cap %d — some obligations NOT recovered "
+                      "(degraded readiness)", RECOVERY_MAX)
+            return pending, False                         # observable, not a silent partial claim
+        return pending, True
     except Exception as e:                                # noqa: BLE001 (recovery must not crash startup)
         log.error("F14 pending recovery FAILED (holding readiness, will retry): %s", e)
         return {}, False

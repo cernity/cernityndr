@@ -1,0 +1,75 @@
+# Cernity default monitoring stack (plan 011 U5). Prometheus + Grafana + node_exporter + cAdvisor.
+# Additive/read-only: it observes the pipeline, never modifies it. Joins the external `ndr` network
+# so it can scrape services by name on :9108. Versions are pinned (review R5: reproducible monitoring)
+# — the one deliberate exception to the repo's :latest default, for a concrete reproducibility reason.
+# NOTE (R5): colocated on .155 with what it monitors — it cannot be an independent outage monitor for
+# its own host. Retention has BOTH a duration and a size budget on a persistent volume.
+x-logging: &log {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: cernity-prometheus
+    user: nobody
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=5GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - cernity-prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    networks: [ndr]
+    restart: unless-stopped
+    logging: *log
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: cernity-node-exporter
+    # host visibility (R5: observe the HOST, not the container). Least mounts, read-only, no blanket privilege.
+    command:
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|run|var/lib/docker)($|/)
+      - --collector.filesystem.fs-types-exclude=^(overlay|tmpfs|squashfs|autofs)$$
+    network_mode: host
+    pid: host
+    volumes: ["/:/host/root:ro,rslave"]
+    restart: unless-stopped
+    logging: *log
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cernity-cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [ndr]
+    restart: unless-stopped
+    logging: *log
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: cernity-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-cernity-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - cernity-grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    networks: [ndr]
+    restart: unless-stopped
+    logging: *log
+
+networks:
+  ndr: {name: ndr, external: true}
+volumes:
+  cernity-prometheus-data: {}
+  cernity-grafana-data: {}

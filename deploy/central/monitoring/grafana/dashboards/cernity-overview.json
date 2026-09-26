@@ -1,0 +1,6 @@
+{"title":"Cernity — pipeline & host","uid":"cernity-overview","schemaVersion":39,"version":1,"time":{"from":"now-6h","to":"now"},"panels":[
+ {"id":1,"type":"timeseries","title":"Detector activity (candidates/s)","gridPos":{"h":8,"w":12,"x":0,"y":0},"targets":[{"expr":"sum by (detector_id) (rate(ndr_findings_total[5m]))"}]},
+ {"id":2,"type":"timeseries","title":"Records processed (rate by event_type)","gridPos":{"h":8,"w":12,"x":12,"y":0},"targets":[{"expr":"sum by (event_type) (rate(ndr_records_total[5m]))"}]},
+ {"id":3,"type":"timeseries","title":"Scrape up (targets)","gridPos":{"h":8,"w":12,"x":0,"y":8},"targets":[{"expr":"up"}]},
+ {"id":4,"type":"timeseries","title":"Host CPU busy % (.155)","gridPos":{"h":8,"w":12,"x":12,"y":8},"targets":[{"expr":"100 - (avg by (host) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)"}]}
+]}

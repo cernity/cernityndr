@@ -1,0 +1,39 @@
+# Cernity default monitoring stack (plan 011 U5). Scrapes the /metrics the services already
+# expose (:9108), host resources (node_exporter on the host net), containers (cAdvisor), and the
+# broker (redpanda :9644/public_metrics). scrape_up here means "collector reached target" — NOT
+# service readiness or end-to-end health (see soc-console/docs/metrics-contract.md, R1).
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels: {monitor: cernity-central, host: "192.168.222.155"}
+scrape_configs:
+  - job_name: cernity-services
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - behavioral-detectors-behavioral-detectors-1:9108
+          - behavioral-detectors-behavioral-detectors-2:9108
+          - behavioral-detectors-behavioral-detectors-3:9108
+          - ndr-finding-service:9108
+          - ndr-threat-intel:9108
+          - ndr-coverage-detector:9108
+          - ndr-ids-alerts:9108
+          - ndr-anomaly-detector:9108
+          - ndr-east-west-detectors:9108
+          - ndr-protocol-detectors:9108
+          - ndr-normalizer:9108
+          - ndr-reconstruction:9108
+          - ndr-asset-service:9108
+          - ndr-soar-forwarder:9108
+          - ndr-capture-orchestrator:9108
+          - ndr-zeek-central:9108
+          - cernity-findings-forwarder:9108   # NOTE: no prometheus_client in image -> expect up=0 until instrumented (R7)
+  - job_name: node
+    static_configs: [{targets: ["192.168.222.155:9100"], labels: {host: "central-155"}}]
+  - job_name: cadvisor
+    static_configs: [{targets: ["cadvisor:8080"]}]
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs: [{targets: ["redpanda:9644"]}]
+  - job_name: prometheus
+    static_configs: [{targets: ["localhost:9090"]}]

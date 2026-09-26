@@ -47,7 +47,7 @@ def _emit_once(producer, kind: str, sensor: str, value):
     key = (sensor, kind, bucket)
     if key in _emitted:
         return
-    cand = cov.to_candidate(kind, sensor, value, TENANT)
+    cand = cov.to_candidate(kind, sensor, value, TENANT, window=bucket)   # B-U7: id windowed to the dedup bucket
     if not cand:
         return
     producer.send(CANDIDATE_TOPIC, cand)

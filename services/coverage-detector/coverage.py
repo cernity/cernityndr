@@ -18,6 +18,12 @@ Two failure modes, both from Suricata's stats:
 Pure functions; app.py holds the Kafka wiring, per-sensor windowing, and dedup.
 """
 import json
+import os
+import time
+
+# B-U7/R11+R04: episode window so a degraded->recovered->degraded sequence yields DISTINCT coverage
+# findings instead of one permanent id that collapses every episode into a single record.
+EPISODE_WINDOW_SECS = int(os.environ.get("NDR_COVERAGE_EPISODE_SECS", "3600"))
 
 
 def _num(d, *path):
@@ -73,19 +79,26 @@ _WHY = {
 }
 
 
-def to_candidate(kind, sensor, value, tenant="homelab"):
+def to_candidate(kind, sensor, value, tenant="homelab", now=None, window=None):
     """Build a coverage-degraded finding candidate. Severity is above the default
     suppression floor (5) on purpose: a coverage warning must reach the analyst,
-    because its whole job is to stop 'no findings' being read as 'no threat'."""
+    because its whole job is to stop 'no findings' being read as 'no threat'.
+
+    B-U7/R11: carries first_seen/last_seen (the strict finding schema requires both — they were
+    missing, so every coverage candidate was invalid) and a WINDOWED id so a later degraded episode
+    on the same sensor is a distinct finding, not a permanent id that collapses across episodes."""
     if kind not in _SEV:
         return None
+    now = now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    wid = window if window is not None else int(time.time() // EPISODE_WINDOW_SECS)
     entities = json.dumps([
         {"type": "sensor", "value": sensor},
         {"type": "coverage", "value": kind},
         {"type": "metric", "value": round(value, 4) if isinstance(value, float) else value},
         {"type": "why", "value": _WHY[kind]},
     ])
-    return {"finding_id": f"cov-{sensor}-{kind}",
+    return {"finding_id": f"cov-{sensor}-{kind}-{wid}",
             "tenant_id": tenant, "detector_id": "coverage_degraded", "detector_version": "1.0",
             "category": "coverage", "severity": _SEV[kind], "confidence": 0.8,
+            "first_seen": now, "last_seen": now,
             "entities": entities, "state": "CANDIDATE"}

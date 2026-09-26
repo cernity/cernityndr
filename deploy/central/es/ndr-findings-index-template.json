@@ -1,0 +1,33 @@
+{
+  "index_patterns": ["ndr-findings-*"],
+  "priority": 100,
+  "_meta": {
+    "owner": "cernity",
+    "purpose": "B-U7/R11: own versioned mappings for queryable core fields so daily ndr-findings-* indices stop diverging (the mixed-mapping _agg_field hazard) and enrichment objects stop exploding the field count (plan 008 §15.4). Core fields are explicitly typed for deterministic aggregation/sort; intel/geo are flattened so per-indicator keys do not mint a field each."
+  },
+  "template": {
+    "settings": {
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "properties": {
+        "finding_id": { "type": "keyword" },
+        "tenant_id": { "type": "keyword" },
+        "detector_id": { "type": "keyword" },
+        "detector_version": { "type": "keyword" },
+        "category": { "type": "keyword" },
+        "state": { "type": "keyword" },
+        "enrichment_state": { "type": "keyword" },
+        "severity": { "type": "integer" },
+        "confidence": { "type": "float" },
+        "revision": { "type": "integer" },
+        "@timestamp": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
+        "first_seen": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
+        "last_seen": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
+        "emitted_at": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
+        "intel": { "type": "flattened" },
+        "geo": { "type": "flattened" }
+      }
+    }
+  }
+}

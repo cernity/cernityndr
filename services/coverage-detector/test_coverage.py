@@ -44,13 +44,22 @@ def test_applayer_flows_sums_across_protocols():
 
 
 def test_to_candidate_shape_and_severity():
-    cand = c.to_candidate("capture_loss", "sensor-a", 0.1234, tenant="acme")
+    cand = c.to_candidate("capture_loss", "sensor-a", 0.1234, tenant="acme", window=42)
     assert cand["detector_id"] == "coverage_degraded"
     assert cand["category"] == "coverage"
     assert cand["severity"] == 6            # above the default suppression floor (5)
     assert cand["tenant_id"] == "acme"
-    assert cand["finding_id"] == "cov-sensor-a-capture_loss"   # stable id = natural dedup
+    assert cand["finding_id"] == "cov-sensor-a-capture_loss-42"   # B-U7/R11: windowed id (distinct episodes)
+    assert cand["first_seen"] and cand["last_seen"]              # R11: strict finding schema requires both
     assert "sensor-a" in cand["entities"] and "0.1234" in cand["entities"]
+
+
+def test_to_candidate_distinct_window_distinct_id():
+    # B-U7/R04+R11: a later degraded episode on the same sensor is a DISTINCT finding, not one
+    # permanent id collapsing every episode.
+    a = c.to_candidate("capture_loss", "s", 0.1, window=1)
+    b = c.to_candidate("capture_loss", "s", 0.1, window=2)
+    assert a["finding_id"] != b["finding_id"]
 
 
 def test_to_candidate_rejects_unknown_kind():

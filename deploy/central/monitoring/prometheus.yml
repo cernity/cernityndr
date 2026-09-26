@@ -7,6 +7,10 @@ global:
   scrape_timeout: 10s
   external_labels: {monitor: cernity-central, host: "192.168.222.155"}
 scrape_configs:
+  # NOTE: services without a /metrics endpoint (zeek-central/enrich.py, capture-orchestrator,
+  # reconstruction, asset-service) are intentionally NOT scraped here (review item 2). Instrument
+  # them (ndr_runtime.start_health) if their metrics are wanted; until then scrape_up would falsely
+  # read them as down.
   - job_name: cernity-services
     metrics_path: /metrics
     static_configs:
@@ -22,11 +26,7 @@ scrape_configs:
           - ndr-east-west-detectors:9108
           - ndr-protocol-detectors:9108
           - ndr-normalizer:9108
-          - ndr-reconstruction:9108
-          - ndr-asset-service:9108
           - ndr-soar-forwarder:9108
-          - ndr-capture-orchestrator:9108
-          - ndr-zeek-central:9108
           - cernity-findings-forwarder:9108   # NOTE: no prometheus_client in image -> expect up=0 until instrumented (R7)
   - job_name: node
     static_configs: [{targets: ["192.168.222.155:9100"], labels: {host: "central-155"}}]

@@ -47,6 +47,15 @@ services:
       CERNITY_BUS_USER: ${CERNITY_BUS_USER:-cernity-sensor}
       CERNITY_BUS_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
       CERNITY_BUS_TLS_CA: /certs/ca.crt
+      # Raw-NSM archive sink (analytics plane). The S3 output in fluent-bit.conf writes the NSM
+      # stream to CERNITY_RAW_BUCKET at CERNITY_RAW_S3_ENDPOINT with a least-privilege object-store
+      # key (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY scoped to PutObject on the bucket, NOT root).
+      # Leave the endpoint empty and omit the S3 block from fluent-bit.conf for a bus-only deploy.
+      CERNITY_RAW_BUCKET: ${CERNITY_RAW_BUCKET:-ndr-raw}
+      CERNITY_RAW_S3_ENDPOINT: ${CERNITY_RAW_S3_ENDPOINT:-}
+      CERNITY_RAW_S3_REGION: ${CERNITY_RAW_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${CERNITY_RAW_S3_USER:-}
+      AWS_SECRET_ACCESS_KEY: ${CERNITY_RAW_S3_PASSWORD:-}
     volumes:
       # the shipper config
       - ../fluent-bit:/fluent-bit/etc:ro

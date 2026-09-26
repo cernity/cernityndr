@@ -64,6 +64,13 @@ def _obl_key(tenant, finding_id, revision, dest):
     return json.dumps([tenant or "default", finding_id, revision, dest], sort_keys=True)
 
 
+def _ts_epoch(ts):
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 class DurableLedger:
     """Append-only per-sink obligation ledger (§handoff stage 2): each delivered/dead-lettered
     obligation is recorded durably with its worker epoch + timestamp, so a restart resumes with prior
@@ -108,6 +115,56 @@ class DurableLedger:
                 self.outcome[k] = outcome
             fh.flush()
             os.fsync(fh.fileno())
+
+    def transition(self, findings, dest, outcome, worker, note=""):
+        """B-U6/R10: an AUDITED outcome change (e.g. a dead_lettered obligation re-delivered on replay).
+        Unlike record(), this overwrites an existing terminal outcome — appending a NEW record so the
+        attempt history is preserved (append-only), never deleting prior records."""
+        if not findings:
+            return
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "a") as fh:
+            for f in findings:
+                k = _obl_key(f.get("tenant_id"), f.get("finding_id"), f.get("revision"), dest)
+                fh.write(json.dumps({"tenant_id": f.get("tenant_id"), "finding_id": f.get("finding_id"),
+                                     "revision": f.get("revision"), "dest": dest, "outcome": outcome,
+                                     "worker": worker, "note": note,
+                                     "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
+                self.outcome[k] = outcome
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def compact(self, retain_secs=None):
+        """B-U6/R10: bound the append-only ledger — rewrite it keeping only the LATEST record per
+        obligation key (append order is chronological, so the last record wins), optionally dropping
+        records older than retain_secs (past the Kafka replay horizon they cannot be replayed). Atomic
+        via temp-file + rename; rebuilds the in-memory index. Returns the retained record count."""
+        if not os.path.isfile(self.path):
+            return 0
+        latest = {}
+        with open(self.path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                latest[_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest"))] = r
+        if retain_secs is not None:
+            cutoff = datetime.now(timezone.utc).timestamp() - retain_secs
+            latest = {k: r for k, r in latest.items() if _ts_epoch(r.get("ts")) >= cutoff}
+        tmp = self.path + ".compact"
+        with open(tmp, "w") as fh:
+            for r in latest.values():
+                fh.write(json.dumps(r) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)                       # atomic swap
+        self.outcome = {_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest")): r["outcome"]
+                        for r in latest.values() if r.get("outcome")}
+        return len(latest)
 
 
 class DurableSink:
@@ -192,6 +249,46 @@ class DurableSink:
         findings this sink durably delivered vs dead-lettered. dead_lettered>0 is a valid negative
         product result (delivery failure, durably captured), not lost data."""
         return {"name": self.name, "delivered": self.delivered, "dead_lettered": self.dead_lettered}
+
+    def replay(self, worker=None):
+        """B-U6/R10: explicit dead-letter replay — re-attempt this sink's dead-lettered obligations,
+        preserving their identity + attempt history (ledger.transition, never a ledger wipe). Rewrites
+        the DLQ file to drop only the obligations that now delivered. Returns (replayed, still_failing).
+        This is an operator/scheduled workflow, not automatic on the hot path."""
+        if not os.path.isfile(self._dlq_path):
+            return (0, 0)
+        with open(self._dlq_path) as fh:
+            entries = [json.loads(x) for x in fh if x.strip()]
+        replayed = failing = 0
+        for e in entries:
+            f = e.get("finding")
+            if not f:
+                continue
+            try:
+                failed = self.inner.emit_batch([f]) or []
+            except Exception:                            # noqa: BLE001
+                failed = [f]
+            if failed:
+                failing += 1
+            else:
+                self._ledger.transition([f], self.name, "delivered", worker or self._worker, note="replay")
+                self.delivered += 1
+                replayed += 1
+        if replayed:                                     # keep only obligations still not delivered
+            kept = [e for e in entries
+                    if self._ledger.terminal(e.get("finding", {}), self.name) != "delivered"]
+            with open(self._dlq_path, "w") as fh:
+                for e in kept:
+                    fh.write(json.dumps(e) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        if replayed:
+            self._on_health(True)
+        return (replayed, failing)
+
+    def compact_ledger(self, retain_secs=None):
+        """B-U6/R10: bound ledger growth (delegates to DurableLedger.compact)."""
+        return self._ledger.compact(retain_secs)
 
     def record_suppressed(self, findings, worker=None):
         """§59.1: record delivery-SUPPRESSED findings in the obligation ledger by (finding_id, revision)
@@ -522,6 +619,16 @@ class MultiAdapter:
             if hasattr(a, "record_suppressed"):
                 a.record_suppressed(findings, worker)
                 return
+
+    def replay(self, worker=None):
+        """B-U6/R10: fan an explicit dead-letter replay across durable sinks."""
+        return {type(a).__name__: a.replay(worker) for a in self.adapters if hasattr(a, "replay")}
+
+    def compact_ledgers(self, retain_secs=None):
+        """B-U6/R10: bound each durable sink's obligation ledger."""
+        for a in self.adapters:
+            if hasattr(a, "compact_ledger"):
+                a.compact_ledger(retain_secs)
 
 
 def _make(kind):

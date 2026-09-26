@@ -19,6 +19,8 @@ log = ndr_runtime.setup_logging("findings-forwarder")
 FINAL_TOPIC = "ndr.finding.final.v1"
 RECEIPT_TOPIC = "ndr.sink.receipt.v1"                # Rec-D: accountable per-sink delivery disposition
 HEARTBEAT_SECS = int(os.environ.get("LOG_HEARTBEAT_SECS", "60"))
+COMPACT_SECS = int(os.environ.get("NDR_LEDGER_COMPACT_SECS", "3600"))          # B-U6: bound ledger growth
+LEDGER_RETAIN_SECS = int(os.environ.get("NDR_LEDGER_RETAIN_SECS", "0")) or None   # None = keep all outcomes
 RECEIPTS_ON = os.environ.get("CERNITY_SINK_RECEIPTS", "1").strip().lower() not in ("", "0", "false", "no")
 _running = True
 
@@ -49,7 +51,7 @@ def main():
     log.info("findings-forwarder up: consuming %s -> sink=%s (worker %s)",
              FINAL_TOPIC, type(adapter).__name__, worker[:8])
     total = suppressed = seq = 0
-    last_beat = time.monotonic()
+    last_beat = last_compact = time.monotonic()
 
     def emit_receipt():
         # Rec-D: publish the accountable disposition (consumed = suppressed + delivered + dead-lettered
@@ -94,6 +96,13 @@ def main():
         if now - last_beat >= HEARTBEAT_SECS:
             log.info("alive: %d finding(s) forwarded so far", total)
             last_beat = now
+        if now - last_compact >= COMPACT_SECS:           # B-U6/R10: keep the obligation ledger bounded
+            try:
+                if hasattr(adapter, "compact_ledgers"):
+                    adapter.compact_ledgers(retain_secs=LEDGER_RETAIN_SECS)
+            except Exception as e:                       # noqa: BLE001 (compaction must not drop findings)
+                log.warning("ledger compaction failed: %s", e)
+            last_compact = now
     emit_receipt()                                   # final disposition on shutdown
 
 

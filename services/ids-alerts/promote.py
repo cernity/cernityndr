@@ -13,7 +13,9 @@ and always drop engine/decoder + ET INFO/POLICY signatures.
 from __future__ import annotations
 import hashlib
 import json
+import os
 import time
+from datetime import datetime
 
 import provenance                       # baseline source_events (additive)
 
@@ -27,6 +29,19 @@ def _stable(*parts) -> int:
     collapsed it (F07). SHA-1 of the joined parts is identical everywhere."""
     s = "|".join("" if p is None else str(p) for p in parts)
     return int(hashlib.sha1(s.encode()).hexdigest()[:15], 16) % 10**10
+
+
+# B-U3/R04: occurrence window so two SEPARATE observations of the same signature+endpoints get
+# distinct finding ids, while a restart replaying the SAME alert (same event timestamp) stays
+# idempotent. Absent/unparseable ts -> a fixed bucket (keeps the id deterministic across processes).
+OCCURRENCE_WINDOW_SECS = int(os.environ.get("IDS_OCCURRENCE_WINDOW_SECS", "300"))
+
+
+def _ts_bucket(ts, window=OCCURRENCE_WINDOW_SECS):
+    try:
+        return int(datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp() // window)
+    except Exception:
+        return 0
 
 # Engine/decoder + pure-informational signatures — never a threat finding.
 _NOISE_PREFIXES = (
@@ -116,8 +131,11 @@ def to_candidate(eve: dict, tenant: str = "homelab") -> dict | None:
     # Suricata's event time is the real first/last-seen; fall back to now (F13: the
     # schema requires both, and they were missing so every ids candidate was invalid).
     ts = eve.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # B-U3/R04: identity now carries sensor + occurrence window, so two distinct observations do not
+    # collide, while the same alert (same event ts) stays idempotent across restarts.
+    sensor = eve.get("host") or ""
     return {
-        "finding_id": f"idsig-{sid}-{_stable(sid, src, dst)}",
+        "finding_id": f"idsig-{sid}-{_stable(sid, src, dst, sensor, _ts_bucket(ts))}",
         "tenant_id": tenant, "detector_id": "ids_signature", "detector_version": "1.0",
         "category": category_for(alert), "severity": our_sev, "confidence": 0.9,
         "first_seen": ts, "last_seen": ts,

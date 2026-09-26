@@ -6,10 +6,12 @@ covered by test_ti.py; this is the fetch + consume shell.
 import json
 import os
 import signal
+import os
 import ssl
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U5/U6)
 import ti
@@ -83,13 +85,31 @@ def join_key_entities(eve: dict) -> list[dict]:
     return out
 
 
+# B-U3/R04: bounded windowed dedup keyed by (feed, ioc, dst, hour). Was a process-lifetime set keyed
+# by (feed, ioc), which suppressed every OTHER host that hit the same IOC for the process's whole life.
+# Now a different host is not suppressed, a new hour re-emits, and the store is size-bounded.
+_SEEN_MAX = int(os.environ.get("NDR_TI_DEDUP_MAX", "50000"))
+_seen = OrderedDict()
+
+
+def _seen_once(key):
+    if key in _seen:
+        return False
+    _seen[key] = True
+    _seen.move_to_end(key)
+    while len(_seen) > _SEEN_MAX:
+        _seen.popitem(last=False)
+    return True
+
+
 def _candidate(feed, ioc, dst, extra):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ents = [{"type": "ioc", "feed": feed, "value": ioc}]
     if dst:
         ents.append({"type": "ip", "role": "dst", "value": dst})
     ents += extra
-    return {"finding_id": f"ti-{feed}-{ioc}-{int(time.time() // 3600)}",
+    # id carries dst + hour so two hosts hitting the same IOC are distinct findings (R04)
+    return {"finding_id": f"ti-{feed}-{ioc}-{dst or 'none'}-{int(time.time() // 3600)}",
             "tenant_id": TENANT, "detector_id": "threat_intel", "detector_version": "1.0",
             "category": "c2", "severity": 8, "confidence": 0.95,
             "first_seen": now, "last_seen": now,
@@ -104,7 +124,6 @@ def main():
     producer = ndr_runtime.make_producer()
     consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.tls.v1", group_id="ndr-threat-intel", auto_offset_reset="latest")
     log.info("threat-intel up")
-    seen = set()
     while _running:
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():
             for rec in records:
@@ -115,8 +134,7 @@ def main():
                 cert = t.get("fingerprint") or (e.get("tls", {}) or {}).get("fingerprint")
                 hit, feed, ioc = ti.match(dst, ja3 or "", cert or "",
                                           _feeds["feodo"], _feeds["ja3"], _feeds["cert"])
-                if hit and (feed, ioc) not in seen:
-                    seen.add((feed, ioc))
+                if hit and _seen_once((feed, ioc, dst, int(time.time() // 3600))):
                     src = e.get("src_ip")
                     extra = [{"type": "ip", "role": "src", "value": src}] if src else []
                     extra += join_key_entities(e)
@@ -126,8 +144,7 @@ def main():
                 sja3 = (t.get("ja3s", {}) or {}).get("hash") if isinstance(t.get("ja3s"), dict) else t.get("ja3s")
                 sh, sfeed, sioc = ti.match_server_fp(sja3 or "", t.get("ja4s") or "",
                                                      t.get("jarm") or "", _feeds["c2fp"])
-                if sh and (sfeed, sioc) not in seen:
-                    seen.add((sfeed, sioc))
+                if sh and _seen_once((sfeed, sioc, dst, int(time.time() // 3600))):
                     src = e.get("src_ip")
                     extra = [{"type": "ip", "role": "src", "value": src}] if src else []
                     extra += join_key_entities(e)

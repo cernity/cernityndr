@@ -70,10 +70,14 @@ def test_high_confidence_is_metadata_sufficient():
 
 
 def test_failed_enrichment_still_finalizes():
-    f, _ = sm.build_finding(LOW_CONF_EXFIL)          # CAPTURE_REQUESTED
+    # B-U4/R06: a failed enrichment finalizes the finding (never dropped — still emitted to final.v1
+    # for correlation/audit) but delivery is decided by policy, not by enrichment. This severity-5
+    # non-threat finding is SUPPRESSED — the SAME outcome as its high-confidence metadata path — so
+    # losing evidence cannot silently promote a low-severity finding to the analyst plane.
+    f, _ = sm.build_finding(LOW_CONF_EXFIL)          # CAPTURE_REQUESTED, severity 5, non-threat source
     done = sm.apply_enrichment_result(f, {"status": "failed"})
-    assert done["state"] == "FINAL"                   # not dropped
     assert done["enrichment_state"] == "ENRICHMENT_FAILED"
+    assert done["state"] == "SUPPRESSED"              # not dropped (emitted for correlation), not delivered
 
 
 def test_ok_enrichment_attaches_evidence():

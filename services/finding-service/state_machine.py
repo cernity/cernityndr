@@ -115,6 +115,20 @@ def suppress_delivery(cand: dict) -> bool:
     return int(cand.get("severity", 10) or 10) <= SUPPRESS_MAX_SEVERITY
 
 
+def _terminal_state(finding: dict) -> tuple[str, str]:
+    """B-U4/R06: the delivery decision at a terminal revision, applied consistently and independently
+    of the enrichment outcome. An already-delivered finding (state FINAL — e.g. a deliver-now confirmed
+    threat) STAYS FINAL: losing or gaining evidence never retracts a delivered finding. An undelivered
+    capture-bound finding gets the SAME suppression policy as the metadata path, so a capture timeout
+    (lost evidence) cannot silently promote a low-severity non-threat finding to the analyst plane."""
+    if finding.get("state") == "FINAL":
+        return "FINAL", finding.get("suppression_reason", "")
+    if suppress_delivery(finding):
+        return "SUPPRESSED", ("low-severity (%s) non-threat finding; kept for correlation and audit, "
+                              "not delivered" % finding.get("severity"))
+    return "FINAL", ""
+
+
 def build_finding(cand: dict) -> tuple[dict, str]:
     """CANDIDATE -> enrichment policy -> terminal state. Returns (finding, route)
     where route is 'final' or 'capture'."""
@@ -184,7 +198,7 @@ def apply_enrichment_result(finding: dict, result: dict) -> dict:
             f["iocs"] = merged
     else:
         f["enrichment_state"] = "ENRICHMENT_FAILED"
-    f["state"] = "FINAL"
+    f["state"], f["suppression_reason"] = _terminal_state(finding)   # B-U4/R06: policy, not enrichment, decides delivery
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: enriched update is a new revision
     return f
 
@@ -197,7 +211,7 @@ def finalize_timeout(finding: dict) -> dict:
     dangling enrichment_state (v2 §17: an absent/failed enrichment must not erase a
     finding)."""
     f = dict(finding)
-    f["state"] = "FINAL"
+    f["state"], f["suppression_reason"] = _terminal_state(finding)   # B-U4/R06: losing evidence must not promote delivery
     f["enrichment_state"] = "TIMEOUT"
     f["revision"] = int(finding.get("revision") or 1) + 1     # R03: timeout-finalization is a new revision
     return f

@@ -22,7 +22,10 @@ import time
 # SLIPS threat levels -> Cernity severity (1-10). A SLIPS *alert* (not raw
 # evidence) is already significant, so even "low" maps mid-scale. Tunable.
 _THREAT_SEV = {"info": 3, "low": 4, "medium": 6, "high": 8, "critical": 9}
-_DEFAULT_TL = "critical"   # SLIPS' own default alert threat level
+# B-U10/R05: a MISSING or invalid threat level must not become critical/9 — that silently infers the
+# highest severity from an absent field. Default to the lowest ('info'); the alert still delivers, but
+# its severity is not inflated by a missing value.
+_DEFAULT_TL = "info"
 
 # IDEA0 top-level taxonomy segment -> (cernity category, precise ATT&CK). Prefix
 # match on the first segment of the first IDEA0 Category. Unknown -> anomaly/[]:
@@ -122,7 +125,16 @@ def alert_to_candidate(alert, tenant, version="1.0"):
     victim = _first_ip(alert.get("Target"))
     tl = _threat_level(alert)
     category, mitre = _category(alert)
-    conf = min(max(float(alert.get("Confidence", 0.7) or 0.7), 0.0), 1.0)
+    # B-U10/R05: preserve an explicit Confidence of 0 (do not coerce 0 -> 0.7 via `or`); only an
+    # ABSENT or non-finite value falls back to the documented default.
+    _raw = alert.get("Confidence")
+    try:
+        conf = float(_raw)
+        if conf != conf or conf in (float("inf"), float("-inf")):
+            raise ValueError
+    except (TypeError, ValueError):
+        conf = 0.7
+    conf = min(max(conf, 0.0), 1.0)
     desc = alert.get("Description") or alert.get("Note") or "SLIPS behavioral alert"
     aid = str(alert.get("ID") or _stable(f"{attacker}:{alert.get('DetectTime', '')}:{desc}"))
 

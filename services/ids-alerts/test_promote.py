@@ -66,7 +66,17 @@ def test_major_signature_severity_promotes_even_if_numeric_soft():
     a = {"signature": "ET EXPLOIT Something", "category": "Web Application Attack",
          "severity": 3, "signature_id": 2099999, "metadata": {"signature_severity": ["Major"]}}
     assert p.is_threat_alert(a) is True
-    assert p.category_for(a) == "malware"
+    assert p.category_for(a) == "exploit"   # B-U10/R05: web-app attack -> exploit, not generic malware
+
+
+def test_unknown_category_is_anomaly_not_malware():
+    # B-U10/R05: an unmapped threat category is a real detection of an UNRESOLVED category (anomaly),
+    # never a silently inferred malware.
+    assert p.category_for({"category": "Some Brand New Category"}) == "anomaly"
+
+
+def test_attempted_dos_is_not_c2():
+    assert p.category_for({"category": "Attempted Denial of Service"}) == "anomaly"
 
 
 def _finding_schema_required():

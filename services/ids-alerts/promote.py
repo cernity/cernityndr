@@ -56,7 +56,7 @@ _CATEGORY_MAP = {
     "a network trojan was detected": "c2",
     "malware command and control activity detected": "c2",
     "misc attack": "c2",                      # incl. Spamhaus / known-bad-IP hits
-    "attempted denial of service": "c2",
+    "attempted denial of service": "anomaly",   # B-U10/R05: a DoS attempt is not C2
     "attempted information leak": "recon",
     "detection of a network scan": "recon",
     "potential corporate privacy violation": "exfil",
@@ -64,7 +64,7 @@ _CATEGORY_MAP = {
     "successful administrator privilege gain": "lateral",
     "attempted administrator privilege gain": "lateral",
     "attempted user privilege gain": "lateral",
-    "web application attack": "malware",
+    "web application attack": "exploit",         # B-U10/R05: a web-app attack is an exploit attempt, not generic malware
     "exploit kit activity detected": "malware",
     "targeted malicious activity was detected": "malware",
 }
@@ -93,7 +93,10 @@ def is_threat_alert(alert: dict) -> bool:
 
 
 def category_for(alert: dict) -> str:
-    return _CATEGORY_MAP.get(str(alert.get("category", "")).strip().lower(), "malware")
+    # B-U10/R05: an unmapped threat alert is a real detection (the signature fired) but of an
+    # UNRESOLVED category — surface it as 'anomaly' (suspected, unspecified), never a silently
+    # inferred 'malware'/'c2'. The specific category is a lead, not a verdict.
+    return _CATEGORY_MAP.get(str(alert.get("category", "")).strip().lower(), "anomaly")
 
 
 def join_key_entities(eve: dict) -> list[dict]:

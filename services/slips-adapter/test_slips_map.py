@@ -33,10 +33,17 @@ def test_unknown_category_is_honest_anomaly_no_fabricated_mitre():
     assert c["severity"] == 6
 
 
-def test_absent_threat_level_defaults_critical():
+def test_absent_threat_level_defaults_info_not_critical():
+    # B-U10/R05: a MISSING threat level must not silently become critical/9 — it defaults to info(3).
     c = alert_to_candidate({"Source": [{"IP4": ["10.0.0.1"]}]}, "t")
-    assert c["severity"] == 9        # _THREAT_SEV["critical"]
-    assert c["confidence"] == 0.7    # default when SLIPS omits Confidence
+    assert c["severity"] == 3        # _THREAT_SEV["info"], not critical/9
+    assert c["confidence"] == 0.7    # ABSENT Confidence -> documented default (explicit 0 is preserved)
+
+
+def test_explicit_zero_confidence_is_preserved():
+    # B-U10/R05: an explicit Confidence of 0 must NOT be coerced to 0.7.
+    c = alert_to_candidate({"Source": [{"IP4": ["10.0.0.1"]}], "Confidence": 0}, "t")
+    assert c["confidence"] == 0.0
 
 
 def test_ipv6_and_stable_id_when_no_alert_id():

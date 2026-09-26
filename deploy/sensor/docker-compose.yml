@@ -31,6 +31,12 @@ services:
     container_name: cernity-fluent-bit
     <<: *hardening-infra
     environment:
+      # B-U9/R14: the router stamps tenant/sensor from THESE env vars; they were not passed into the
+      # container, so route.lua fell back to default/sensor-1 even when the operator set them. Sourced
+      # from the SAME ${NDR_TENANT}/${NDR_SENSOR} the capture-agent uses, so telemetry and capture carry
+      # ONE consistent identity.
+      NDR_TENANT: ${NDR_TENANT:-default}
+      NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       SURICATA_EVE_ALERTS: ${SURICATA_EVE_ALERTS:-/var/log/suricata/eve-alerts.json}
       SURICATA_EVE_NSM: ${SURICATA_EVE_NSM:-/var/log/suricata/eve-nsm.json}

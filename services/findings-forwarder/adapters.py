@@ -134,6 +134,12 @@ class DurableLedger:
             fh.flush()
             os.fsync(fh.fileno())
 
+    def unresolved_count(self):
+        """R7: CURRENT unresolved dead-letter obligations = keys whose latest outcome is
+        'dead_lettered' (replay transitions them to 'delivered'). Reconciled from the in-memory
+        index (latest-wins), NOT a cumulative counter and NOT the DLQ file's line count."""
+        return sum(1 for v in self.outcome.values() if v == "dead_lettered")
+
     def compact(self, retain_secs=None):
         """B-U6/R10: bound the append-only ledger — rewrite it keeping only the LATEST record per
         obligation key (append order is chronological, so the last record wins), optionally dropping
@@ -249,6 +255,10 @@ class DurableSink:
         findings this sink durably delivered vs dead-lettered. dead_lettered>0 is a valid negative
         product result (delivery failure, durably captured), not lost data."""
         return {"name": self.name, "delivered": self.delivered, "dead_lettered": self.dead_lettered}
+
+    def dlq_gauge(self):
+        """R7: {sink_name: current unresolved dead-letter obligations} for the metrics gauge."""
+        return {self.name: self._ledger.unresolved_count()}
 
     def replay(self, worker=None):
         """B-U6/R10: explicit dead-letter replay — re-attempt this sink's dead-lettered obligations,
@@ -611,6 +621,13 @@ class MultiAdapter:
 
     def receipt(self):
         return [r for a in self.adapters for r in ([a.receipt()] if hasattr(a, "receipt") else [])]
+
+    def dlq_gauge(self):
+        g = {}
+        for a in self.adapters:
+            if hasattr(a, "dlq_gauge"):
+                g.update(a.dlq_gauge())
+        return g
 
     def record_suppressed(self, findings, worker=None):
         # Suppression is global (before any sink). Record once to the first durable sink's ledger;

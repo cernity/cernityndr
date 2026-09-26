@@ -1,0 +1,14 @@
+# kminion (plan 011 U5+): consumer-group lag + topic offsets from redpanda -> Prometheus.
+kafka:
+  brokers: ["redpanda:9092"]
+minion:
+  consumerGroups:
+    enabled: true
+    scrapeMode: adminApi
+  topics:
+    enabled: true
+    granularity: partition
+exporter:
+  namespace: kminion
+  host: ""
+  port: 8080

@@ -1,9 +1,9 @@
-# Cernity default monitoring stack (plan 011 U5). Prometheus + Grafana + node_exporter + cAdvisor.
-# Additive/read-only: it observes the pipeline, never modifies it. Joins the external `ndr` network
-# so it can scrape services by name on :9108. Versions are pinned (review R5: reproducible monitoring)
-# — the one deliberate exception to the repo's :latest default, for a concrete reproducibility reason.
-# NOTE (R5): colocated on .155 with what it monitors — it cannot be an independent outage monitor for
-# its own host. Retention has BOTH a duration and a size budget on a persistent volume.
+# Cernity default monitoring stack (plan 011 U5). Prometheus + Grafana + node_exporter + cAdvisor +
+# kminion. Additive/read-only: observes the pipeline, never modifies it. Joins the external `ndr`
+# network to scrape services by name on :9108. Versions pinned (review R5: reproducible monitoring —
+# the one deliberate exception to the repo's :latest default, for a concrete reproducibility reason).
+# NOTE (R5): colocated on .155 with what it monitors — cannot be an independent outage monitor for its
+# own host. Retention has both a duration and a size budget on a persistent volume.
 x-logging: &log {driver: json-file, options: {max-size: "10m", max-file: "3"}}
 
 services:
@@ -28,7 +28,6 @@ services:
   node-exporter:
     image: prom/node-exporter:v1.8.2
     container_name: cernity-node-exporter
-    # host visibility (R5: observe the HOST, not the container). Least mounts, read-only, no blanket privilege.
     command:
       - --path.rootfs=/host/root
       - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|run|var/lib/docker)($|/)
@@ -64,6 +63,17 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - cernity-grafana-data:/var/lib/grafana
     ports: ["3000:3000"]
+    networks: [ndr]
+    restart: unless-stopped
+    logging: *log
+
+  kminion:
+    image: redpandadata/kminion:v2.2.12
+    container_name: cernity-kminion
+    environment:
+      CONFIG_FILEPATH: /etc/kminion/config.yaml
+    volumes: ["./kminion.yaml:/etc/kminion/config.yaml:ro"]
+    ports: ["8082:8080"]
     networks: [ndr]
     restart: unless-stopped
     logging: *log

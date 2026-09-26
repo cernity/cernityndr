@@ -52,6 +52,9 @@ def main():
              FINAL_TOPIC, type(adapter).__name__, worker[:8])
     total = suppressed = seq = 0
     last_beat = last_compact = time.monotonic()
+    if hasattr(adapter, "dlq_gauge"):                    # R7: initialize at startup so 0 unresolved is
+        for _sink, _n in adapter.dlq_gauge().items():    # a MEASURED zero, not an absent series
+            metrics.set_dlq_unresolved(_sink, _n)
 
     def emit_receipt():
         # Rec-D: publish the accountable disposition (consumed = suppressed + delivered + dead-lettered
@@ -100,6 +103,9 @@ def main():
             try:
                 if hasattr(adapter, "compact_ledgers"):
                     adapter.compact_ledgers(retain_secs=LEDGER_RETAIN_SECS)
+                if hasattr(adapter, "dlq_gauge"):        # R7: current unresolved dead-letters per sink
+                    for _sink, _n in adapter.dlq_gauge().items():
+                        metrics.set_dlq_unresolved(_sink, _n)
             except Exception as e:                       # noqa: BLE001 (compaction must not drop findings)
                 log.warning("ledger compaction failed: %s", e)
             last_compact = now

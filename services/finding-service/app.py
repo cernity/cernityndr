@@ -20,6 +20,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 
 import ndr_runtime                      # shared tuned consumer/producer (plan 003 U6 rollout)
+import metrics                          # plan 011 R7: finalization + enrichment-pending observability
 
 import geoenrich
 import intel
@@ -222,6 +223,7 @@ def _emit_finalized(entry, done, producer, geo, ch):
         intel.enrich(done)
     _persist(ch, done)
     producer.send(FINAL_TOPIC, done, key=_pkey(done))
+    metrics.finalization("capture_complete")   # R7: capture-bound finding finalized on its delivery
 
 
 def _pk(tenant, fid):
@@ -394,11 +396,14 @@ def main():
                     log.info("%s %s (%s)",
                              "CAPTURE_REQUESTED" if route == "capture" else "FINAL",
                              finding["finding_id"], finding["category"])
+                    if route in ("final", "final_and_capture"):
+                        metrics.finalization(route)     # R7: finalized at candidate handling
                 elif tp.topic == RESULT_TOPIC:
                     _handle_result(rec.value, producer, geo, pending, ch)
                 elif tp.topic == STATUS_TOPIC:
                     _handle_status(rec.value, producer, geo, pending, ch)
         _sweep_timeouts(producer, geo, pending, time.monotonic(), ch)
+        metrics.set_enrichment_pending(len(pending))     # R7: current findings awaiting enrichment
         emit_lifecycle()
         producer.flush()
 

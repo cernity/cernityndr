@@ -12,7 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
     _ON = True
 except Exception:                       # prometheus_client not installed -> no-op
     _ON = False
@@ -23,6 +23,11 @@ if _ON:
     DROPPED = Counter("ndr_records_dropped_total", "Records skipped", ["reason"])
     CONFIG_RELOADS = Counter("ndr_config_reloads_total", "Config snapshots applied")
     EVAL_SECONDS = Histogram("ndr_evaluate_seconds", "evaluate() duration")
+    # plan 011 R7: expose the pipeline's internal work + evidence state so the dashboard can answer
+    # "is this making progress / what's stuck", not just "is it up".
+    FINALIZATIONS = Counter("ndr_finalization_total", "finding-service finalizations", ["reason"])
+    ENRICH_PENDING = Gauge("ndr_enrichment_pending", "findings awaiting enrichment (current)")
+    DLQ_UNRESOLVED = Gauge("ndr_dlq_unresolved", "current unresolved dead-letter obligations", ["sink"])
 
 _ready = {}   # component -> ready?; a service declares its components (plan 003 observability)
 
@@ -50,6 +55,21 @@ def config_reloaded():
 def observe_evaluate(seconds):
     if _ON:
         EVAL_SECONDS.observe(seconds)
+
+
+def finalization(reason):               # R7: finding-service finalized a finding (by reason)
+    if _ON:
+        FINALIZATIONS.labels(reason or "unknown").inc()
+
+
+def set_enrichment_pending(n):          # R7: current count awaiting enrichment (gauge)
+    if _ON:
+        ENRICH_PENDING.set(n)
+
+
+def set_dlq_unresolved(sink, n):        # R7: current unresolved dead-letters per sink (gauge)
+    if _ON:
+        DLQ_UNRESOLVED.labels(sink).set(n)
 
 
 def set_ready(component, value=True):

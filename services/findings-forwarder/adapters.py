@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 import cef
+import mappings
 
 log = logging.getLogger("findings-forwarder")
 import time                                        # noqa: E402 (kept near the durable-delivery code)
@@ -409,8 +410,11 @@ class ElasticsearchAdapter:
         lines = []
         for f in findings:
             d = self._doc(f)
+            # U7: carry the §18.4 stable pivot fields under ECS names alongside the full document,
+            # so ES/OpenSearch analysts pivot on stable ECS fields without losing the rich finding.
+            doc = {**d, **mappings.to_ecs(f)}
             lines.append(json.dumps({"index": {"_index": idx, "_id": self._doc_id(d)}}))
-            lines.append(json.dumps(d))
+            lines.append(json.dumps(doc))
         body = ("\n".join(lines) + "\n").encode()
         headers = {"Content-Type": "application/x-ndjson"}
         if self.auth:
@@ -457,7 +461,10 @@ class SplunkAdapter:
             else ssl._create_unverified_context()
 
     def _body(self, findings):
-        return "".join(json.dumps({"event": f, "sourcetype": self.sourcetype}) for f in findings).encode()
+        # U7: merge the §18.4 stable pivot fields under Splunk CIM names into each event alongside the
+        # full finding, so CIM-driven searches/dashboards pivot without losing the rich payload.
+        return "".join(json.dumps({"event": {**f, **mappings.to_cim(f)}, "sourcetype": self.sourcetype})
+                       for f in findings).encode()
 
     def emit(self, finding):
         self.emit_batch([finding])

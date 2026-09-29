@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/siem_pivot.schema.json",
+  "title": "siem_pivot",
+  "description": "Origin: v2 §18.4. The STABLE pivot field set every exported finding/observation carries, so an analyst can cross-reference the same event across SIEMs regardless of transport (CEF/CIM/ECS). Names here are CANONICAL; services/findings-forwarder/mappings.py renames them to Splunk CIM and Elastic/OpenSearch ECS. Every field is always present in the extractor output; a field with no value on the source finding is explicitly null (never omitted) so a pivot is either a link or a documented gap. file_artifact_id and investigation_id are produced by Track A / U9 and are null until then. Independently authored from open CIM/ECS references (§26 IP): no Corelight assets or wording.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "finding_id",
+    "signature_id",
+    "revision",
+    "incident_id",
+    "entity_id",
+    "asset_key",
+    "community_id",
+    "observation_point",
+    "observation_id",
+    "pcap_evidence_id",
+    "file_artifact_id",
+    "investigation_id",
+    "model_version",
+    "detector_version"
+  ],
+  "properties": {
+    "finding_id": {
+      "description": "Stable finding OCCURRENCE identity (F13) — this specific export. The one pivot that is never null.",
+      "type": "string",
+      "minLength": 1
+    },
+    "signature_id": {
+      "description": "Identity of the signature/detector that fired (detector_id), SHARED by every finding that detector emits — distinct from the per-occurrence finding_id. Null if the finding names no detector.",
+      "type": ["string", "null"]
+    },
+    "revision": {
+      "description": "Which revision of the finding this export is (R03) — distinguishes an enriched/timeout re-delivery from the original.",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "incident_id": {
+      "description": "The correlation incident this finding rolled into (correlation-service), or null if not correlated.",
+      "type": ["string", "null"]
+    },
+    "entity_id": {
+      "description": "Tenant-scoped entity spine key the finding attaches to (F08 entity_key), or null.",
+      "type": ["string", "null"]
+    },
+    "asset_key": {
+      "description": "Stable asset key surviving IP change (§15.5, U17), or null when the entity is a bare IP.",
+      "type": ["string", "null"]
+    },
+    "community_id": {
+      "description": "Community-ID flow hash (the cross-tool flow pivot), or null.",
+      "type": ["string", "null"]
+    },
+    "observation_point": {
+      "description": "The sensor that observed the flow (sensor_id), or null.",
+      "type": ["string", "null"]
+    },
+    "observation_id": {
+      "description": "The canonical observation id (obs_id) the finding drew from, or null.",
+      "type": ["string", "null"]
+    },
+    "pcap_evidence_id": {
+      "description": "Pointer to captured pcap/evidence (e.g. MinIO object), or null.",
+      "type": ["string", "null"]
+    },
+    "file_artifact_id": {
+      "description": "Extracted-file artifact id (Track A). Null until Track A produces it.",
+      "type": ["string", "null"]
+    },
+    "investigation_id": {
+      "description": "Investigation/case id (U9). Null until U9 produces it.",
+      "type": ["string", "null"]
+    },
+    "model_version": {
+      "description": "Detector model version (ML detectors), or null for rule-only detectors.",
+      "type": ["string", "null"]
+    },
+    "detector_version": {
+      "description": "Detector code/ruleset version, or null.",
+      "type": ["string", "null"]
+    }
+  }
+}

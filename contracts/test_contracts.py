@@ -126,6 +126,7 @@ VALID_FINDING = {
 }
 
 CANONICAL_TOPICS = {
+    "ndr.observation.normalized.v1",
     "ndr.sensor.health.v1",
     "suricata.raw.v1", "suricata.flow.v1", "suricata.dns.v1", "suricata.tls.v1",
     "suricata.http.v1", "suricata.ssh.v1", "suricata.windows.v1",

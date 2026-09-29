@@ -1,0 +1,598 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cernity.observation.v1",
+  "title": "Canonical observation.v1",
+  "description": "U4 supports conn, dns, tls and http. Source reference resolves tenant + obs_id in the named typed table to raw_record (canonical JSON of decoded bus EVE). Capability flags attest only to included source evidence; unadvertised capabilities are unavailable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "obs_id",
+    "tenant",
+    "sensor_id",
+    "ts",
+    "entities",
+    "type",
+    "fields",
+    "capabilities",
+    "source_ref"
+  ],
+  "properties": {
+    "schema": {
+      "const": "cernity.observation.v1"
+    },
+    "obs_id": {
+      "type": "string",
+      "pattern": "^obs:[a-f0-9]{64}$"
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sensor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sensor",
+        "normalized",
+        "ingested",
+        "method",
+        "clock_offset_ms"
+      ],
+      "properties": {
+        "sensor": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "normalized": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "ingested": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "method": {
+          "enum": [
+            "clock-offset",
+            "ingest-fallback"
+          ]
+        },
+        "clock_offset_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "clock-offset"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "clock_offset_ms": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "clock_offset_ms": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "entities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "role",
+          "value"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "ip",
+              "domain",
+              "asset"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "type": {
+      "enum": [
+        "conn",
+        "dns",
+        "tls",
+        "http"
+      ]
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "community_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "src_ip": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dest_ip": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proto": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app_proto": {
+          "type": "string",
+          "minLength": 1
+        },
+        "flow_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tx_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "src_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "dest_port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "flow": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "dns": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "tls": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "http": {
+          "type": "object",
+          "minProperties": 1
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "flow-only",
+          "dns-transaction",
+          "tls-handshake",
+          "http-metadata",
+          "community-id",
+          "ja3",
+          "ja4"
+        ]
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "table",
+        "tenant",
+        "obs_id",
+        "sha256",
+        "topic",
+        "partition",
+        "offset"
+      ],
+      "properties": {
+        "kind": {
+          "const": "clickhouse-row"
+        },
+        "table": {
+          "enum": [
+            "ndr.network_flow",
+            "ndr.dns_transaction",
+            "ndr.tls_observation",
+            "ndr.http_observation"
+          ]
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "obs_id": {
+          "type": "string",
+          "pattern": "^obs:[a-f0-9]{64}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1
+        },
+        "partition": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "conn"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "flow"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "dns"
+                  ]
+                },
+                {
+                  "required": [
+                    "tls"
+                  ]
+                },
+                {
+                  "required": [
+                    "http"
+                  ]
+                }
+              ]
+            }
+          },
+          "capabilities": {
+            "contains": {
+              "const": "flow-only"
+            },
+            "items": {
+              "enum": [
+                "flow-only",
+                "community-id"
+              ]
+            }
+          },
+          "source_ref": {
+            "properties": {
+              "table": {
+                "const": "ndr.network_flow"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "dns"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "dns"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "flow"
+                  ]
+                },
+                {
+                  "required": [
+                    "tls"
+                  ]
+                },
+                {
+                  "required": [
+                    "http"
+                  ]
+                }
+              ]
+            }
+          },
+          "capabilities": {
+            "contains": {
+              "const": "dns-transaction"
+            },
+            "items": {
+              "enum": [
+                "dns-transaction",
+                "community-id"
+              ]
+            }
+          },
+          "source_ref": {
+            "properties": {
+              "table": {
+                "const": "ndr.dns_transaction"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tls"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "tls"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "flow"
+                  ]
+                },
+                {
+                  "required": [
+                    "dns"
+                  ]
+                },
+                {
+                  "required": [
+                    "http"
+                  ]
+                }
+              ]
+            }
+          },
+          "capabilities": {
+            "contains": {
+              "const": "tls-handshake"
+            },
+            "items": {
+              "enum": [
+                "tls-handshake",
+                "community-id",
+                "ja3",
+                "ja4"
+              ]
+            }
+          },
+          "source_ref": {
+            "properties": {
+              "table": {
+                "const": "ndr.tls_observation"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "http"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "http"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "flow"
+                  ]
+                },
+                {
+                  "required": [
+                    "dns"
+                  ]
+                },
+                {
+                  "required": [
+                    "tls"
+                  ]
+                }
+              ]
+            }
+          },
+          "capabilities": {
+            "contains": {
+              "const": "http-metadata"
+            },
+            "items": {
+              "enum": [
+                "http-metadata",
+                "community-id"
+              ]
+            }
+          },
+          "source_ref": {
+            "properties": {
+              "table": {
+                "const": "ndr.http_observation"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "community-id"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "community_id"
+            ],
+            "properties": {
+              "community_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "ja3"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "tls"
+            ],
+            "properties": {
+              "tls": {
+                "required": [
+                  "ja3"
+                ],
+                "properties": {
+                  "ja3": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "object",
+                        "required": [
+                          "hash"
+                        ],
+                        "properties": {
+                          "hash": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "ja4"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "tls"
+            ],
+            "properties": {
+              "tls": {
+                "required": [
+                  "ja4"
+                ],
+                "properties": {
+                  "ja4": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

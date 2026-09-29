@@ -58,3 +58,27 @@ this binding. Key is UTF-8 JSON `[tenant, sensor_uuid]`; consumers must verify t
 asserted tenant/sensor against enrollment and authenticated ingress identity.
 This is health telemetry, not a finding or SIEM input. The secure bus grants the
 sensor principal write/describe/create on this exact topic only.
+
+## Canonical evidence
+
+```text
+ndr.observation.normalized.v1
+```
+
+Carries `cernity.observation.v1` (`observation.schema.json`) from the normalizer
+following insertion into the typed evidence row. Key is UTF-8 JSON
+`[tenant, first_entity_value]`, or `[tenant, sensor_id]` if no entity is present.
+At-least-once delivery: consumers deduplicate by `(tenant, obs_id)`.
+This is evidence telemetry, not a SIEM finding. `source_ref` resolves the named
+ClickHouse table by `tenant_id = tenant AND obs_id = source_ref.obs_id`; its
+`raw_record` contains the preserved decoded bus object. No raw sensor-byte or
+MinIO-delivery claim is made. Findings can reference the exact `obs_id` string
+in `evidence_refs`; existing flow/community references are not exact event IDs.
+
+`ts.sensor` retains the sensor timestamp. `ts.normalized` uses a trusted measured
+sensor-minus-reference offset if supplied to the transform; otherwise the live
+service uses the Kafka record timestamp with `method = ingest-fallback` and a
+null offset. The service requires broker `LogAppendTime` on these input topics and stops
+without committing on `CreateTime` records, which cannot establish ingest time.
+Health-to-normalizer offset lookup and correlation skew tolerance are not
+implemented by U4. Consumers must inspect `ts.method` before clock-sensitive use.

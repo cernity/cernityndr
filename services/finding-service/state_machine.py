@@ -37,6 +37,28 @@ LIFECYCLE = {"CANDIDATE", "SCORED", "CAPTURE_REQUESTED", "ENRICHED",
              "ENRICHMENT_FAILED", "SUPPRESSED", "FINAL"}
 
 
+# --- Case status lifecycle (plan U7; Addendum A6) -------------------------------
+# The analyst case workflow, same transition-table shape as the finding lifecycle
+# above: a case moves new -> investigating -> resolved -> closed, with reopen paths
+# (resolved/closed -> investigating) for work that comes back. An unlisted jump
+# (e.g. new -> resolved, skipping triage, or closed -> resolved) is rejected so the
+# audit trail stays coherent and a status can't silently regress.
+CASE_STATUSES = ("new", "investigating", "resolved", "closed")
+CASE_TRANSITIONS = {
+    "new": {"investigating", "closed"},          # triage, or close outright (dup/noise)
+    "investigating": {"resolved", "closed"},
+    "resolved": {"closed", "investigating"},     # sign off, or reopen for more work
+    "closed": {"investigating"},                 # reopen a closed case
+}
+
+
+def valid_case_transition(current: str, nxt: str) -> bool:
+    """True iff `current -> nxt` is an allowed case status move. A no-op
+    (current == nxt) is NOT a transition and returns False, so callers don't
+    write an empty status_changed audit event."""
+    return nxt in CASE_TRANSITIONS.get(current, set())
+
+
 CONFIRMED_THREAT_SOURCES = ("ids_signature", "threat_intel", "file_malware_hash")
 
 # plan 008 KTD6: the structured nDPI classifier (detector_version below) emits honest,

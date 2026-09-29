@@ -102,12 +102,13 @@ def build_query(grants, entity, frm, until, obs_type, page_size, after=""):
     tell whether the page is full. Every user value is a bound parameter."""
     where = [
         "tenant_id IN {tenants:Array(String)}",
-        "has(entity_values, {entity:String})",
         "normalized_time < {until:DateTime64(3, 'UTC')}",      # half-open upper bound (exclusive)
         # keyset lower bound: strictly after (frm, after); with after='' this is >= frm.
         "(normalized_time > {frm:DateTime64(3, 'UTC')} OR "
         "(normalized_time = {frm:DateTime64(3, 'UTC')} AND obs_id > {after:String}))",
     ]
+    if entity is not None:
+        where.append("has(entity_values, {entity:String})")
     params = {"tenants": list(grants), "entity": entity, "frm": frm,
               "until": until, "after": after, "limit": page_size + 1}
     if obs_type:
@@ -162,3 +163,16 @@ def _iso(dt):
     if isinstance(dt, str):
         return dt
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def fetch_hunt_page(client, tenant, frm, to, page_size=DEFAULT_PAGE_SIZE, after=""):
+    """Internal tenant-only scan for IOC fields absent from entity_values.
+
+    HTTP /observations still requires an entity. Reuse the same view, bounds,
+    parameter binding and keyset continuation; never combine tenant grants.
+    """
+    if not isinstance(tenant, str) or not tenant:
+        raise ValueError("one tenant is required")
+    frm, to = parse_window(frm, to)
+    return fetch_observations(client, [tenant], None, frm, to,
+                              page_size=clamp_page_size(page_size), after=after)

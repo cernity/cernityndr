@@ -1,6 +1,5 @@
-"""Threat-intel feed parsing + matching (plan U8 Tier 1; RITA's 4th pillar).
-Pure logic — app.py fetches the feeds and consumes the topics. Matches observed
-dst IPs / JA3 / TLS cert SHA1 / domains against abuse.ch blocklists.
+"""U2 live EVE matching against the local U1 intel store.
+Legacy feed parsing and static matching remain available when INTEL_DB is unset.
 """
 from __future__ import annotations
 import re
@@ -42,7 +41,7 @@ def norm(v: str) -> str:
     return (v or "").strip().lower()
 
 
-def match(dst_ip: str, ja3: str, cert_sha1: str,
+def match_static(dst_ip: str, ja3: str, cert_sha1: str,
           feodo: set, ja3_bl: set, cert_bl: set) -> tuple[bool, str, str]:
     """Return (hit, feed, ioc) for the strongest match on an observation."""
     if dst_ip and dst_ip in feodo:
@@ -81,3 +80,93 @@ def match_server_fp(ja3s: str, ja4s: str, jarm: str, fp_bl: set) -> tuple[bool, 
         if v and v in fp_bl:
             return True, f"c2fp_{typ}", v
     return False, "", ""
+
+
+def dimensions(eve: dict):
+    """Yield only supplied EVE values; never infer a URL scheme or a file hash."""
+    from urllib.parse import urlsplit
+
+    def obj(value):
+        return value if isinstance(value, dict) else {}
+
+    def value(kind, field, raw):
+        if isinstance(raw, dict):
+            raw = raw.get("hash")
+        if isinstance(raw, str) and raw.strip():
+            yield kind, field, raw
+
+    for field in ("src_ip", "dest_ip"):
+        yield from value("ip", field, eve.get(field))
+    tls = obj(eve.get("tls"))
+    yield from value("domain", "tls.sni", tls.get("sni"))
+    for field, kind in (("ja3", "ja3"), ("ja3s", "ja3"), ("ja4", "ja4"),
+                        ("ja4s", "ja4"), ("fingerprint", "cert")):
+        yield from value(kind, "tls." + field, tls.get(field))
+    dns = obj(eve.get("dns"))
+    yield from value("domain", "dns.rrname", dns.get("rrname"))
+    for group in ("queries", "answers"):
+        entries = dns.get(group)
+        if isinstance(entries, list):
+            for i, entry in enumerate(entries):
+                yield from value("domain", f"dns.{group}.{i}.rrname", obj(entry).get("rrname"))
+    http = obj(eve.get("http"))
+    yield from value("domain", "http.hostname", http.get("hostname"))
+    # EVE commonly supplies only a request target (/path). It is not a full URL.
+    for field, raw in (("http.url", http.get("url")), ("url", eve.get("url"))):
+        if isinstance(raw, str):
+            try:
+                parsed = urlsplit(raw)
+                if parsed.scheme and parsed.hostname:
+                    yield "url", field, raw
+            except ValueError:
+                continue
+
+
+def match(eve: dict, store, tenant: str, now: float) -> list[dict]:
+    """All live U1 hits for a trusted service tenant, including labeled suppressed hits.
+
+    Re-derive trust/score at read time. Suppressed hits are returned for local audit,
+    never prioritized. Payload tenant identifiers cannot select a different store tenant.
+    """
+    import ipaddress
+    import lifecycle
+
+    if not tenant or (eve.get("tenant_id") is not None and eve["tenant_id"] != tenant):
+        return []
+    if eve.get("tenant") is not None and eve["tenant"] != tenant:
+        return []
+    matches = []
+    seen = set()
+    for kind, field, raw in dimensions(eve):
+        try:
+            normalized = lifecycle.norm_indicator(kind, raw)
+        except ValueError:
+            continue
+        records = []
+        exact = store.get(tenant, kind, normalized)
+        if exact:
+            records.append(exact)
+        if kind == "ip":
+            try:
+                address = ipaddress.ip_address(normalized)
+                for record in store.networks(tenant):
+                    try:
+                        if address in ipaddress.ip_network(record["indicator"], strict=False):
+                            records.append(record)
+                    except ValueError:
+                        continue
+            except ValueError:
+                pass
+        for record in records:
+            key = (kind, record["indicator"], field, normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            lifecycle.derive(record, now)
+            if not lifecycle.is_active(record, now):
+                continue
+            record["suppressed"] = store.is_suppressed(tenant, kind, record["indicator"], now)
+            record["observed_field"] = field
+            record["observed_value"] = raw
+            matches.append(record)
+    return matches

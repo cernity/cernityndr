@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hunt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "hunt_id",
+    "tenant",
+    "from",
+    "to"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "indicators"
+      ],
+      "not": {
+        "required": [
+          "intel_set"
+        ]
+      }
+    },
+    {
+      "required": [
+        "intel_set"
+      ],
+      "not": {
+        "required": [
+          "indicators"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    }
+  },
+  "properties": {
+    "schema": {
+      "const": "hunt.v1"
+    },
+    "hunt_id": {
+      "$ref": "#/$defs/name"
+    },
+    "tenant": {
+      "$ref": "#/$defs/name"
+    },
+    "from": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "to": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "page_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "intel_set": {
+      "$ref": "#/$defs/name"
+    },
+    "indicators": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "indicator",
+          "intel_known_at"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "ip",
+              "domain",
+              "ja3",
+              "ja4",
+              "cert",
+              "hash",
+              "url"
+            ]
+          },
+          "indicator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "\\S"
+          },
+          "intel_known_at": {
+            "$ref": "#/$defs/timestamp"
+          }
+        }
+      }
+    }
+  }
+}

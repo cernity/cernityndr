@@ -1,1 +1,2 @@
 jsonschema>=4.18,<5
+clickhouse-connect>=0.7,<1

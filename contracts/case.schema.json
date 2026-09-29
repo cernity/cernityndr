@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "case.v1",
+  "description": "A multi-analyst investigation case (plan U7; Addendum A6). Links findings/entities under one owner with a status lifecycle (new->investigating->resolved->closed) and an append-only audit trail; every ownership/assignment/status/note/link change is an audit event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id", "tenant", "title", "owner", "assignees", "status",
+    "notes", "linked_findings", "linked_entities", "created", "updated", "audit"
+  ],
+  "properties": {
+    "case_id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+    "tenant": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "\\S" },
+    "owner": { "type": ["string", "null"], "maxLength": 256, "pattern": "\\S" },
+    "assignees": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" }
+    },
+    "status": { "enum": ["new", "investigating", "resolved", "closed"] },
+    "notes": { "type": "array", "items": { "$ref": "#/$defs/note" } },
+    "linked_findings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" }
+    },
+    "linked_entities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/entity" }
+    },
+    "created": { "$ref": "#/$defs/timestamp" },
+    "updated": { "$ref": "#/$defs/timestamp" },
+    "audit": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/audit_event" } }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "enum": ["ip", "hostname", "domain", "asset"] },
+        "value": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S" }
+      }
+    },
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["author", "text", "ts"],
+      "properties": {
+        "author": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "\\S" },
+        "ts": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "audit_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "actor", "ts"],
+      "properties": {
+        "event": {
+          "enum": [
+            "created", "owner_changed", "assignee_added", "assignee_removed",
+            "status_changed", "note_added",
+            "finding_linked", "finding_unlinked", "entity_linked", "entity_unlinked"
+          ]
+        },
+        "actor": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+        "ts": { "$ref": "#/$defs/timestamp" },
+        "detail": { "type": "object" }
+      }
+    }
+  }
+}

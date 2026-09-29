@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "coverage.v1",
+  "description": "U4 ATT&CK coverage report: fleet-global detector coverage overlaid with a tenant-scoped observed signal. `covered` = a detector exists for the technique (same for every tenant); `observed` = the technique fired in this tenant's findings (tenant-scoped, never cross-tenant).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "techniques",
+    "gaps",
+    "summary"
+  ],
+  "properties": {
+    "techniques": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "technique",
+          "covered",
+          "detectors",
+          "observed"
+        ],
+        "properties": {
+          "technique": {
+            "type": "string",
+            "description": "ATT&CK technique or sub-technique id.",
+            "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"
+          },
+          "covered": {
+            "type": "boolean",
+            "description": "Fleet-global: at least one detector claims this technique."
+          },
+          "detectors": {
+            "type": "array",
+            "description": "Detector ids covering this technique (fleet-global), sorted.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "observed": {
+            "type": "boolean",
+            "description": "Tenant-scoped: this technique appears in the caller-tenant's findings' mitre field."
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Techniques present with no covering detector.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "covered",
+        "gaps",
+        "observed"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "covered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gaps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

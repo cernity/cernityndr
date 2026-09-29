@@ -156,3 +156,82 @@ evaluation seam additionally requires separate approval provenance, exact tenant
 and entity match, and an unexpired lifetime on every evaluation. Expiration is
 logical, not physical deletion of audit history. Live TLS/session provisioning,
 bus transport, downstream delivery and Vantage emission are not proven by U9.
+
+## U1 threat-intel lifecycle
+
+The intel topic name `ndr.intel.v1` is reserved for the `intel.v1` contract
+(`intel.schema.json`); no existing topic binding collides. U1 ships the managed
+lifecycle only — normalize (STIX/TAXII 2.1, MISP, HTTP(S), abuse.ch feed
+connectors) → dedup (merge provenance, keep the best TRUSTED score) → score →
+expire — behind a per-tenant SQLite store (`services/threat-intel/store.py`), plus
+an auditable, EXPIRING suppression decision (owner + justification + expiry,
+re-checked live at match time like the U9 ignore-list). It is NOT a bus producer
+in this increment: live matching (U2) still emits on the existing
+`ndr.finding.candidate.v1`, and retrospective hunting (U3) reads the observation
+history — so no new Kafka topic is provisioned here, only the contract + store.
+
+Every indicator is tenant-scoped by primary key `(tenant, type, indicator)` and
+carries source/feed/score/tlp/source_trust/first_seen/last_seen/expiry/provenance.
+Feed trust controls (§12.1): per-feed auth + TLS certificate pinning (fail-closed);
+a low-`source_trust` feed cannot override a high-trust indicator's effective score;
+TLP:red is never exportable. OpenCTI + Git/GitHub/GitLab connectors (§12.2) are a
+deferred later increment — the `Connector` interface leaves room without change.
+
+The `threat-intel` service wires this in via `INTEL_DB` (per-tenant SQLite path;
+unset ⇒ lifecycle off, legacy static-set matching unchanged) and `INTEL_FEEDS` (JSON
+feed-spec list, or a path to one). Each configured feed is fetched and ingested on
+the periodic refresh; a per-feed fetch/parse failure is logged and skipped so it
+never corrupts the store. Effective TLP is the MOST RESTRICTIVE marking across merged
+provenance, and effective score comes only from currently-valid (unexpired) per-source
+assertions, so an expired trusted source cedes to a still-valid lower-trust one.
+
+## U3 retrospective IOC hunts
+
+`ndr.hunt.v1` is reserved for `hunt.v1` (`hunt.schema.json`), with no Kafka
+producer or consumer in U3. This worker exposes authenticated HTTP on port 8096.
+`HUNT_TOKENS` is a server-owned JSON map of opaque bearer token to **one tenant**;
+empty configuration denies access. A multi-tenant operator uses separate scoped
+credentials. The request tenant is a checked claim, never a grant. TLS termination
+and token provisioning are deployment requirements.
+
+`POST /hunts` accepts `{schema:"hunt.v1", hunt_id, tenant, from, to, indicators}`
+with each indicator carrying `type`, `indicator`, and `intel_known_at`. Alternatively,
+`intel_set` names a server-configured U1 snapshot: `HUNT_INTEL_SETS` points to a JSON
+file shaped `{tenant: {set_name: [intel.v1 records]}}`. No cross-service SQLite
+sharing or invented U1 API is required. Saved records use the earliest retained
+`provenance.observed_at` acquisition timestamp, never feed `first_seen`; missing
+acquisition provenance is an error. U1 refresh can replace older provenance, so
+this is not a guarantee of the earliest-ever acquisition. Supply an explicit known
+timestamp when that independently retained history is available.
+
+Each POST advances at most one evidence page (default 500, maximum 1000 records)
+within the evidence layer's one-day query bound. Jobs allow at most 100 indicators
+and a 31-day window. Repeat the identical POST until `status` is `complete`;
+completed requests return persisted results without querying again. Request changes
+under an existing tenant/hunt_id are rejected; use a new ID for a fresh scan.
+`GET /hunts/{hunt_id}?after=&limit=` pages persisted hits (maximum 1000); the
+response `next_after` is a result cursor, distinct from the internal evidence
+checkpoint. A pending job's result pages are provisional; enumerate after completion
+for a stable full result. Empty hits are successful. Unsupported hash/URL dimensions
+are reported explicitly in `unsupported`, including in mixed jobs.
+
+The worker reuses the evidence query layer's tenant binding, UNION view, one-day
+cap and `(normalized_time, obs_id)` keyset paging through an internal tenant scan.
+The public evidence endpoint still requires an entity. Domain/JA/cert values are
+not in the current entity index, so the scan matches actual canonical fields:
+source/destination IP (including CIDR), DNS queries/answers, TLS SNI, HTTP hostname,
+JA3/JA3S, JA4/JA4S and TLS fingerprint. Full URL and file hash hunting are deferred.
+No finding or SIEM export is emitted. Explicit hunts are historical investigation
+requests, not live prioritization: saved snapshots may include expired/suppressed
+intel and remain local to the tenant, including restricted TLP content.
+
+Windows are half-open over **normalized evidence time**, as in the evidence API.
+`observed_at` preserves `ts.sensor` (traffic time), with full `observation_ts`
+retained so clock correction and ingest fallback stay visible. `intel_known_at`
+is compared to that sensor time for `learned_after_observation`; clock accuracy
+limits that comparison. Hits retain exact obs_id and source_ref. SQLite commits
+hits and progress atomically, deduplicating retries. Mount a private persistent
+volume at `/data` (`HUNT_DB` override), and run one worker process per database.
+No background scheduler is included; the submitter drives continuation. Live
+ClickHouse execution, scan performance, container builds and deployment are
+real-environment checks, not claims established by mocked tests.

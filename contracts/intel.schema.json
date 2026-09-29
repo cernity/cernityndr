@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "intel.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "indicator",
+    "type",
+    "source",
+    "feed",
+    "score",
+    "tlp",
+    "source_trust",
+    "first_seen",
+    "last_seen",
+    "expiry",
+    "disposition",
+    "tenant",
+    "provenance"
+  ],
+  "$defs": {
+    "datetime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+    },
+    "indicator_type": {
+      "enum": ["ip", "domain", "url", "hash", "ja3", "ja4", "cert"]
+    },
+    "tlp": {
+      "comment": "FIRST TLP 2.0 marking set (§12.1). Restricts export/sharing; red is never exportable.",
+      "enum": ["clear", "green", "amber", "amber+strict", "red"]
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "source_trust": {
+      "comment": "Per-feed trust weight (0=untrusted .. 1=fully trusted). A low-trust feed cannot override a high-trust indicator's score.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "provenance_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "feed", "score", "tlp", "source_trust", "first_seen", "last_seen"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "feed": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "score": { "$ref": "#/$defs/score" },
+        "tlp": { "$ref": "#/$defs/tlp" },
+        "source_trust": { "$ref": "#/$defs/source_trust" },
+        "first_seen": { "$ref": "#/$defs/datetime" },
+        "last_seen": { "$ref": "#/$defs/datetime" },
+        "expiry": {
+          "comment": "This source's assertion validity; the lifecycle selects effective scores only from currently-valid assertions.",
+          "$ref": "#/$defs/datetime"
+        },
+        "observed_at": { "$ref": "#/$defs/datetime" }
+      }
+    }
+  },
+  "properties": {
+    "indicator": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "\\S"
+    },
+    "type": { "$ref": "#/$defs/indicator_type" },
+    "source": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "feed": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "score": { "$ref": "#/$defs/score" },
+    "tlp": { "$ref": "#/$defs/tlp" },
+    "source_trust": { "$ref": "#/$defs/source_trust" },
+    "first_seen": { "$ref": "#/$defs/datetime" },
+    "last_seen": { "$ref": "#/$defs/datetime" },
+    "expiry": { "$ref": "#/$defs/datetime" },
+    "disposition": {
+      "comment": "active while live; expired once past expiry; suppressed while an auditable, expiring suppression is in force.",
+      "enum": ["active", "suppressed", "expired"]
+    },
+    "tenant": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/provenance_entry" }
+    }
+  }
+}

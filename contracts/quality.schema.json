@@ -1,0 +1,191 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant",
+    "window",
+    "unit",
+    "interval_method",
+    "low_confidence_below",
+    "advisory_only",
+    "total_dispositions",
+    "unattributed_dispositions",
+    "detectors",
+    "entity_allowlist_suggestion_rate"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "quality.v1"
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "time_basis",
+        "bounds"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "to": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "time_basis": {
+          "const": "disposition.ts"
+        },
+        "bounds": {
+          "const": "[from,to)"
+        }
+      }
+    },
+    "unit": {
+      "const": "disposition_records"
+    },
+    "interval_method": {
+      "const": "wilson_95"
+    },
+    "low_confidence_below": {
+      "const": 30
+    },
+    "advisory_only": {
+      "const": true
+    },
+    "total_dispositions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unattributed_dispositions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "detectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "detector_id",
+          "counts",
+          "precision",
+          "fp_rate"
+        ],
+        "properties": {
+          "detector_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "true_positive",
+              "false_positive",
+              "benign"
+            ],
+            "properties": {
+              "true_positive": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "false_positive": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "benign": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "precision": {
+            "$ref": "#/$defs/rate"
+          },
+          "fp_rate": {
+            "$ref": "#/$defs/rate"
+          }
+        }
+      }
+    },
+    "entity_allowlist_suggestion_rate": {
+      "$ref": "#/$defs/rate"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "quality.v1",
+  "$defs": {
+    "rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numerator",
+        "denominator",
+        "value",
+        "confidence_interval",
+        "low_confidence"
+      ],
+      "properties": {
+        "numerator": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "denominator": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confidence_interval": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lower",
+                "upper"
+              ],
+              "properties": {
+                "lower": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "upper": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "low_confidence": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "description": "Read-only reviewed-disposition quality. Precision = TP / (TP + FP + benign); FP rate = (FP + benign) / (TP + FP + benign), not population false-positive rate. Entity allowlist suggestion rate = allowlist records / all tenant disposition records in the source timestamp window. Allowlist records are never detector-attributed. Missing finding joins count as unattributed and are excluded from detector denominators. Repeated dispositions count separately. Wilson 95% intervals describe these observed record proportions, not unbiased population estimates; fewer than 30 records is low confidence. No applied suppression is measured."
+}

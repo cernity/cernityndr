@@ -1,12 +1,11 @@
-"""Threat-intel detector (plan U8 Tier 1). Loads abuse.ch blocklists (Feodo C2
-IPs, SSLBL cert SHA1, SSLBL JA3), refreshes periodically, and matches observed
-flow/tls telemetry against them -> ndr.finding.candidate.v1. Matching logic is
-covered by test_ti.py; this is the fetch + consume shell.
+"""Threat-intel detector: U2 live U1-store matching, with legacy static fallback
+only when INTEL_DB is unset. Consumes flow/TLS/DNS/HTTP EVE telemetry and emits
+ndr.finding.candidate.v1. Suppressed and red hits remain in the local intel audit.
 """
 import json
 import os
 import signal
-import os
+import hashlib
 import ssl
 import threading
 import time
@@ -21,6 +20,9 @@ log = ndr_runtime.setup_logging("threat-intel")
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")
 REFRESH_SECS = float(os.environ.get("REFRESH_SECS", "21600"))   # 6h
+# Managed U1/U2 intel: configured store is authoritative; no static-feed bypass.
+INTEL_DB = os.environ.get("INTEL_DB", "")            # per-tenant SQLite path; empty => lifecycle off
+INTEL_FEEDS = os.environ.get("INTEL_FEEDS", "")      # JSON list of feed specs, or a path to one
 # Operator-supplied known-C2 server-fingerprint list (JA3S/JA4S/JARM), one per
 # line. No feed is bundled; unset => this match is a no-op. See docs/enrichment.md.
 C2_FP_LIST = os.environ.get("C2_FP_LIST", "")
@@ -63,6 +65,66 @@ def refresh():
             log.info("c2 fingerprint list loaded: %d", len(_feeds["c2fp"]))
         except OSError as e:
             log.warning("c2 fp list load failed (keeping old): %s", e)
+    _intel_refresh()
+
+
+# --- managed intel lifecycle (U1): configured connectors -> lifecycle.ingest -> store --
+# store.py must be loaded BY PATH: shared/store.py owns the name `store` on
+# PYTHONPATH=shared (see store.py's module docstring / test_lifecycle.py).
+_intel = {"store": None, "connectors": [], "lifecycle": None}
+
+
+def _build_connector(feeds, spec):
+    spec = dict(spec)
+    kind = spec.pop("connector")
+    if kind == "abusech":
+        return feeds.AbuseChConnector(**spec)
+    return {"http": feeds.HttpConnector, "stix_taxii": feeds.StixTaxiiConnector,
+            "misp": feeds.MispConnector}[kind](**spec)
+
+
+def _init_intel():
+    """Build the per-tenant SQLite store + configured connectors from env. No config =>
+    a no-op (legacy static-set matching unchanged). Imported lazily so `import app`
+    under PYTHONPATH=shared never pulls the path-loaded store."""
+    if not INTEL_DB:
+        return
+    import importlib.util
+    import lifecycle
+    import feeds
+    spec = importlib.util.spec_from_file_location(
+        "intel_store", os.path.join(os.path.dirname(os.path.abspath(__file__)), "store.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    raw = INTEL_FEEDS
+    if raw and os.path.exists(raw):
+        with open(raw) as fh:
+            raw = fh.read()
+    specs = json.loads(raw) if raw.strip() else []
+    _intel["store"] = mod.IntelStore(INTEL_DB)
+    _intel["connectors"] = [_build_connector(feeds, s) for s in specs]
+    _intel["lifecycle"] = lifecycle
+    log.info("managed intel lifecycle: %d feed(s) -> %s", len(_intel["connectors"]), INTEL_DB)
+
+
+def _intel_refresh():
+    """Fetch each configured feed and ingest into the persistent store. Per-feed
+    try/except: one feed's fetch/parse failure is logged and skipped — a failed fetch
+    never reaches ingest, so the store is never corrupted or half-written."""
+    if _intel["store"] is None:
+        return
+    lifecycle = _intel["lifecycle"]
+    now = time.time()
+    for conn in _intel["connectors"]:
+        try:
+            payload = conn.fetch()
+            recs = conn.records(payload, TENANT, now)
+            revs = conn.revocations(payload, TENANT, now)
+            lifecycle.ingest(_intel["store"], recs, now, revocations=revs)
+            log.info("intel feed %s: %d indicator(s) ingested, %d revoked",
+                     conn.feed, len(recs), len(revs))
+        except Exception as e:
+            log.warning("intel feed %s refresh failed (store intact): %s", conn.feed, e)
 
 
 def refresher():
@@ -116,40 +178,81 @@ def _candidate(feed, ioc, dst, extra):
             "entities": json.dumps(ents), "state": "CANDIDATE"}
 
 
+
+def _managed_matches(e, producer, now):
+    import lifecycle
+    for hit in ti.match(e, _intel["store"], TENANT, now):
+        # Include policy/provenance in identity so a lapsed suppression or changed
+        # trust decision takes effect even within the current dedup window.
+        identity = json.dumps([TENANT, e.get("src_ip"), e.get("dest_ip"),
+                               {k: v for k, v in hit.items() if k != "suppressed"},
+                               int(now // 3600)], sort_keys=True)
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        if key in _seen and _seen[key] == hit["suppressed"]:
+            continue
+        if hit["suppressed"] or not lifecycle.is_exportable(hit):
+            _intel["store"].record_match(TENANT, hit, e, now)
+        else:
+            src = e.get("src_ip")
+            extra = [{"type": "ip", "role": "src", "value": src}] if src else []
+            candidate = _candidate(hit["feed"], hit["indicator"], e.get("dest_ip"),
+                                   extra + join_key_entities(e))
+            candidate["finding_id"] = "ti-" + key
+            candidate["intel_match"] = hit
+            # Preserve the U1 score, and use trust to weight candidate confidence.
+            candidate["confidence"] = hit["score"] / 100 * hit["source_trust"]
+            candidate["severity"] = max(1, min(10, int(hit["score"] / 10)))
+            producer.send("ndr.finding.candidate.v1", candidate)
+        _seen.pop(key, None)
+        _seen_once(key)
+        _seen[key] = hit["suppressed"]
+
+
+def process_observation(e, producer, now=None):
+    now = time.time() if now is None else now
+    if any(e.get(k) is not None and e[k] != TENANT for k in ("tenant", "tenant_id")):
+        return
+    if _intel["store"] is not None:
+        _managed_matches(e, producer, now)
+        return
+    dst = e.get("dest_ip")
+    t = e.get("tls", {}) or {}
+    ja3 = (t.get("ja3", {}) or {}).get("hash") if isinstance(t.get("ja3"), dict) else t.get("ja3")
+    cert = t.get("fingerprint") or (e.get("tls", {}) or {}).get("fingerprint")
+    hit, feed, ioc = ti.match_static(dst, ja3 or "", cert or "",
+                              _feeds["feodo"], _feeds["ja3"], _feeds["cert"])
+    if hit and _seen_once((feed, ioc, dst, int(time.time() // 3600))):
+        src = e.get("src_ip")
+        extra = [{"type": "ip", "role": "src", "value": src}] if src else []
+        extra += join_key_entities(e)
+        producer.send("ndr.finding.candidate.v1", _candidate(feed, ioc, dst, extra))
+        log.info("THREAT_INTEL %s match %s (src=%s dst=%s)", feed, ioc, src, dst)
+    # known-C2 server-fingerprint match (operator list): JA3S/JA4S/JARM
+    sja3 = (t.get("ja3s", {}) or {}).get("hash") if isinstance(t.get("ja3s"), dict) else t.get("ja3s")
+    sh, sfeed, sioc = ti.match_server_fp(sja3 or "", t.get("ja4s") or "",
+                                         t.get("jarm") or "", _feeds["c2fp"])
+    if sh and _seen_once((sfeed, sioc, dst, int(time.time() // 3600))):
+        src = e.get("src_ip")
+        extra = [{"type": "ip", "role": "src", "value": src}] if src else []
+        extra += join_key_entities(e)
+        producer.send("ndr.finding.candidate.v1", _candidate(sfeed, sioc, dst, extra))
+        log.info("THREAT_INTEL %s match %s (src=%s dst=%s)", sfeed, sioc, src, dst)
+
+
 def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    _init_intel()
     refresh()
     threading.Thread(target=refresher, daemon=True).start()
     producer = ndr_runtime.make_producer()
-    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.tls.v1", group_id="ndr-threat-intel", auto_offset_reset="latest")
+    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.tls.v1", "suricata.dns.v1", "suricata.http.v1", group_id="ndr-threat-intel", auto_offset_reset="latest")
     log.info("threat-intel up")
     while _running:
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():
             for rec in records:
                 e = rec.value
-                dst = e.get("dest_ip")
-                t = e.get("tls", {}) or {}
-                ja3 = (t.get("ja3", {}) or {}).get("hash") if isinstance(t.get("ja3"), dict) else t.get("ja3")
-                cert = t.get("fingerprint") or (e.get("tls", {}) or {}).get("fingerprint")
-                hit, feed, ioc = ti.match(dst, ja3 or "", cert or "",
-                                          _feeds["feodo"], _feeds["ja3"], _feeds["cert"])
-                if hit and _seen_once((feed, ioc, dst, int(time.time() // 3600))):
-                    src = e.get("src_ip")
-                    extra = [{"type": "ip", "role": "src", "value": src}] if src else []
-                    extra += join_key_entities(e)
-                    producer.send("ndr.finding.candidate.v1", _candidate(feed, ioc, dst, extra))
-                    log.info("THREAT_INTEL %s match %s (src=%s dst=%s)", feed, ioc, src, dst)
-                # known-C2 server-fingerprint match (operator list): JA3S/JA4S/JARM
-                sja3 = (t.get("ja3s", {}) or {}).get("hash") if isinstance(t.get("ja3s"), dict) else t.get("ja3s")
-                sh, sfeed, sioc = ti.match_server_fp(sja3 or "", t.get("ja4s") or "",
-                                                     t.get("jarm") or "", _feeds["c2fp"])
-                if sh and _seen_once((sfeed, sioc, dst, int(time.time() // 3600))):
-                    src = e.get("src_ip")
-                    extra = [{"type": "ip", "role": "src", "value": src}] if src else []
-                    extra += join_key_entities(e)
-                    producer.send("ndr.finding.candidate.v1", _candidate(sfeed, sioc, dst, extra))
-                    log.info("THREAT_INTEL %s match %s (src=%s dst=%s)", sfeed, sioc, src, dst)
+                process_observation(e, producer)
         producer.flush()
     consumer.close(); producer.close()
 

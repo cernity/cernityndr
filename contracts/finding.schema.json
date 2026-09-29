@@ -6,7 +6,193 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["finding_id", "tenant_id", "detector_id", "detector_version", "category", "severity", "confidence", "first_seen", "last_seen", "state"],
+  "$defs": {
+    "intel_datetime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+    },
+    "intel_indicator_type": {
+      "enum": [
+        "ip",
+        "domain",
+        "url",
+        "hash",
+        "ja3",
+        "ja4",
+        "cert"
+      ]
+    },
+    "intel_tlp": {
+      "comment": "FIRST TLP 2.0 marking set (\u00a712.1). Restricts export/sharing; red is never exportable.",
+      "enum": [
+        "clear",
+        "green",
+        "amber",
+        "amber+strict",
+        "red"
+      ]
+    },
+    "intel_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "intel_source_trust": {
+      "comment": "Per-feed trust weight (0=untrusted .. 1=fully trusted). A low-trust feed cannot override a high-trust indicator's score.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "intel_provenance_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "feed",
+        "score",
+        "tlp",
+        "source_trust",
+        "first_seen",
+        "last_seen"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "feed": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "score": {
+          "$ref": "#/$defs/intel_score"
+        },
+        "tlp": {
+          "$ref": "#/$defs/intel_tlp"
+        },
+        "source_trust": {
+          "$ref": "#/$defs/intel_source_trust"
+        },
+        "first_seen": {
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "last_seen": {
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "expiry": {
+          "comment": "This source's assertion validity; the lifecycle selects effective scores only from currently-valid assertions.",
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/intel_datetime"
+        }
+      }
+    }
+  },
   "properties": {
+    "intel_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "indicator",
+        "type",
+        "source",
+        "feed",
+        "score",
+        "tlp",
+        "source_trust",
+        "first_seen",
+        "last_seen",
+        "expiry",
+        "disposition",
+        "tenant",
+        "provenance",
+        "observed_field",
+        "observed_value",
+        "suppressed"
+      ],
+      "properties": {
+        "indicator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        },
+        "type": {
+          "enum": [
+            "ip",
+            "domain",
+            "url",
+            "ja3",
+            "ja4",
+            "cert"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "feed": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "score": {
+          "$ref": "#/$defs/intel_score"
+        },
+        "tlp": {
+          "$ref": "#/$defs/intel_tlp"
+        },
+        "source_trust": {
+          "$ref": "#/$defs/intel_source_trust"
+        },
+        "first_seen": {
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "last_seen": {
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "expiry": {
+          "$ref": "#/$defs/intel_datetime"
+        },
+        "disposition": {
+          "comment": "active while live; expired once past expiry; suppressed while an auditable, expiring suppression is in force.",
+          "enum": [
+            "active",
+            "suppressed",
+            "expired"
+          ]
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "provenance": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/intel_provenance_entry"
+          }
+        },
+        "observed_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suppressed": {
+          "type": "boolean"
+        }
+      },
+      "description": "U2 live indicator with effective U1 score, trust, marking and full provenance. Suppressed and TLP:red hits are stored in the local intel audit instead of emitted as candidates. No file-hash source is available."
+    },
     "finding_id": { "type": "string", "minLength": 1 },
     "tenant_id": { "type": "string", "minLength": 1 },
     "sensor_ids": { "type": "array", "items": { "type": "string" } },

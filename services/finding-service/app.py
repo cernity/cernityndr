@@ -330,7 +330,227 @@ def _sweep_timeouts(producer, geo, pending, now, ch):
         _remember_finalized(done, entry["delivered"])   # B-U2: a late result re-opens as a new revision
 
 
+# U8 case API. Run behind a TLS gateway using server-owned CASE_SESSIONS:
+# {token: {tenant, analyst, expires_at: unix_seconds, case_write: bool}}.
+# Each session selects exactly one tenant; request identity claims are rejected.
+# GET /cases?owner=...&status=...&limit=50&offset=0 and GET /cases/{id}.
+# POST /cases {title, owner?}; POST /cases/{id}/{owner,assign,notes,status,
+# findings,entities} with respectively {owner}, {assignee}, {text}, {status},
+# {finding_id}, {entity:{type,value}}. DELETE supports assign/findings/entities
+# with the same body. Owner/assignee are assignment TARGETS, never audit actors.
+# CASE_API_PORT enables the listener alongside the existing consumer; CASE_DB
+# must point at a persistent writable volume (default /data/cases.sqlite3).
+
+
+def make_case_handler(store, sessions, now=time.time):
+    import copy
+    import hashlib
+    import importlib.util
+    import math
+    import uuid
+    from pathlib import Path
+    from http.server import BaseHTTPRequestHandler
+    from urllib.parse import parse_qs, urlsplit
+
+    here = Path(__file__).resolve().parent
+    model_path = here / 'cases.py'
+    if not model_path.exists():  # Docker preserves U7 modules under this path.
+        model_path = here / 'services/finding-service/cases.py'
+    spec = importlib.util.spec_from_file_location('finding_cases_api_model', model_path)
+    model = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(model)
+    sessions = copy.deepcopy(sessions)
+
+    def string(value, maximum=256, nullable=False):
+        if nullable and value is None:
+            return value
+        if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+            raise ValueError('invalid string')
+        return value
+
+    def digest(doc):
+        # Hash business state only: the audit contains these hashes itself.
+        state = {k: v for k, v in doc.items() if k != 'audit'} if doc else None
+        return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def send_json(self, code, value):
+            body = json.dumps(value).encode()
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = True
+
+        def handle_case(self):
+            try:
+                auth = self.headers.get('Authorization', '')
+                session = sessions.get(auth[7:]) if auth.startswith('Bearer ') else None
+                if not isinstance(session, dict):
+                    return self.send_json(401, {'error': 'unauthorized'})
+                expiry = session.get('expires_at')
+                if (type(expiry) not in (int, float) or not math.isfinite(expiry)
+                        or now() >= expiry):
+                    return self.send_json(401, {'error': 'unauthorized'})
+                try:
+                    tenant = string(session.get('tenant'))
+                    actor = string(session.get('analyst'))
+                except ValueError:
+                    return self.send_json(401, {'error': 'unauthorized'})
+                write = self.command != 'GET'
+                if write and session.get('case_write') is not True:
+                    return self.send_json(403, {'error': 'read only'})
+                url = urlsplit(self.path)
+                parts = url.path.strip('/').split('/')
+                query = parse_qs(url.query, keep_blank_values=True)
+                allowed = {'owner', 'status', 'limit', 'offset'} if parts == ['cases'] and not write else set()
+                if set(query) - allowed or any(len(v) != 1 for v in query.values()):
+                    raise ValueError('unsupported query parameters')
+                if not parts or parts[0] != 'cases' or len(parts) > 3:
+                    return self.send_json(404, {'error': 'not found'})
+                if not write:
+                    if len(parts) == 1:
+                        limit = int(query.get('limit', ['50'])[0])
+                        offset = int(query.get('offset', ['0'])[0])
+                        if not 1 <= limit <= 200 or not 0 <= offset <= 1000000:
+                            raise ValueError('invalid page')
+                        clauses, params = ['tenant=?'], [tenant]
+                        for field in ('owner', 'status'):
+                            if field in query:
+                                value = string(query[field][0])
+                                if field == 'status' and value not in sm.CASE_TRANSITIONS:
+                                    raise ValueError('invalid status')
+                                clauses.append(f"json_extract(doc, '$.{field}')=?")
+                                params.append(value)
+                        # U7 list_cases materializes all rows. Page in SQL instead,
+                        # under the same lock as atomic U7 writes.
+                        with store._lock:
+                            rows = store._db.execute(
+                                'SELECT doc FROM cases WHERE ' + ' AND '.join(clauses)
+                                + ' ORDER BY case_id LIMIT ? OFFSET ?',
+                                params + [limit + 1, offset]).fetchall()
+                        return self.send_json(200, {
+                            'cases': [json.loads(r['doc']) for r in rows[:limit]],
+                            'limit': limit, 'offset': offset,
+                            'next_offset': offset + limit if len(rows) > limit else None})
+                    if len(parts) != 2:
+                        return self.send_json(404, {'error': 'not found'})
+                    with store._lock:
+                        doc = store.get(parts[1], {tenant})
+                    return self.send_json(200 if doc else 404, doc or {'error': 'not found'})
+                lengths = self.headers.get_all('Content-Length', [])
+                if len(lengths) != 1 or self.headers.get('Transfer-Encoding'):
+                    raise ValueError('invalid body length')
+                length = int(lengths[0])
+                if not 0 < length <= 65536:
+                    raise ValueError('invalid body length')
+                self.connection.settimeout(10)
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict):
+                    raise ValueError('expected object')
+                ts = datetime.fromtimestamp(now(), timezone.utc).isoformat()
+
+                def audited(before, after, event):
+                    if len(after['audit']) == len(before['audit']):
+                        # U7 idempotent helpers omit no-ops; HTTP successes still
+                        # record the requested action without duplicating links.
+                        after = dict(after, updated=ts, audit=list(after['audit']) + [
+                            {'event': event, 'actor': actor, 'ts': ts, 'detail': {'noop': True}}])
+                    detail = after['audit'][-1].setdefault('detail', {})
+                    detail.update(audit_id=uuid.uuid4().hex, tenant=tenant,
+                                  resource_type='case', resource_id=after['case_id'],
+                                  before_hash=digest(before), after_hash=digest(after),
+                                  request_id=uuid.uuid4().hex, source_ip=self.client_address[0],
+                                  outcome='success')
+                    return after
+
+                if len(parts) == 1 and self.command == 'POST':
+                    if set(payload) - {'title', 'owner'} or 'title' not in payload:
+                        raise ValueError('invalid create fields')
+                    doc = model.new_case(uuid.uuid4().hex, tenant,
+                                         string(payload['title'], 1024),
+                                         string(payload.get('owner', actor), nullable=True), actor, ts)
+                    doc = audited({'audit': []}, doc, 'created')
+                    if not store.create(doc):
+                        return self.send_json(409, {'error': 'case already exists'})
+                    return self.send_json(201, doc)
+                routes = {
+                    ('POST', 'owner'): ('owner', model.change_owner, 'owner_changed'),
+                    ('POST', 'assign'): ('assignee', model.assign, 'assignee_added'),
+                    ('DELETE', 'assign'): ('assignee', model.unassign, 'assignee_removed'),
+                    ('POST', 'notes'): ('text', None, 'note_added'),
+                    ('POST', 'status'): ('status', model.transition, 'status_changed'),
+                    ('POST', 'findings'): ('finding_id', model.link_finding, 'finding_linked'),
+                    ('DELETE', 'findings'): ('finding_id', model.unlink_finding, 'finding_unlinked'),
+                    ('POST', 'entities'): ('entity', model.link_entity, 'entity_linked'),
+                    ('DELETE', 'entities'): ('entity', model.unlink_entity, 'entity_unlinked'),
+                }
+                route = routes.get((self.command, parts[2])) if len(parts) == 3 else None
+                if route is None:
+                    return self.send_json(404, {'error': 'not found'})
+                field, fn, event = route
+                if set(payload) != {field}:
+                    raise ValueError('invalid mutation fields')
+                value = payload[field]
+                if field == 'entity':
+                    if (not isinstance(value, dict) or set(value) != {'type', 'value'}
+                            or value['type'] not in ('ip', 'hostname', 'domain', 'asset')):
+                        raise ValueError('invalid entity')
+                    string(value['value'], 512)
+                else:
+                    string(value, 8192 if field == 'text' else 256, nullable=field == 'owner')
+
+                def mutate(doc):
+                    changed = (model.add_note(doc, actor, value, ts) if field == 'text'
+                               else fn(doc, value, actor, ts))
+                    return audited(doc, changed, event)
+
+                doc = store.mutate(parts[1], {tenant}, mutate)
+                return self.send_json(200 if doc else 404, doc or {'error': 'not found'})
+            except (ValueError, UnicodeError):
+                return self.send_json(400, {'error': 'invalid case request'})
+            except Exception:
+                log.exception('case API unavailable')
+                return self.send_json(503, {'error': 'case API unavailable'})
+
+        do_GET = handle_case
+        do_POST = handle_case
+        do_DELETE = handle_case
+
+    return Handler
+
+
+def start_case_api():
+    """Opt-in HTTP listener; no import-time DB writes or consumer changes."""
+    import importlib.util
+    import threading
+    from pathlib import Path
+    from http.server import ThreadingHTTPServer
+
+    port = os.environ.get('CASE_API_PORT')
+    if not port:
+        return None
+    here = Path(__file__).resolve().parent
+    path = here / 'store.py'
+    if not (here / 'cases.py').exists():
+        path = here / 'services/finding-service/store.py'
+    spec = importlib.util.spec_from_file_location('finding_case_api_store', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    store = module.CaseStore(os.environ.get('CASE_DB', '/data/cases.sqlite3'))
+    handler = make_case_handler(store, json.loads(os.environ.get('CASE_SESSIONS', '{}')))
+    server = ThreadingHTTPServer(('0.0.0.0', int(port)), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 def main():
+    case_server = start_case_api()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     ch = None
@@ -410,6 +630,9 @@ def main():
     emit_lifecycle()                                  # final disposition on shutdown
     consumer.close()
     producer.close()
+    if case_server is not None:
+        case_server.shutdown()
+        case_server.server_close()
     log.info("finding-service stopped")
 
 

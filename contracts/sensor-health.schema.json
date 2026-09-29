@@ -1,0 +1,235 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sensor_uuid",
+    "tenant",
+    "site",
+    "observed_at",
+    "versions",
+    "resources",
+    "capture",
+    "eve",
+    "shipper",
+    "connectivity",
+    "clock_offset_ms",
+    "time_source",
+    "clock_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "sensor-health.v1"
+    },
+    "sensor_uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    },
+    "site": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "versions": {
+      "type": "object",
+      "required": [
+        "agent"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu_pct",
+        "mem_pct",
+        "disk_free_bytes"
+      ],
+      "properties": {
+        "cpu_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "mem_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "disk_free_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kernel_drops_total",
+        "suricata_capture_drops_total"
+      ],
+      "properties": {
+        "kernel_drops_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "suricata_capture_drops_total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "eve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "events_per_second",
+        "bytes_per_second"
+      ],
+      "properties": {
+        "events_per_second": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "bytes_per_second": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "shipper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue_depth",
+        "oldest_unsent_age_s"
+      ],
+      "properties": {
+        "queue_depth": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "oldest_unsent_age_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "connectivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bus"
+      ],
+      "properties": {
+        "bus": {
+          "enum": [
+            "unknown",
+            "connected",
+            "disconnected"
+          ]
+        }
+      }
+    },
+    "clock_offset_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Measured system clock minus chrony NTP clock, milliseconds; positive means sensor ahead. Null when unavailable."
+    },
+    "time_source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "clock_status": {
+      "enum": [
+        "synchronized",
+        "unavailable"
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/sensor-health.schema.json",
+  "title": "sensor-health.v1",
+  "description": "Sensor health telemetry. All measurement fields are present; null means unavailable, never zero. Versions lists only known versions. Identity is a sensor assertion; consumers must bind it to enrolled credentials.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "clock_status": {
+            "const": "synchronized"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "clock_offset_ms": {
+            "type": "number"
+          },
+          "time_source": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "clock_offset_ms": {
+            "type": "null"
+          },
+          "time_source": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

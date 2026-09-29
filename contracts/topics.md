@@ -45,3 +45,16 @@ ndr.capture.status.v1
 ndr.enrichment.request.v1
 ndr.enrichment.result.v1
 ```
+
+## Sensor health telemetry
+
+```text
+ndr.sensor.health.v1
+```
+
+Carries `sensor-health.v1` (`sensor-health.schema.json`) from the mandatory
+`sensor-agent`, independently of optional packet capture. No existing topic uses
+this binding. Key is UTF-8 JSON `[tenant, sensor_uuid]`; consumers must verify the
+asserted tenant/sensor against enrollment and authenticated ingress identity.
+This is health telemetry, not a finding or SIEM input. The secure bus grants the
+sensor principal write/describe/create on this exact topic only.

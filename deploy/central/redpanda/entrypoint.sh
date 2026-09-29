@@ -67,13 +67,18 @@ for pair in "$ADMIN_USER:$CERNITY_BUS_ADMIN_PASSWORD:bootstrap superuser" \
 done
 
 # 2) The sensor may ONLY produce telemetry: write/describe/create confined to the
-#    ${SENSOR_PREFIX}* prefix — no read, no ndr.* topics, no cluster operations. The
+#    ${SENSOR_PREFIX}* prefix — no read, no general ndr.* access, no cluster operations. The
 #    ACL is written by authenticating as the admin superuser over the internal SASL
 #    listener (authorization is still off, but the listener requires authentication).
 SASL_ADMIN="-X user=$ADMIN_USER -X pass=$CERNITY_BUS_ADMIN_PASSWORD -X sasl.mechanism=SCRAM-SHA-512"
 rpk security acl create --allow-principal "User:$CERNITY_BUS_USER" \
   --operation write --operation describe --operation create \
   --topic "$SENSOR_PREFIX" --resource-pattern-type prefixed \
+  -X brokers="$KAFKA" $SASL_ADMIN >/dev/null
+# U2: health is a separate mandatory-agent topic, not authority over ndr.*.
+rpk security acl create --allow-principal "User:$CERNITY_BUS_USER" \
+  --operation write --operation describe --operation create \
+  --topic ndr.sensor.health.v1 --resource-pattern-type literal \
   -X brokers="$KAFKA" $SASL_ADMIN >/dev/null
 echo "Cernity bus: sensor '$CERNITY_BUS_USER' scoped PRODUCE-ONLY to ${SENSOR_PREFIX}* (F02)" >&2
 

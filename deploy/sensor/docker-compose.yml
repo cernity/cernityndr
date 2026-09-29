@@ -69,6 +69,35 @@ services:
     logging: *cernity-logging
     restart: unless-stopped
 
+  # Mandatory heartbeat, independent of the capture profile. Linux host networking
+  # reaches chronyd's localhost-only read-only monitoring endpoint (UDP 323).
+  sensor-agent:
+    image: cernity/sensor-agent:latest
+    build: {context: ../.., dockerfile: services/sensor-agent/Dockerfile}
+    <<: *hardening
+    network_mode: host
+    environment:
+      NDR_SENSOR_UUID: ${NDR_SENSOR_UUID:-}
+      NDR_TENANT: ${NDR_TENANT:-default}
+      NDR_SITE: ${NDR_SITE:-}
+      SENSOR_HEARTBEAT_SECONDS: ${SENSOR_HEARTBEAT_SECONDS:-30}
+      SENSOR_VERSIONS: ${SENSOR_VERSIONS:-{}}
+      REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-localhost:19092}
+      NDR_BUS_SASL_MECHANISM: ${NDR_BUS_SASL_MECHANISM-SCRAM-SHA-512}
+      NDR_BUS_SASL_USER: ${CERNITY_BUS_USER:-cernity-sensor}
+      NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_PASSWORD:-}
+      NDR_BUS_TLS_CA: /certs/ca.crt
+      HOST_PROC: /host/proc
+      SENSOR_DISK_PATH: /var/log/suricata
+      SENSOR_EVE_PATHS: ${SENSOR_EVE_PATHS:-/var/log/suricata/eve-alerts.json,/var/log/suricata/eve-nsm.json}
+      SENSOR_METRICS_PATH: /var/log/suricata/sensor-metrics.json
+    volumes:
+      - /proc:/host/proc:ro
+      - ${SURICATA_LOG_DIR:-/var/log/suricata}:/var/log/suricata:ro
+      - ${CERNITY_BUS_CA:-./ca.crt}:/certs/ca.crt:ro
+    logging: *cernity-logging
+    restart: unless-stopped
+
   # Optional: on-demand packet forensics. Enable with `--profile capture`.
   # Self-arms over the bus (no inbound access), actuates the local Suricata's
   # conditional PCAP, and ships bounded PCAPs to the central object store.

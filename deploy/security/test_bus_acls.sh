@@ -50,7 +50,7 @@ SEN="-X brokers=127.0.0.1:19092 -X user=cernity-sensor -X pass=sensorpass -X sas
 # Pre-create the target topics as the central superuser, so WRITE authorization is tested
 # on EXISTING topics rather than racing the auto-create path (which returns a different
 # error for a denied create).
-docker exec "$C" sh -c "rpk topic create ndr.finding.final.v1 suricata.flow.v1 $CEN" >/dev/null 2>&1 || true
+docker exec "$C" sh -c "rpk topic create ndr.finding.final.v1 suricata.flow.v1 ndr.sensor.health.v1 $CEN" >/dev/null 2>&1 || true
 # Enforcement on the data path lags the config-set by a beat. Canary-wait until a sensor
 # forge on the (now existing) findings topic is actually denied, so no assertion races it.
 for _ in $(seq 1 20); do
@@ -87,6 +87,10 @@ o=$(runi "rpk topic produce suricata.flow.v1 $SEN" '{"t":1}')
 denied "$o" && bad "sensor blocked from suricata.flow.v1 (should be allowed)" || ok "sensor ALLOWED produce suricata.flow.v1"
 o=$(runi "rpk topic produce ndr.finding.final.v1 $SEN" '{"x":1}')
 denied "$o" && ok "sensor REFUSED forging ndr.finding.final.v1" || bad "sensor could forge ndr.finding.final.v1"
+# U2: the one extra sensor topic must be writable without opening ndr.*.
+o=$(runi "rpk topic produce ndr.sensor.health.v1 $SEN" '{"schema_version":"sensor-health.v1"}')
+denied "$o" && bad "sensor blocked from ndr.sensor.health.v1" || ok "sensor ALLOWED health heartbeat"
+
 o=$(runi "rpk topic produce ndr.capture.request.v1 $SEN" '{"x":1}')
 denied "$o" && ok "sensor REFUSED ndr.capture.request.v1" || bad "sensor could produce ndr.capture.request.v1"
 o=$(run "rpk topic alter-config ndr.finding.final.v1 --set retention.ms=1000 $SEN")

@@ -10,6 +10,7 @@ pcap-key derivation, window-pcap selection, and local budget checks. app.py wire
 it to Kafka, the local socket, the pcap dir, and MinIO.
 """
 from __future__ import annotations
+import hashlib
 import os
 import re
 
@@ -71,17 +72,51 @@ def _sanitize(s, default: str = "cap") -> str:
     return s or default
 
 
+# Absent/empty tenant -> this explicit, documented segment (never str(None) = 'None').
+# Kept in lock-step with capture-orchestrator's tenant_segment so the agent's computed
+# fallback lands in the same per-tenant namespace the orchestrator advertises.
+DEFAULT_TENANT_SEGMENT = "_no-tenant"
+
+
+def tenant_segment(tenant) -> str:
+    """Collision-free, path-safe tenant namespace for the object key. The FULL SHA-256
+    digest of the raw tenant id is the collision-free part, so distinct tenant ids
+    never map to the same segment and one tenant's PCAP can never overwrite another's.
+    The sanitized 32-char prefix is only a readable label and may collide; the full
+    digest (not a 48-bit truncation) is what guarantees distinctness. Kept in lock-step
+    with capture-orchestrator's tenant_segment. Absent/empty -> DEFAULT_TENANT_SEGMENT."""
+    if tenant is None or not str(tenant).strip():
+        return DEFAULT_TENANT_SEGMENT
+    raw = str(tenant)
+    safe = re.sub(r"[^A-Za-z0-9._\-]", "", raw).replace("..", "").strip(".")[:32] or "t"
+    return f"{safe}-{hashlib.sha256(raw.encode()).hexdigest()}"
+
+
+def _in_tenant_namespace(ref: str, tseg: str) -> bool:
+    """Is a (syntactically safe) advertised key inside THIS directive's tenant
+    namespace, i.e. `ndr-pcap/<tseg>/...`? A legacy unnamespaced ref
+    (`ndr-pcap/f1-ip.pcap`) or another tenant's ref carries a different second
+    segment and fails this check — so an advertised reference off the bus can never
+    redirect an upload into a different tenant's space. `tseg` is collision-free
+    (sha-suffixed), so a match genuinely belongs to this tenant."""
+    return ref.startswith(f"ndr-pcap/{tseg}/")
+
+
 def pcap_key(directive: dict) -> str:
     """MinIO object key (bucket/key) the agent uploads to and hands to Zeek.
     Matches what the orchestrator advertised so the loop stays consistent. An
-    advertised pcap_ref is honored only if it is a safe key; otherwise (and for the
-    computed fallback) every component is sanitized."""
+    advertised pcap_ref is honored only if it is a safe key AND belongs to the
+    directive's own tenant namespace; otherwise the computed fallback is
+    tenant-namespaced (no cross-tenant overwrite) with every component sanitized.
+    The tenant check is what closes the overwrite path: without it a forged/legacy
+    ref would be uploaded verbatim, letting one tenant land in another's namespace."""
+    tseg = tenant_segment(directive.get("tenant_id"))
     ref = directive.get("pcap_ref")
-    if _valid_key(ref):
+    if _valid_key(ref) and _in_tenant_namespace(ref, tseg):
         return ref
     fid = _sanitize(directive.get("finding_id") or directive.get("value"))
     profile = _sanitize(directive.get("capture_profile", "ip"))
-    return f"ndr-pcap/{fid}-{profile}.pcap"
+    return f"ndr-pcap/{tseg}/{fid}-{profile}.pcap"
 
 
 def window_pcaps(entries: list[tuple[str, float]], start_ts: float) -> list[str]:

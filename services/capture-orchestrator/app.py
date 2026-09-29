@@ -10,8 +10,10 @@ No SSH, no central key-holding: the orchestrator only produces gated directives
 onto the authenticated bus; each sensor's agent owns local actuation. Gate logic
 is covered by test_gates.py.
 """
+import hashlib
 import json
 import os
+import re
 import ndr_runtime
 import signal
 
@@ -40,6 +42,33 @@ def _stop(*_):
     _running = False
 
 
+# Absent/empty tenant -> this explicit, documented segment (never the literal
+# str(None) = 'None', which would silently pool every untenanted capture together).
+DEFAULT_TENANT_SEGMENT = "_no-tenant"
+
+
+def tenant_segment(tenant) -> str:
+    """Collision-free, path-safe tenant namespace for a PCAP object key. The FULL
+    SHA-256 digest of the raw tenant id is the collision-free part — distinct tenant
+    ids never map to the same segment, so one tenant can never overwrite another's
+    PCAP. The truncated, sanitized prefix is only a human-readable label and is
+    allowed to collide (e.g. two ids sharing the first 32 chars); a truncated digest
+    would leave only ~48 bits and a feasible birthday collision, so we keep all 256.
+    An absent/empty tenant uses DEFAULT_TENANT_SEGMENT, never str(None)."""
+    if tenant is None or not str(tenant).strip():
+        return DEFAULT_TENANT_SEGMENT
+    raw = str(tenant)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", raw).replace("..", "").strip(".")[:32] or "t"
+    return f"{safe}-{hashlib.sha256(raw.encode()).hexdigest()}"
+
+
+def object_key(tenant, fid, value, profile) -> str:
+    """Tenant-namespaced MinIO object key for a preserved PCAP. The tenant segment
+    keys the object per-tenant, so an identical flow tuple in two tenants resolves to
+    two distinct objects (no cross-tenant overwrite)."""
+    return f"ndr-pcap/{tenant_segment(tenant)}/{fid or value}-{profile}.pcap"
+
+
 def probe_health(sensor_id: str) -> dict:
     # B-U8/R12: no real sensor-health signal is wired yet, so report state UNMEASURED rather than
     # fabricating a perfectly-healthy 0.0 (which made the gate treat every sensor as known-good).
@@ -63,10 +92,10 @@ def _handle_request(req, producer):
         return
     s = _budget.setdefault(sensor_id, {"active_jobs": 0, "bytes_captured": 0})
     s["active_jobs"] += 1
-    pcap_ref = f"ndr-pcap/{fid or value}-{profile}.pcap"
+    pcap_ref = object_key(req.get("tenant_id"), fid, value, profile)
     producer.send(ARM_TOPIC, {
         "finding_id": fid, "sensor_id": sensor_id, "capture_profile": profile,
-        "value": value, "pcap_ref": pcap_ref,
+        "value": value, "pcap_ref": pcap_ref, "tenant_id": req.get("tenant_id"),
         "ttl_secs": req.get("ttl_secs"), "max_bytes": req.get("max_bytes"),
     })
     log.info("ARM DIRECTIVE %s %s=%s -> %s (active=%d)",

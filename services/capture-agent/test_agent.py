@@ -25,7 +25,8 @@ def test_pcap_key_rejects_unsafe_advertised_ref():
     for bad in ("../../etc/passwd", "/etc/passwd", "ndr-pcap/../x", "a b; rm -rf",
                 "x\n../y", 123, None):
         k = agent.pcap_key({"pcap_ref": bad, "finding_id": "f1", "capture_profile": "ip"})
-        assert k == "ndr-pcap/f1-ip.pcap", (bad, k)   # falls back to the safe computed key
+        # falls back to the safe computed key; no tenant -> documented default segment
+        assert k == f"ndr-pcap/{agent.DEFAULT_TENANT_SEGMENT}/f1-ip.pcap", (bad, k)
 
 
 def test_pcap_key_sanitizes_fallback_components():
@@ -34,10 +35,29 @@ def test_pcap_key_sanitizes_fallback_components():
     assert ".." not in k and k.startswith("ndr-pcap/") and k.endswith(".pcap")
 
 
-def test_pcap_key_prefers_advertised_ref():
-    assert agent.pcap_key({"pcap_ref": "ndr-pcap/x.pcap"}) == "ndr-pcap/x.pcap"
+def test_pcap_key_prefers_advertised_ref_in_own_namespace():
+    # honored only when the advertised ref sits in the directive's OWN tenant
+    # namespace (the shape the orchestrator emits). An out-of-namespace ref (legacy
+    # unnamespaced, or another tenant's) is NOT honored — it would be an upload into
+    # a foreign tenant's space — and the tenant-namespaced fallback is used instead.
+    tseg = agent.tenant_segment("acme")
+    own = f"ndr-pcap/{tseg}/f1-ip.pcap"
+    assert agent.pcap_key({"pcap_ref": own, "tenant_id": "acme"}) == own
+    # legacy unnamespaced ref: rejected, redirected into acme's namespace
+    k = agent.pcap_key({"pcap_ref": "ndr-pcap/x.pcap", "tenant_id": "acme",
+                        "finding_id": "f1", "capture_profile": "ip"})
+    assert k == f"ndr-pcap/{tseg}/f1-ip.pcap"
+    # no tenant, no ref: documented default segment
     k = agent.pcap_key({"finding_id": "f1", "capture_profile": "ip"})
-    assert k == "ndr-pcap/f1-ip.pcap"
+    assert k == f"ndr-pcap/{agent.DEFAULT_TENANT_SEGMENT}/f1-ip.pcap"
+
+
+def test_pcap_key_namespaces_by_tenant():
+    # distinct tenants + identical flow -> distinct object keys (no cross-tenant overwrite)
+    d = {"finding_id": "f1", "capture_profile": "ip"}
+    ka = agent.pcap_key({**d, "tenant_id": "acme"})
+    kb = agent.pcap_key({**d, "tenant_id": "globex"})
+    assert ka != kb and "None" not in ka.split("/") and "None" not in kb.split("/")
 
 
 def test_window_pcaps_filters_by_mtime():
@@ -111,7 +131,7 @@ def test_lookback_bpf_from_ip_profile():
 
 def test_lookback_key_suffixes_pcap_key():
     k = agent.lookback_key({"finding_id": "f1", "capture_profile": "ip"})
-    assert k == "ndr-pcap/f1-ip-lookback.pcap"
+    assert k == f"ndr-pcap/{agent.DEFAULT_TENANT_SEGMENT}/f1-ip-lookback.pcap"
 
 
 def test_wants_lookback():

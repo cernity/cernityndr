@@ -10,6 +10,10 @@
 set -eu
 HOST="${CERNITY_ADVERTISE_HOST:-127.0.0.1}"
 
+if [ "${CERNITY_CAPTURE_ENABLED:-0}" = "1" ] && [ "${CERNITY_INSECURE_BUS:-0}" = "1" ]; then
+  echo "forensics requires the secure bus" >&2
+  exit 1
+fi
 if [ "${CERNITY_INSECURE_BUS:-0}" = "1" ]; then
   echo "############################################################################" >&2
   echo "# WARNING: CERNITY_INSECURE_BUS=1 - external bus listener :19092 is PLAINTEXT" >&2
@@ -49,6 +53,9 @@ ADMIN="127.0.0.1:9644"     # local admin API (users, config) — docker-net-only
 KAFKA="127.0.0.1:9092"     # internal SASL listener
 rpk redpanda start --check=false --overprovisioned --smp=1 --memory=1G --reserve-memory=0M &
 RP=$!
+# Provisioning failure must stop the broker, not leave a permissive child alive.
+trap 'kill "$RP" 2>/dev/null || true' EXIT
+trap 'exit 1' INT TERM
 i=0
 until rpk cluster health -X admin.hosts="$ADMIN" >/dev/null 2>&1; do
   kill -0 "$RP" 2>/dev/null || { echo "redpanda exited before admin API came up" >&2; wait "$RP"; exit 1; }
@@ -82,13 +89,17 @@ rpk security acl create --allow-principal "User:$CERNITY_BUS_USER" \
   -X brokers="$KAFKA" $SASL_ADMIN >/dev/null
 echo "Cernity bus: sensor '$CERNITY_BUS_USER' scoped PRODUCE-ONLY to ${SENSOR_PREFIX}* (F02)" >&2
 
+if [ "${CERNITY_CAPTURE_ENABLED:-0}" = "1" ]; then
+  . /provision-capture.sh
+fi
+
 # 3) Superusers = the central-only pipeline + bootstrap admin. The sensor is NEVER a
 #    superuser (that was the audit's F02 hole). Central services run trusted on the
 #    private docker net; their credential never leaves the central host.
-rpk cluster config set superusers "['$ADMIN_USER','$CENTRAL_USER']" -X admin.hosts="$ADMIN" >/dev/null 2>&1 || true
+rpk cluster config set superusers "['$ADMIN_USER','$CENTRAL_USER']" -X admin.hosts="$ADMIN" >/dev/null
 # 4) Enforce ACLs. Until now everything was permitted; from here the sensor is
 #    confined to its telemetry namespace and cannot forge findings or read ndr.*.
-rpk cluster config set kafka_enable_authorization true -X admin.hosts="$ADMIN" >/dev/null 2>&1 || true
+rpk cluster config set kafka_enable_authorization true -X admin.hosts="$ADMIN" >/dev/null
 # Detectors/shippers rely on topics appearing on first produce (as with the stock
 # flag-based start); the custom config path needs this set explicitly.
 rpk cluster config set auto_create_topics_enabled true -X admin.hosts="$ADMIN" >/dev/null 2>&1 || true

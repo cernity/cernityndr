@@ -1,105 +1,80 @@
 #!/usr/bin/env bash
-# F02 acceptance: the produce-only sensor credential cannot forge findings, read
-# ndr.* topics, or alter cluster config, while the trusted central principal runs the
-# pipeline normally. Stands up a real Redpanda with the secure entrypoint and asserts
-# the audit's own negative tests. Requires Docker. Run from the repo root:
-#
-#   ./deploy/security/test_bus_acls.sh
-#
-# NOTE: this is an integration test (pulls redpandadata/redpanda, ~1 min); it is not
-# part of the fast unit gate (run-tests.sh).
+# REAL ENVIRONMENT ONLY. Read-only checks against an ALREADY RUNNING broker.
+# No broker creation, no demo credentials, no skip-success, no record publication.
+# See docs/decisions/003-forensics-bus-acls.md for operator setup and limitations.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-IMG="redpandadata/redpanda:latest"
-C="cernity-bus-acl-test"
-WORK="$(mktemp -d)"
-trap 'docker rm -f "$C" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+: "${REDPANDA_BOOTSTRAP:?set reachable external broker host:19092}"
+: "${CERNITY_BUS_CA:?set local CA certificate path}"
+: "${CERNITY_BUS_ADMIN_USER:?set admin user}"
+: "${CERNITY_BUS_ADMIN_PASSWORD:?set admin password}"
+: "${CERNITY_BUS_CAPTURE_USER:?set provisioned capture user}"
+: "${CERNITY_BUS_CAPTURE_PASSWORD:?set capture password}"
+: "${NDR_SENSOR:?set provisioned sensor ID}"
+export REDPANDA_BOOTSTRAP CERNITY_BUS_CA CERNITY_BUS_ADMIN_USER CERNITY_BUS_ADMIN_PASSWORD
+export CERNITY_BUS_CAPTURE_USER CERNITY_BUS_CAPTURE_PASSWORD NDR_SENSOR
+"${PYTHON:-$ROOT/.venv/bin/python}" - <<'PY'
+import os
+from kafka.admin import (KafkaAdminClient, ACLFilter, ResourcePatternFilter,
+                        ResourceType, ACLResourcePatternType, ACLOperation, ACLPermissionType)
+from kafka.errors import TopicAuthorizationFailedError
 
-command -v docker >/dev/null 2>&1 || { echo "SKIP: docker not available"; exit 0; }
-docker info >/dev/null 2>&1 || { echo "SKIP: docker daemon not running"; exit 0; }
+def require(ok, message):
+    if not ok:
+        raise SystemExit('FAIL: ' + message)
 
-# Throwaway CA + broker cert (SAN covers the loopback advertised names).
-cd "$WORK"
-openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes -keyout ca.key -out ca.crt -subj "/CN=test CA" 2>/dev/null
-openssl req -newkey rsa:2048 -nodes -keyout broker.key -out broker.csr -subj "/CN=127.0.0.1" 2>/dev/null
-echo "subjectAltName = DNS:redpanda, DNS:localhost, IP:127.0.0.1" > broker.ext
-openssl x509 -req -in broker.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out broker.crt -days 2 -sha256 -extfile broker.ext 2>/dev/null
-
-docker rm -f "$C" >/dev/null 2>&1 || true
-docker run -d --name "$C" --add-host redpanda:127.0.0.1 \
-  -e CERNITY_ADVERTISE_HOST=127.0.0.1 \
-  -e CERNITY_BUS_USER=cernity-sensor          -e CERNITY_BUS_PASSWORD=sensorpass \
-  -e CERNITY_BUS_CENTRAL_USER=cernity-central -e CERNITY_BUS_CENTRAL_PASSWORD=centralpass \
-  -e CERNITY_BUS_ADMIN_USER=cernity-admin     -e CERNITY_BUS_ADMIN_PASSWORD=adminpass \
-  -v "$ROOT/deploy/central/redpanda/entrypoint.sh:/entrypoint.sh:ro" \
-  -v "$ROOT/deploy/central/redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro" \
-  -v "$WORK:/certs:ro" \
-  --entrypoint /entrypoint.sh "$IMG" >/dev/null
-
-echo "waiting for authorization to be enforced..."
-for _ in $(seq 1 60); do
-  # Wait for the ENFORCED signal (printed AFTER kafka_enable_authorization is set), not
-  # the earlier PRODUCE-ONLY line — otherwise the sensor checks race enforcement.
-  docker logs "$C" 2>&1 | grep -q "authorization ENFORCED" && break
-  docker ps -a --filter "name=$C" --format '{{.Status}}' | grep -qi exited && { echo "FAIL: broker exited"; docker logs "$C" 2>&1 | tail -20; exit 1; }
-  sleep 2
-done
-CEN="-X brokers=redpanda:9092 -X user=cernity-central -X pass=centralpass -X sasl.mechanism=SCRAM-SHA-512"
-SEN="-X brokers=127.0.0.1:19092 -X user=cernity-sensor -X pass=sensorpass -X sasl.mechanism=SCRAM-SHA-512 -X tls.enabled=true -X tls.ca=/certs/ca.crt"
-
-# Pre-create the target topics as the central superuser, so WRITE authorization is tested
-# on EXISTING topics rather than racing the auto-create path (which returns a different
-# error for a denied create).
-docker exec "$C" sh -c "rpk topic create ndr.finding.final.v1 suricata.flow.v1 ndr.sensor.health.v1 $CEN" >/dev/null 2>&1 || true
-# Enforcement on the data path lags the config-set by a beat. Canary-wait until a sensor
-# forge on the (now existing) findings topic is actually denied, so no assertion races it.
-for _ in $(seq 1 20); do
-  c=$(printf '{"canary":1}\n' | docker exec -i "$C" sh -c "rpk topic produce ndr.finding.final.v1 $SEN" 2>&1 || true)
-  case "$c" in *AUTHORIZATION_FAILED*) break;; esac
-  sleep 2
-done
-
-pass=0; fail=0
-ok()  { echo "  PASS: $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL: $1"; fail=$((fail+1)); }
-# Capture output into a var (|| true), then match with `case` — rpk exits non-zero on a
-# denied produce, so a `... | grep && ok || bad` pipeline would be masked by pipefail.
-run()  { docker exec "$C" sh -c "$1" 2>&1 || true; }
-# NOTE the trailing newline: `rpk topic produce` reads newline-delimited records, so a
-# record without one is never sent (zero produce, no auth check) — a silent false pass.
-runi() { printf '%s\n' "$2" | docker exec -i "$C" sh -c "$1" 2>&1 || true; }
-denied() { case "$1" in *AUTHORIZATION_FAILED*) return 0;; *) return 1;; esac; }
-# Bounded consume: `rpk consume -n 1` blocks forever if the message never arrives (or a
-# read is denied), and `timeout` is not portable — so run it in the background against a
-# temp file, give it a few seconds, then kill it and return whatever it captured.
-consume() { local out="$WORK/c.$$"; : >"$out"
-  docker exec "$C" sh -c "$1" >"$out" 2>&1 & local p=$!
-  sleep 8; kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; cat "$out"; }
-
-# Central pipeline (internal SASL) must work: produce + consume ndr.* (topics pre-created above).
-o=$(runi "rpk topic produce ndr.finding.final.v1 $CEN" '{"real":"f"}')
-denied "$o" && bad "central produces ndr.finding.final.v1" || ok "central produces ndr.finding.final.v1"
-o=$(consume "rpk topic consume ndr.finding.final.v1 -o start -n 1 $CEN")
-case "$o" in *real*) ok "central consumes ndr.finding.final.v1 (pipeline round-trips)";; *) bad "central consumes ndr.finding.final.v1";; esac
-
-# Sensor confinement (external SASL/TLS) — the audit's negative tests.
-o=$(runi "rpk topic produce suricata.flow.v1 $SEN" '{"t":1}')
-denied "$o" && bad "sensor blocked from suricata.flow.v1 (should be allowed)" || ok "sensor ALLOWED produce suricata.flow.v1"
-o=$(runi "rpk topic produce ndr.finding.final.v1 $SEN" '{"x":1}')
-denied "$o" && ok "sensor REFUSED forging ndr.finding.final.v1" || bad "sensor could forge ndr.finding.final.v1"
-# U2: the one extra sensor topic must be writable without opening ndr.*.
-o=$(runi "rpk topic produce ndr.sensor.health.v1 $SEN" '{"schema_version":"sensor-health.v1"}')
-denied "$o" && bad "sensor blocked from ndr.sensor.health.v1" || ok "sensor ALLOWED health heartbeat"
-
-o=$(runi "rpk topic produce ndr.capture.request.v1 $SEN" '{"x":1}')
-denied "$o" && ok "sensor REFUSED ndr.capture.request.v1" || bad "sensor could produce ndr.capture.request.v1"
-o=$(run "rpk topic alter-config ndr.finding.final.v1 --set retention.ms=1000 $SEN")
-denied "$o" && ok "sensor REFUSED altering topic config" || bad "sensor could alter topic config"
-# rpk consume retries silently on a read denial, so assert via the broker authz log.
-consume "rpk topic consume suricata.flow.v1 -n 1 -o start $SEN" >/dev/null
-if docker logs "$C" 2>&1 | grep "cernity-sensor" | grep "suricata.flow.v1" | grep -q "read"; then
-  ok "sensor REFUSED reading suricata.flow.v1 (produce-only)"; else bad "sensor read not refused"; fi
-
-echo
-echo "RESULT: $pass passed, $fail failed"
-[ "$fail" -eq 0 ] || exit 1
+common = dict(bootstrap_servers=os.environ['REDPANDA_BOOTSTRAP'].split(','),
+              security_protocol='SASL_SSL', ssl_cafile=os.environ['CERNITY_BUS_CA'],
+              ssl_check_hostname=True, sasl_mechanism='SCRAM-SHA-512',
+              request_timeout_ms=10000, api_version_auto_timeout_ms=10000)
+admin = KafkaAdminClient(**common, sasl_plain_username=os.environ['CERNITY_BUS_ADMIN_USER'],
+                         sasl_plain_password=os.environ['CERNITY_BUS_ADMIN_PASSWORD'])
+capture = KafkaAdminClient(**common, sasl_plain_username=os.environ['CERNITY_BUS_CAPTURE_USER'],
+                           sasl_plain_password=os.environ['CERNITY_BUS_CAPTURE_PASSWORD'])
+try:
+    user = 'User:' + os.environ['CERNITY_BUS_CAPTURE_USER']
+    acl_filter = ACLFilter(None, None, ACLOperation.ANY, ACLPermissionType.ANY,
+                          ResourcePatternFilter(ResourceType.ANY, None, ACLResourcePatternType.ANY))
+    acls, error = admin.describe_acls(acl_filter)
+    require(getattr(error, 'errno', -1) == 0, 'broker ACL inventory failed')
+    # Reject wildcard-principal grants too: they apply even when the user's own
+    # ACL list looks perfect. This deployment intentionally uses no RBAC roles.
+    require(not any(a.principal == 'User:*' and a.permission_type == ACLPermissionType.ALLOW
+                    for a in acls), 'wildcard principal grants present')
+    expected = set()
+    topics = {
+        'ndr.capture.request.v1': ['DESCRIBE'],
+        'ndr.capture.arm.v1': ['READ', 'DESCRIBE'],
+        'ndr.capture.status.v1': ['WRITE', 'DESCRIBE'],
+        'ndr.capture.request.v2': ['READ', 'DESCRIBE'],
+    }
+    for topic, operations in topics.items():
+        expected.update(('TOPIC', topic, 'LITERAL', op, 'ALLOW', '*') for op in operations)
+    expected.add(('GROUP', 'ndr-capture-agent-' + os.environ['NDR_SENSOR'],
+                  'LITERAL', 'READ', 'ALLOW', '*'))
+    actual = {(a.resource_pattern.resource_type.name, a.resource_pattern.resource_name,
+               a.resource_pattern.pattern_type.name, a.operation.name, a.permission_type.name, a.host)
+              for a in acls if a.principal == user}
+    require(actual == expected, 'capture ACLs differ from the exact topic/group policy')
+    for topic in topics:
+        rows = capture.describe_topics([topic])
+        require(len(rows) == 1 and rows[0]['error_code'] == 0,
+                'capture authentication/topic metadata failed: ' + topic)
+    # Existing noncapture topics prevent UNKNOWN_TOPIC from masquerading as denial.
+    # This also detects a capture superuser or disabled enforcement.
+    for topic in ('ndr.finding.final.v1', 'suricata.flow.v1'):
+        rows = admin.describe_topics([topic])
+        require(len(rows) == 1 and rows[0]['error_code'] == 0,
+                'operator must provide existing negative-test topic: ' + topic)
+        try:
+            rows = capture.describe_topics([topic])
+        except TopicAuthorizationFailedError:
+            continue
+        require(len(rows) == 1 and rows[0]['error_code'] == 29,
+                'expected TOPIC_AUTHORIZATION_FAILED for ' + topic)
+    print('PASS: live capture ACL inventory, TLS/SASL authentication, allowed metadata, and denied noncapture metadata')
+    print('Not a packet/object-store/finding delivery test. Preserve remains gated pending the audited roundtrip.')
+finally:
+    capture.close()
+    admin.close()
+PY

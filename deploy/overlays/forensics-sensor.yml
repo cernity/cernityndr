@@ -1,0 +1,10 @@
+# Apply ONLY with deploy/sensor/docker-compose.yml, on the sensor host.
+services:
+  capture-agent:
+    environment:
+      NDR_BUS_SASL_MECHANISM: SCRAM-SHA-512
+      NDR_BUS_SASL_USER: ${CERNITY_BUS_CAPTURE_USER:-cernity-capture}
+      NDR_BUS_SASL_PASSWORD: ${CERNITY_BUS_CAPTURE_PASSWORD:?set capture bus password}
+      MINIO_ENDPOINT: ${CERNITY_CAPTURE_S3_ENDPOINT:?set sensor-routable S3 URL}
+      AWS_ACCESS_KEY_ID: ${CERNITY_MINIO_CAPTURE_USER:?set scoped S3 access key}
+      AWS_SECRET_ACCESS_KEY: ${CERNITY_MINIO_CAPTURE_PASSWORD:?set scoped S3 secret}

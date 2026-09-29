@@ -18,10 +18,13 @@ credential is shared across trust boundaries:
 | **central** (`cernity-central`) | central host only | the trusted pipeline (detectors, finding-service, forwarder); superuser on the private net |
 | **admin** (`cernity-admin`) | central host only | bootstrap / break-glass superuser |
 
-The Redpanda entrypoint seeds all three plus the sensor's produce-only ACL, sets the superuser
-set to `[admin, central]` (never the sensor), then enables `kafka_enable_authorization`. The
-`deploy/security/test_bus_acls.sh` integration test proves the confinement against a real broker
-(the audit's forged-`ndr.finding.final.v1` write is refused with the sensor credential).
+The Redpanda entrypoint seeds these principals plus the sensor's produce-only ACL,
+sets the superuser set to `[admin, central]`, then enables authorization. The optional
+forensics overlay provisions a fourth, separate capture principal. See
+[U1b apply and verification](../../docs/decisions/003-forensics-bus-acls.md).
+`deploy/security/test_bus_acls.sh` now checks capture ACLs and metadata authorization
+against an existing live broker; it does not create a disposable broker or prove
+packet delivery. The clone gate is `deploy/security/test_forensics_config.py`.
 
 ## Generate
 

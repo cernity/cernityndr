@@ -79,11 +79,16 @@ services:
       CERNITY_BUS_CENTRAL_PASSWORD: ${CERNITY_BUS_CENTRAL_PASSWORD:-}
       CERNITY_BUS_ADMIN_USER: ${CERNITY_BUS_ADMIN_USER:-cernity-admin}
       CERNITY_BUS_ADMIN_PASSWORD: ${CERNITY_BUS_ADMIN_PASSWORD:-}
+      CERNITY_CAPTURE_ENABLED: "0"
+      CERNITY_BUS_CAPTURE_USER: ${CERNITY_BUS_CAPTURE_USER:-cernity-capture}
+      CERNITY_BUS_CAPTURE_PASSWORD: ${CERNITY_BUS_CAPTURE_PASSWORD:-}
+      NDR_SENSOR: ${NDR_SENSOR:-sensor-1}
     volumes:
       # Named data volume (F14): the broker's log/offsets survive a container recreate, so
       # in-flight findings/offsets are not lost on redeploy (stable down/up reattachment).
       - cernity-redpanda-data:/var/lib/redpanda/data
       - ./redpanda/entrypoint.sh:/entrypoint.sh:ro
+      - ./redpanda/provision-capture.sh:/provision-capture.sh:ro
       - ./redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro
       - ../security/secrets:/certs:ro
     ports:

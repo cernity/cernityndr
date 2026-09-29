@@ -1,0 +1,4 @@
+pytest>=7
+PyYAML==6.0.3
+# Live ACL verifier only:
+kafka-python>=2.2

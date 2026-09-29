@@ -255,3 +255,238 @@ def file_extracted_event(sensor_id: str, sha256: str, size: int, mime: str = "")
     """Shape an ndr.file.extracted.v1 announcement for file-yara."""
     return {"sensor_id": sensor_id, "sha256": sha256, "size": size,
             "mime": mime, "object_ref": f"{FILES_BUCKET}/{sha256}"}
+
+
+# U6: an in-memory rolling PCAP ring fed by tcpdump, not a new packet engine.
+# Memory avoids an unbounded spool on disk. Host swap/core dumps must be disabled
+# or encrypted. All capture and expiry clocks below are injectable for unit tests.
+import struct
+import threading
+import time
+from collections import deque
+import capture_v2
+
+
+class PacketRing:
+    def __init__(self, policy, audit, clock=time.monotonic, wall=time.time):
+        self.policy, self.audit, self.clock, self.wall = policy, audit, clock, wall
+        self.records = deque()
+        self.size = 0
+        self.dropped = 0
+        self.header = None
+        self.closed = False
+        self.lock = threading.RLock()
+        capture_v2.validate_policy(policy, wall())
+        if (policy.get('enabled') is not True or policy.get('sensitive') is not False
+                or not policy.get('tenant_id') or not policy.get('sensor_id')
+                or not policy.get('policy_id') or policy.get('expires_at', 0) <= wall()
+                or policy.get('ring_bytes', 0) < 65536 or policy.get('ring_seconds', 0) <= 0):
+            raise PermissionError('buffering requires an unexpired local opt-in policy')
+        audit({'action': 'pcap.buffer.start', 'tenant_id': policy['tenant_id'],
+               'sensor_id': policy['sensor_id'], 'policy_id': policy['policy_id']})
+
+    def expire(self):
+        with self.lock:
+            cutoff = self.clock() - self.policy['ring_seconds']
+            expired_policy = self.closed or self.wall() >= self.policy['expires_at']
+            while self.records and (expired_policy or self.records[0][0] <= cutoff):
+                self.size -= len(self.records.popleft()[2]) + 192
+                self.dropped += 1
+            return not expired_policy
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.expire()
+
+    def append(self, ts, record):
+        with self.lock:
+            if not self.expire():
+                return False
+            # Account record bytes AND a conservative per-record Python overhead.
+            charge = len(record) + 192
+            if charge + 24 > self.policy['ring_bytes']:
+                self.dropped += 1
+                return False
+            while self.records and self.size + charge + 24 > self.policy['ring_bytes']:
+                self.size -= len(self.records.popleft()[2]) + 192
+                self.dropped += 1
+            self.records.append((self.clock(), ts, record))
+            self.size += charge
+            return True
+
+    def slice(self, start, end, limit):
+        with self.lock:
+            self.expire()
+            out = bytearray(self.header or b'')
+            selected, truncated = 0, False
+            for _, ts, record in self.records:
+                if start <= ts < end:
+                    if len(out) + len(record) > limit:
+                        truncated = True
+                        break
+                    out.extend(record)
+                    selected += 1
+            return bytes(out), {'selected_packets': selected, 'truncated': truncated,
+                                'ring_drops_total': self.dropped,
+                                'capture_loss': 'unknown', 'complete': False}
+
+    def ingest(self, stream):
+        """Read bounded classic-PCAP records from tcpdump stdout. Reject pcapng,
+        inconsistent lengths and oversized records; never allocate from unchecked input.
+        """
+        def read_exact(n):
+            buf = bytearray()
+            while len(buf) < n:
+                chunk = stream.read(n - len(buf))
+                if not chunk:
+                    if not buf:
+                        return b''
+                    raise ValueError('truncated PCAP')
+                buf.extend(chunk)
+            return bytes(buf)
+        header = read_exact(24)
+        if len(header) != 24 or header[:4] not in (b'\xd4\xc3\xb2\xa1', b'\xa1\xb2\xc3\xd4'):
+            raise ValueError('unsupported PCAP header')
+        endian = '<' if header[0] == 0xd4 else '>'
+        _, major, minor, _, _, snaplen, _ = struct.unpack(endian + 'IHHIIII', header)
+        if (major, minor) != (2, 4) or not 1 <= snaplen <= 65535:
+            raise ValueError('unsupported PCAP format')
+        with self.lock:
+            if self.header and self.header != header:
+                raise ValueError('capture format changed')
+            self.header = header
+        while self.expire():
+            rec = read_exact(16)
+            if not rec:
+                return
+            sec, usec, size, original = struct.unpack(endian + 'IIII', rec)
+            if size > snaplen or original < size or usec >= 1000000:
+                raise ValueError('invalid PCAP record')
+            data = read_exact(size)
+            if len(data) != size:
+                raise ValueError('truncated PCAP packet')
+            self.append(sec + usec / 1e6, rec + data)
+
+
+def carve_pcap(data, address):
+    """tcpdump interprets packets/BPF; failure NEVER falls back to unfiltered bytes."""
+    import ipaddress
+    import subprocess
+    host = str(ipaddress.ip_address(address))
+    import tempfile
+    # Some platform libpcap builds cannot seek/probe stdin. A 0600 bounded
+    # anonymous file works on Linux and macOS. It has no pathname to survive a
+    # process crash; tcpdump inherits only this descriptor, never a public spool.
+    with tempfile.TemporaryFile() as source:
+        source.write(data)
+        source.seek(0)
+        result = subprocess.run(['tcpdump', '-r', f'/dev/fd/{source.fileno()}', '-w', '-', 'host', host],
+                                pass_fds=(source.fileno(),), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=15, check=True)
+        return result.stdout
+
+
+def preserve(directive, ring, s3, audit, budget, now=None, carve=carve_pcap):
+    """A mockable store boundary. Store retention is mandatory, not an Expires hint.
+    Bucket MUST have S3 lifecycle expiration for tag cernity-pcap=v2 (see ADR).
+    Downloads additionally enforce the signed object's expires-at metadata.
+    """
+    now = ring.wall() if now is None else now
+    event = {k: directive.get(k) for k in ('request_id', 'tenant_id', 'sensor_id', 'finding_id')}
+    audit({**event, 'action': 'pcap.preserve.request'})
+    reserved = False
+    try:
+        capture_v2.authorize(directive, ring.policy, now)
+        # Verify the actual store policy; a producer or local boolean assertion
+        # cannot stand in for retention configuration.
+        if s3.get_bucket_versioning(Bucket='ndr-pcap').get('Status') in ('Enabled', 'Suspended'):
+            raise PermissionError('preserve requires a nonversioned bucket')
+        rules = s3.get_bucket_lifecycle_configuration(Bucket='ndr-pcap').get('Rules', [])
+        matching = [rule for rule in rules if rule.get('Status') == 'Enabled'
+                    and rule.get('Filter') == {'Tag': {'Key': 'cernity-pcap', 'Value': 'v2'}}
+                    and type(rule.get('Expiration', {}).get('Days')) is int
+                    and 0 < rule['Expiration']['Days'] * 86400 <= directive['limits']['retention_s']]
+        if not matching:
+            raise PermissionError('object lifecycle not configured')
+        # Defense in depth even with a memory ring: refuse under host disk pressure.
+        import shutil
+        import tempfile
+        if shutil.disk_usage(tempfile.gettempdir()).free < ring.policy['min_free_bytes'] + directive['limits']['max_bytes']:
+            raise ValueError('disk free space below policy')
+        budget.reserve(directive, ring.policy)
+        reserved = True
+        data, coverage = ring.slice(directive['window']['start'], directive['window']['end'],
+                                    directive['limits']['max_bytes'])
+        if coverage['selected_packets'] == 0:
+            raise ValueError('no packets in requested window')
+        data = carve(data, directive['value'])
+        if not 24 < len(data) <= directive['limits']['max_bytes']:
+            raise ValueError('empty slice or object budget exceeded')
+        # Reuse U1a's tenant namespace; hash the request identity to avoid retries or
+        # another finding overwriting an object while readers hold its reference.
+        key = pcap_key({'tenant_id': directive['tenant_id'], 'capture_profile': 'preserve',
+                        'finding_id': hashlib.sha256(directive['request_id'].encode()).hexdigest()})
+        bucket, _, obj = key.partition('/')
+        expires = now + directive['limits']['retention_s']
+        digest = hashlib.sha256(data).hexdigest()
+        metadata = {'tenant-id': hashlib.sha256(directive['tenant_id'].encode()).hexdigest(),
+                    'expires-at': str(expires), 'sha256': digest}
+        audit({**event, 'action': 'pcap.upload.attempt', 'resource_id': key, 'bytes': len(data)})
+        s3.put_object(Bucket=bucket, Key=obj, Body=data, Metadata=metadata,
+                      ServerSideEncryption='AES256', Tagging='cernity-pcap=v2')
+        audit({**event, 'action': 'pcap.upload.success', 'resource_id': key, 'bytes': len(data)})
+        return {**event, 'state': 'completed', 'armed': False, 'kind': 'preserve',
+                'pcap_ref': key, 'bytes': len(data), 'sha256': digest,
+                'coverage': {**coverage, 'window': directive['window'],
+                             'request_latency_s': now - directive['window']['end'],
+                             'interface': ring.policy.get('interface')}, 'expires_at': expires}
+    except Exception:
+        audit({**event, 'action': 'pcap.preserve.failed'})
+        raise
+    finally:
+        if reserved:
+            budget.finish(directive)
+
+
+def retrieve_pcap(ref, auth_header, tokens, s3, audit, now=None, max_size=100_000_000):
+    """Authenticated, tenant/RBAC scoped download; no public/presigned URL escape.
+    tokens is SERVER configuration: token -> {actor, tenant_id, pcap_read: true}.
+    Audit intent must succeed before the object store is touched.
+    """
+    now = time.time() if now is None else now
+    grant = tokens.get(auth_header[7:]) if isinstance(auth_header, str) and auth_header.startswith('Bearer ') else None
+    if not isinstance(grant, dict):
+        grant = None
+    event = {'action': 'pcap.download', 'resource_id': str(ref)[:256],
+             'actor': grant.get('actor') if grant else 'anonymous',
+             'tenant_id': grant.get('tenant_id') if grant else None}
+    if (not grant or grant.get('pcap_read') is not True or not grant.get('tenant_id') or not grant.get('actor')
+            or not _valid_key(ref) or not _in_tenant_namespace(ref, tenant_segment(grant['tenant_id']))):
+        audit({**event, 'outcome': 'denied'})
+        raise PermissionError('PCAP access denied')
+    audit({**event, 'outcome': 'attempt'})
+    try:
+        bucket, _, key = ref.partition('/')
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        try:
+            meta = obj['Metadata']
+            expiry = float(meta['expires-at'])
+            import math
+            if (not math.isfinite(expiry) or expiry <= now
+                    or meta['tenant-id'] != hashlib.sha256(grant['tenant_id'].encode()).hexdigest()):
+                raise PermissionError('PCAP expired or tenant mismatch')
+            if obj['ContentLength'] > max_size:
+                raise ValueError('object exceeds download budget')
+            data = obj['Body'].read(max_size + 1)
+            if len(data) > max_size or len(data) != obj['ContentLength']:
+                raise ValueError('invalid object length')
+            if hashlib.sha256(data).hexdigest() != meta['sha256']:
+                raise ValueError('object digest mismatch')
+        finally:
+            obj['Body'].close()
+        audit({**event, 'outcome': 'success', 'bytes': len(data)})
+        return data
+    except Exception:
+        audit({**event, 'outcome': 'failed'})
+        raise

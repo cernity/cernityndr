@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cernity.io/contracts/capture-request.v2",
+  "title": "capture-request.v2",
+  "description": "Signed preserve directive emitted by the v1 orchestrator under local policy. Unix epoch UTC seconds; window is half-open and fully elapsed. Runtime additionally enforces IP syntax, elapsed/bounded window, policy expiry, signature, retention and budgets. v1 arm/status consumers remain supported.",
+  "type": "object",
+  "required": [
+    "request_id",
+    "tenant_id",
+    "sensor_id",
+    "finding_id",
+    "policy_id",
+    "reason",
+    "schema_version",
+    "mode",
+    "capture_profile",
+    "value",
+    "authorization",
+    "expires_at",
+    "window",
+    "limits"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "sensor_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "finding_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "schema_version": {
+      "const": "capture-request.v2"
+    },
+    "mode": {
+      "const": "preserve"
+    },
+    "capture_profile": {
+      "const": "ip"
+    },
+    "value": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 45
+    },
+    "authorization": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expires_at": {
+      "type": "number",
+      "minimum": 0
+    },
+    "window": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "number",
+          "minimum": 0
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "max_bytes",
+        "max_duration_s",
+        "retention_s"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 40
+        },
+        "max_duration_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retention_s": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

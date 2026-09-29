@@ -82,3 +82,35 @@ null offset. The service requires broker `LogAppendTime` on these input topics a
 without committing on `CreateTime` records, which cannot establish ingest time.
 Health-to-normalizer offset lookup and correlation skew tolerance are not
 implemented by U4. Consumers must inspect `ts.method` before clock-sensitive use.
+
+## U6 capture v2 coexistence
+
+`ndr.capture.request.v2` carries `capture-request.v2` (see
+`capture-request.schema.json`). It is the orchestrator's **signed preserve
+output** to upgraded capture agents. Epoch UTC seconds describe a half-open,
+fully elapsed packet window. U6 supports the existing IP host selector;
+community-ID/5-tuple selectors and future-window scheduling are not implemented.
+
+The existing finding-service continues producing `ndr.capture.request.v1`.
+With no local preserve policy, the orchestrator continues producing
+`ndr.capture.arm.v1` unchanged. With an enabled sensor policy, it gates that
+intent and produces v2 instead. A denied preserve never silently falls back to
+forward capture. Deploy upgraded agents before enabling policies. Do not publish
+the same intent on both request topics; v2 is output, not another orchestrator
+input in this increment. No producer-controlled `authorized` boolean is trusted.
+
+Agents consume both the existing arm topic and v2, and reject v2 payloads on the
+arm topic. A preserve does not also arm a forward capture. Terminal preserve
+messages retain `ndr.capture.status.v1`, adding `kind: preserve`, `request_id`,
+`tenant_id`, `coverage` and `pcap_ref`. Their budget accounting is separate from
+v1 arms. Successful preservation also emits `ndr.enrichment.result.v1` with
+`status: ok`, tenant/finding IDs, and `evidence_refs: [pcap_ref]`. The existing
+finding-service result handler attaches that reference, including its existing
+late-result behavior. This reports preserved evidence, not Zeek analysis.
+
+U1b must provision ACLs: only the orchestrator may produce v2; enrolled agents
+may consume scoped directives and produce completion/results for their tenant.
+Signed sensor-specific directives add defense in depth, but neither payload
+fields nor a MAC establish the original finding producer's transport identity.
+The signed command key is sensor-specific local administration configuration.
+All new runtime bus clients use the shared authenticated-client factories.

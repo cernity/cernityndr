@@ -13,6 +13,8 @@ import ndr_runtime
 import signal
 import threading
 import time
+import json
+import capture_v2
 
 import agent
 import suricata_socket as ss
@@ -263,20 +265,102 @@ def _file_ship_loop(producer, s3):
             time.sleep(1)
 
 
+def _audit(event):
+    ndr_runtime.log_event(log, "audit", timestamp=time.time(), **event)
+
+
+def _preserve_capture(directive, ring, producer, s3, budget):
+    event = {k: directive.get(k) for k in ('tenant_id', 'sensor_id', 'finding_id', 'request_id')}
+    try:
+        if ring is None:
+            _audit({**event, 'action': 'pcap.preserve.refused', 'reason': 'buffer disabled'})
+            raise PermissionError('buffer disabled')
+        status = agent.preserve(directive, ring, s3, _audit, budget)
+        producer.send(STATUS_TOPIC, status)
+        # Existing enrichment-result -> finding-service propagation. This result
+        # attests to preserved bytes only, not a Zeek analysis or live e2e proof.
+        producer.send('ndr.enrichment.result.v1', {**event, 'status': 'ok',
+                      'evidence_refs': [status['pcap_ref']],
+                      'summary': {'pcap_preservation': {**status['coverage'],
+                                                       'sha256': status['sha256'],
+                                                       'expires_at': status['expires_at']}}})
+        _progress()
+    except Exception as exc:
+        producer.send(STATUS_TOPIC, {**event, 'kind': 'preserve', 'state': 'failed',
+                                    'armed': False, 'reason': str(exc)})
+    finally:
+        producer.flush()
+
+
+def _start_ring(policy):
+    """tcpdump is the capture engine. stdout feeds a bounded memory ring; no raw
+    disk spool for acquisition. Expiry runs even on a quiet interface.
+    """
+    import subprocess
+    ring = agent.PacketRing(policy, _audit)
+    interface = policy['interface']
+    if not isinstance(interface, str) or not interface or interface.startswith('-'):
+        raise ValueError('invalid capture interface')
+    proc = subprocess.Popen(['tcpdump', '-i', interface, '-s', '65535', '-U', '-w', '-'],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def read():
+        try:
+            ring.ingest(proc.stdout)
+        except Exception:
+            log.exception('packet ring reader failed')
+        finally:
+            ring.close()
+            proc.terminate()
+            _audit({'action': 'pcap.buffer.stopped', 'sensor_id': policy['sensor_id']})
+
+    def expire():
+        while _running and ring.expire() and proc.poll() is None:
+            time.sleep(0.25)
+        ring.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    threading.Thread(target=read, daemon=True).start()
+    threading.Thread(target=expire, daemon=True).start()
+    return ring
+
+
 def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     import boto3                                   # lazy: keep app.py import-light for tests
+    from botocore.config import Config
     os.makedirs(PCAP_DIR, exist_ok=True)
     # Authenticated bus (F11): the agent runs ON a remote sensor and reaches the CENTRAL
     # external listener, which is SASL/SCRAM over TLS. ndr_runtime applies SASL_SSL when
     # NDR_BUS_* is set (with the produce-only sensor credential), else plaintext for a demo.
     producer = ndr_runtime.make_producer()
-    consumer = ndr_runtime.make_consumer(ARM_TOPIC, group_id=f"ndr-capture-agent-{SENSOR_ID}",
+    policy = json.loads(os.environ.get('PCAP_RING_POLICY', '{}'))
+    # Disabled agents keep exactly their v1 subscription/ACL requirements.
+    topics = (ARM_TOPIC, capture_v2.TOPIC) if policy.get('enabled') is True else (ARM_TOPIC,)
+    consumer = ndr_runtime.make_consumer(*topics, group_id=f"ndr-capture-agent-{SENSOR_ID}",
                                          auto_offset_reset="latest")
-    s3 = boto3.client("s3", endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
+    s3 = boto3.client("s3", config=Config(connect_timeout=5, read_timeout=15, retries={"max_attempts": 2}), endpoint_url=os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
                       aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"])
+    ring = None
+    if policy.get('enabled') is True:
+        if policy.get('sensor_id') != SENSOR_ID:
+            raise ValueError('ring policy sensor mismatch')
+        preserve_budget = capture_v2.Budget(state_path=os.environ['PCAP_BUDGET_STATE'])
+        ring = _start_ring(policy)
+    else:
+        preserve_budget = capture_v2.Budget()
+    if os.environ.get('PCAP_READER_TOKENS'):
+        import retrieval
+        threading.Thread(target=retrieval.serve,
+                         args=(s3, json.loads(os.environ['PCAP_READER_TOKENS']), _audit,
+                               int(os.environ.get('PCAP_READER_PORT', '8093'))), daemon=True).start()
     ndr_runtime.start_health(ready=("consumer", "uploader"))   # /healthz /readyz /metrics
     log.info("capture-agent up sensor=%s socket=%s pcap_dir=%s", SENSOR_ID, SOCK, PCAP_DIR)
     threading.Thread(target=_file_ship_loop, args=(producer, s3), daemon=True).start()
@@ -291,7 +375,18 @@ def main():
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=10).items():
             for rec in records:
                 d = rec.value
+                if not isinstance(d, dict):
+                    _audit({'action': 'pcap.request.refused', 'reason': 'invalid object'})
+                    continue
                 if not agent.for_this_sensor(d, SENSOR_ID):
+                    continue
+                if _tp.topic == capture_v2.TOPIC:
+                    # Synchronous admission bounds preservation to one job per sensor
+                    # process, including invalid requests (no unbounded worker threads).
+                    _preserve_capture(d, ring, producer, s3, preserve_budget)
+                    continue
+                if d.get('schema_version') == 'capture-request.v2' or d.get('mode') == 'preserve':
+                    _audit({'action': 'pcap.preserve.refused', 'reason': 'wrong topic'})
                     continue
                 ok, why = agent.validate(d)
                 if not ok:

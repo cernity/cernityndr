@@ -76,3 +76,20 @@ if __name__ == "__main__":
         fn()
         print("ok  " + fn.__name__)
     print("\nall %d B-U2 capture-lifecycle tests passed" % len(fns))
+
+
+def test_u6_preserved_reference_attaches_via_existing_result_handler():
+    """Local consumer unit test only; store/bus delivery is deferred to U1b."""
+    app._finalized_capture.clear()
+    p, pending = FakeProducer(), {}
+    app._handle_candidate(SIG, p, {}, pending, 120, now=0, ch=None)
+    ref = 'ndr-pcap/homelab-tenant-hash/request-preserve.pcap'
+    app._handle_status({'finding_id': 'sig-1', 'tenant_id': 'homelab',
+                        'state': 'completed', 'kind': 'preserve', 'armed': False,
+                        'pcap_ref': ref}, p, {}, pending, ch=None)
+    assert ('homelab', 'sig-1') in pending
+    # The capture agent emits this existing result shape after a successful upload.
+    app._handle_result({'finding_id': 'sig-1', 'tenant_id': 'homelab', 'status': 'ok',
+                        'evidence_refs': [ref]}, p, {}, pending, ch=None)
+    assert ref in _finals(p)[-1]['evidence_refs']
+    assert _finals(p)[-1]['tenant_id'] == 'homelab'

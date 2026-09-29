@@ -16,8 +16,9 @@ import os
 import re
 import ndr_runtime
 import signal
+import time
+import capture_v2
 
-from kafka import KafkaConsumer, KafkaProducer
 import gates
 
 log = ndr_runtime.setup_logging("capture-orchestrator")
@@ -34,6 +35,37 @@ LIMITS = {"max_jobs": int(os.environ.get("MAX_JOBS", "3")),
           "max_bytes": int(os.environ.get("MAX_BYTES", "500000000"))}
 
 _running = True
+# Explicit local opt-in, keyed by sensor. Single-tenant sensors only in U6.
+PRESERVE_POLICIES = json.loads(os.environ.get("PCAP_PRESERVE_POLICIES", "{}"))
+_preserve_budget = capture_v2.Budget()
+
+
+def _audit(event):
+    ndr_runtime.log_event(log, "audit", timestamp=time.time(), **event)
+
+
+def _handle_preserve(req, producer, policy):
+    event = {k: req.get(k) for k in ('tenant_id', 'sensor_id', 'finding_id')}
+    _audit({**event, 'action': 'pcap.preserve.gate.request'})
+    directive = None
+    try:
+        tenant_limits = [p['tenant_bytes_per_hour'] for p in PRESERVE_POLICIES.values()
+                         if p.get('enabled') is True and p.get('tenant_id') == req.get('tenant_id')]
+        if tenant_limits:
+            policy = {**policy, 'tenant_bytes_per_hour': min(tenant_limits)}
+        directive = gates.decide_preserve(req, policy, probe_health(req.get('sensor_id')),
+                                          _preserve_budget, time.time())
+        _audit({**event, 'action': 'pcap.preserve.gate.allowed',
+                'request_id': directive['request_id']})
+        producer.send(capture_v2.TOPIC, directive).get(timeout=10)
+    except Exception as exc:
+        if directive:
+            _preserve_budget.finish(directive)
+        _audit({**event, 'action': 'pcap.preserve.gate.refused', 'reason': str(exc)})
+        producer.send(STATUS_TOPIC, {**event, 'kind': 'preserve', 'state': 'refused',
+                                    'armed': False, 'reason': str(exc)})
+
+
 _budget: dict = {}   # sensor_id -> {active_jobs, bytes_captured}
 
 
@@ -70,6 +102,24 @@ def object_key(tenant, fid, value, profile) -> str:
 
 
 def probe_health(sensor_id: str) -> dict:
+    # Optional administrator-owned health snapshot adapter. No health claims from
+    # the capture intent itself. Stale/malformed/missing readings fail closed for v2.
+    path = os.environ.get('PCAP_HEALTH_SNAPSHOT')
+    if path:
+        try:
+            with open(path) as source:
+                data = source.read(65537)
+            if len(data) > 65536:
+                raise ValueError('snapshot too large')
+            row = json.loads(data)[sensor_id]
+            age = time.time() - row['observed_at']
+            if (row.get('measured') is True and 0 <= age <= 30
+                    and row.get('tenant_id') == PRESERVE_POLICIES.get(sensor_id, {}).get('tenant_id')
+                    and all(type(row.get(k)) in (int, float) and 0 <= row[k] <= 100
+                            for k in ('packet_loss_pct', 'cpu_pct'))):
+                return row
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     # B-U8/R12: no real sensor-health signal is wired yet, so report state UNMEASURED rather than
     # fabricating a perfectly-healthy 0.0 (which made the gate treat every sensor as known-good).
     # `measured=False` lets consumers distinguish "unknown" from a real zero; the numeric fields keep
@@ -78,6 +128,9 @@ def probe_health(sensor_id: str) -> dict:
 
 
 def _handle_request(req, producer):
+    policy = PRESERVE_POLICIES.get(req.get('sensor_id'), {})
+    if policy.get('enabled') is True or req.get('mode') == 'preserve':
+        return _handle_preserve(req, producer, policy)
     sensor_id = req.get("sensor_id", "sensor-1")
     profile = req.get("capture_profile", "ip")
     value = req.get("value", "")
@@ -106,6 +159,10 @@ def _handle_completion(status):
     """Agent terminal status frees the central budget. Agent messages carry a
     'state'; the orchestrator's own decision status does not — so we only act on
     the agent's."""
+    if status.get('kind') == 'preserve':
+        if status.get('state') in ('completed', 'failed', 'rejected', 'refused', 'no_data'):
+            _preserve_budget.finish(status)
+        return
     state = status.get("state")
     if state not in ("completed", "failed", "rejected", "refused"):
         return
@@ -119,14 +176,14 @@ def _handle_completion(status):
 
 
 def main():
+    global _preserve_budget
+    if any(p.get('enabled') is True for p in PRESERVE_POLICIES.values()):
+        _preserve_budget = capture_v2.Budget(state_path=os.environ['PCAP_BUDGET_STATE'])
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    producer = KafkaProducer(bootstrap_servers=BOOTSTRAP,
-                             value_serializer=lambda v: json.dumps(v).encode())
-    consumer = KafkaConsumer(
-        REQUEST_TOPIC, STATUS_TOPIC, bootstrap_servers=BOOTSTRAP,
-        group_id="ndr-capture-orchestrator", auto_offset_reset="earliest",
-        enable_auto_commit=True, value_deserializer=lambda b: json.loads(b.decode()))
+    producer = ndr_runtime.make_producer()
+    consumer = ndr_runtime.make_consumer(
+        REQUEST_TOPIC, STATUS_TOPIC, group_id="ndr-capture-orchestrator", auto_offset_reset="earliest")
     log.info("capture-orchestrator up: %s + %s", REQUEST_TOPIC, STATUS_TOPIC)
 
     while _running:

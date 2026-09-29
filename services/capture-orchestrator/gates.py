@@ -71,3 +71,39 @@ def arm_command(profile: str, value: str) -> str:
 def disarm_command(profile: str, value: str) -> str:
     ds, typ = PROFILE_DATASET[profile]
     return f"dataset-remove {ds} {typ} {value}"
+
+
+def decide_preserve(request, policy, health, budget, now):
+    """Upgrade a v1 IP capture intent only under a local, explicit sensor policy.
+
+    The incoming request carries no authorization authority. Policy identity,
+    ceilings and the MAC are supplied here, never copied from caller fields.
+    """
+    import capture_v2
+    import hashlib
+    if (health.get('measured') is not True
+            or any(type(health.get(k)) not in (int, float) or not 0 <= health[k] <= 100
+                   for k in ('cpu_pct', 'packet_loss_pct'))):
+        raise PermissionError('sensor health unmeasured')
+    ok, reason = health_gate(health, {'max_loss_pct': policy['max_loss_pct'],
+                                     'max_cpu_pct': policy['max_cpu_pct']})
+    if not ok:
+        raise PermissionError(reason)
+    trigger = request.get('trigger_ts', now)
+    doc = {
+        'schema_version': 'capture-request.v2', 'mode': 'preserve',
+        'tenant_id': request.get('tenant_id'), 'sensor_id': request.get('sensor_id'),
+        'finding_id': request.get('finding_id'), 'capture_profile': request.get('capture_profile', 'ip'),
+        'value': request.get('value'), 'reason': 'finding capture intent',
+        'policy_id': policy.get('policy_id'),
+        'window': {'start': trigger - policy['lookback_s'], 'end': trigger},
+        'limits': {k: policy[k] for k in ('max_bytes', 'max_duration_s', 'retention_s')},
+        'expires_at': min(trigger + 300, now + 60),
+    }
+    # Stable for duplicate intents even if the orchestrator's receive time changes.
+    doc['request_id'] = hashlib.sha256(capture_v2.canonical([
+        doc['tenant_id'], doc['sensor_id'], doc['finding_id'], policy['policy_id']])).hexdigest()
+    capture_v2.authorize(doc, policy, now, verify=False)
+    doc['authorization'] = capture_v2.sign(doc, policy.get('signing_key'))
+    budget.reserve(doc, policy)
+    return doc

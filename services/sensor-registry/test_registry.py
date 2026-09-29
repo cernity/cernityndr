@@ -24,6 +24,7 @@ def _load(name, path):
 
 
 store_mod = _load("registry_store", Path(__file__).with_name("store.py"))
+enroll_mod = _load("registry_enrollment", Path(__file__).with_name("enrollment.py"))
 app = _load("registry_app", Path(__file__).with_name("app.py"))
 agent_mod = _load("sensor_health_agent", ROOT / "services/sensor-agent/agent.py")
 contract = _load("sensor_health_contract", ROOT / "contracts/test_sensor_health.py")
@@ -407,6 +408,95 @@ def test_ingest_loop_construction_failure_marks_not_ready():
     finally:
         app.ndr_runtime.make_consumer = orig
     assert metrics.is_ready() is False                          # never false-ready on a dead consumer
+
+
+# ── U3b: verified producer identity via §6.3 enrollment ─────────────────────
+
+class _PMsg:
+    """A message as the secure-bus/mTLS adapter would hand it to the consumer: the
+    payload PLUS a TRANSPORT-authenticated `principal` the adapter sets (MOCKED here,
+    since no live secure bus exists in the clone). Value goes through the real JSON
+    wire serde; principal does NOT — it is transport metadata the payload can't forge."""
+    __slots__ = ("value", "principal")
+
+    def __init__(self, record, principal):
+        self.value = json.loads(json.dumps(record).encode().decode())
+        self.principal = principal
+
+
+def _principal_consumer(pairs):
+    msgs = [_PMsg(r, p) for r, p in pairs]
+    return type("C", (), {"__iter__": lambda self: iter(msgs)})()
+
+
+def test_enrollment_verifies_only_exact_sensor_and_tenant():
+    e = enroll_mod.EnrollmentStore(":memory:")
+    e.enroll("spiffe://acme/edge-1", "s-1", "acme")
+    assert e.verifies("spiffe://acme/edge-1", "s-1", "acme") is True
+    assert e.verifies("spiffe://acme/edge-1", "s-2", "acme") is False    # wrong sensor
+    assert e.verifies("spiffe://acme/edge-1", "s-1", "other") is False   # wrong tenant
+    assert e.verifies("spiffe://unknown", "s-1", "acme") is False        # not enrolled
+    assert e.verifies(None, "s-1", "acme") is False                      # unauthenticated
+
+
+def test_enrolled_principal_marks_producer_verified():
+    reg = fresh()
+    e = enroll_mod.EnrollmentStore(":memory:")
+    record = real_heartbeat(tenant="acme")
+    e.enroll("spiffe://acme/edge-1", record["sensor_uuid"], "acme")      # §6.3 registration
+    app.ingest_loop(reg, consumer=_principal_consumer([(record, "spiffe://acme/edge-1")]), enrollment=e)
+    v = _view(reg, record)
+    assert v["producer_verified"] is True                                # authenticated == claimed
+    assert reg.get(record["sensor_uuid"], ["acme"]) is not None
+
+
+def test_claimed_vs_authenticated_principal_mismatch_rejected():
+    # A forged claimed-identity: the heartbeat CLAIMS victim's sensor_uuid but arrives
+    # on a DIFFERENT authenticated principal (enrolled for another sensor). The claim
+    # must be rejected — never registered — because identity is transport-derived, not
+    # taken from the payload.
+    reg = fresh()
+    e = enroll_mod.EnrollmentStore(":memory:")
+    victim = real_heartbeat(tenant="acme")
+    e.enroll("spiffe://acme/edge-1", victim["sensor_uuid"], "acme")
+    e.enroll("spiffe://acme/edge-2", "s-other", "acme")
+    app.ingest_loop(reg, consumer=_principal_consumer([(victim, "spiffe://acme/edge-2")]), enrollment=e)
+    assert reg.get(victim["sensor_uuid"], ["acme"]) is None              # spoofed claim not registered
+    assert reg.list_sensors(["acme"]) == []
+
+
+def test_unauthenticated_producer_cannot_register_inventory():
+    # No transport principal (the bus would not deliver one) -> cannot register, even
+    # though the payload claims an enrolled sensor. Payload identity confers no authority.
+    reg = fresh()
+    e = enroll_mod.EnrollmentStore(":memory:")
+    record = real_heartbeat(tenant="acme")
+    e.enroll("spiffe://acme/edge-1", record["sensor_uuid"], "acme")
+    app.ingest_loop(reg, consumer=_principal_consumer([(record, None)]), enrollment=e)
+    assert reg.list_sensors(["acme"]) == []
+
+
+def test_cross_tenant_enrollment_is_isolated():
+    # A principal enrolled for a sensor under tenant A cannot verify the SAME sensor_uuid
+    # claimed under tenant B: enrollment binds a tenant, so it grants no cross-tenant
+    # authority. The B claim is rejected even from an otherwise-valid principal.
+    reg = fresh()
+    e = enroll_mod.EnrollmentStore(":memory:")
+    uid = str(uuid.uuid4())
+    e.enroll("spiffe://a/edge-1", uid, "A")
+    claim_b = real_heartbeat(tenant="B", sensor_uuid=uid)
+    app.ingest_loop(reg, consumer=_principal_consumer([(claim_b, "spiffe://a/edge-1")]), enrollment=e)
+    assert reg.list_sensors(["B"]) == []                                 # A's enrollment ≠ authority in B
+
+
+def test_u3a_behavior_preserved_when_enrollment_not_wired():
+    # Keep U3a: with no enrollment plane wired (enrollment defaults None), heartbeats
+    # still ingest UNVERIFIED rather than being rejected for lack of a principal.
+    reg = fresh()
+    record = real_heartbeat(tenant="A")
+    app.ingest_loop(reg, consumer=_FakeConsumer([record]))
+    assert _view(reg, record)["producer_verified"] is False
+    assert reg.get(record["sensor_uuid"], ["A"]) is not None
 
 
 if __name__ == "__main__":

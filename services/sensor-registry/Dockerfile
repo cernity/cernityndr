@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libsnappy-d
 COPY services/sensor-registry/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/ndr_runtime.py shared/metrics.py ./
-COPY services/sensor-registry/store.py services/sensor-registry/app.py ./
+COPY services/sensor-registry/store.py services/sensor-registry/app.py services/sensor-registry/enrollment.py ./
 # test_registry.py spans services (loads the sensor-agent + contracts) so it runs
 # in the repo-wide CI gate (PYTHONPATH=shared pytest), not this single-service build.
 # SQLite lives on a mounted volume (KTD3) — no relational-DB overlay. Create /data

@@ -34,7 +34,35 @@ store = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(store)
 RegistryStore, sensor_view = store.RegistryStore, store.sensor_view
 
+_espec = importlib.util.spec_from_file_location(
+    "sensor_registry_enrollment", pathlib.Path(__file__).with_name("enrollment.py"))
+enrollment_mod = importlib.util.module_from_spec(_espec)
+_espec.loader.exec_module(enrollment_mod)
+EnrollmentStore = enrollment_mod.EnrollmentStore
+
 HEALTH_TOPIC = "ndr.sensor.health.v1"
+
+
+def _verify_producer(enrollment, principal, record):
+    """Decide producer_verified for one heartbeat from the TRANSPORT-authenticated
+    principal (never the payload). Returns:
+      * False  -> ingest UNVERIFIED (U3a path): no enrollment wired, so identity is
+                  not yet checkable — keep U3a's exact behavior.
+      * True   -> the authenticated principal is enrolled for exactly the sensor+
+                  tenant this heartbeat claims -> verified.
+      * None   -> REJECT: unauthenticated (no principal), or the principal's
+                  enrollment does not match the claimed sensor+tenant (a forged/
+                  mismatched claim). The caller drops+flags it — it never registers.
+    `principal` is a field the mTLS/bus adapter (U1b) populates on the message; in
+    this clone it is MOCKED there. We read the claimed identity from the payload only
+    to check it AGAINST the principal, never to trust it."""
+    if enrollment is None:
+        return False                                   # U3a: no verified-identity plane wired
+    if not principal:
+        return None                                    # unauthenticated -> cannot register inventory
+    claimed_uuid = record.get("sensor_uuid") if isinstance(record, dict) else None
+    claimed_tenant = record.get("tenant") if isinstance(record, dict) else None
+    return True if enrollment.verifies(principal, claimed_uuid, claimed_tenant) else None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -103,10 +131,17 @@ def _deserialize(raw):
         return None
 
 
-def ingest_loop(reg, consumer=None, log=None):
-    """Consume heartbeats and upsert them. The payload's identity is a CLAIM:
-    producer_verified stays False (U3b) — we never treat the Kafka key/headers as
-    verified identity.
+def ingest_loop(reg, consumer=None, log=None, enrollment=None):
+    """Consume heartbeats and upsert them.
+
+    Identity (U3b): with `enrollment` wired, each heartbeat is authenticated against
+    the TRANSPORT-authenticated producer principal the bus/mTLS adapter sets on the
+    message (`msg.principal` — MOCKED here; never a payload field). The principal
+    must be enrolled (§6.3) for exactly the sensor+tenant the payload claims to flip
+    producer_verified true; an unauthenticated producer or a claimed-vs-authenticated
+    mismatch is dropped+flagged and never registers. Without `enrollment` (U3a path),
+    every heartbeat ingests UNVERIFIED (producer_verified False) exactly as before —
+    we never treat the Kafka key/headers as verified identity.
 
     `consumer` is a seam: production passes None (a real KafkaConsumer is built with
     the tolerant _deserialize serde), tests inject one that yields msg.value already
@@ -144,10 +179,20 @@ def ingest_loop(reg, consumer=None, log=None):
                 if log:
                     log.warning("skipping undeserializable heartbeat")
                 continue
+            # Producer identity from the TRANSPORT, not the payload (U3b). None ->
+            # reject: unauthenticated or claimed-vs-authenticated mismatch. This is a
+            # bad-message-class skip (an identity failure, not a storage fault), so it
+            # is dropped+flagged, never surfaced as a crash.
+            verified = _verify_producer(enrollment, getattr(msg, "principal", None), msg.value)
+            if verified is None:
+                ndr_runtime.metrics.dropped("producer_identity")
+                if log:
+                    log.warning("rejecting heartbeat: unauthenticated or identity mismatch")
+                continue
             # No try/except here: a False return is a bad-message skip, but any
             # EXCEPTION is a storage failure that must surface (outer except), not be
             # discarded as if the heartbeat were garbage.
-            if not reg.upsert_heartbeat(msg.value, producer_verified=False):
+            if not reg.upsert_heartbeat(msg.value, producer_verified=verified):
                 ndr_runtime.metrics.dropped("malformed")
                 if log:
                     log.warning("dropping malformed heartbeat")
@@ -179,8 +224,15 @@ def main():
         target=lambda: ThreadingHTTPServer(("0.0.0.0", port), make_handler(reg, tokens, skew, stale)).serve_forever(),
         daemon=True).start()
     log.info("sensor-registry API on :%d", port)
+    # Verified producer identity (U3b) is behind a capability flag: only when an
+    # enrollment DB is configured do we authenticate producers against it. Unset ->
+    # enrollment=None -> U3a behavior (ingest UNVERIFIED). The live mTLS→principal
+    # binding is the operator's real-env step (U1b); here `msg.principal` comes from
+    # the bus adapter, not the payload.
+    enroll_path = os.environ.get("REGISTRY_ENROLLMENT_DB_PATH")
+    enrollment = EnrollmentStore(enroll_path) if enroll_path else None
     try:
-        ingest_loop(reg, log=log)
+        ingest_loop(reg, log=log, enrollment=enrollment)
     except Exception:
         os._exit(1)              # ponytail: rely on the container restart policy, not in-proc retry
 

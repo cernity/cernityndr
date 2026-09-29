@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "disposition.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "finding_id",
+    "entity",
+    "verdict",
+    "reason",
+    "analyst",
+    "ts",
+    "scope"
+  ],
+  "properties": {
+    "finding_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "ip",
+            "hostname",
+            "domain",
+            "asset"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "verdict": {
+      "enum": [
+        "true_positive",
+        "false_positive",
+        "benign",
+        "allowlist"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S"
+    },
+    "analyst": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "tenant": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}[Tt]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
+    },
+    "scope": {
+      "enum": [
+        "finding",
+        "entity",
+        "tenant"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "allowlist"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scope": {
+            "const": "entity"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    }
+  ]
+}

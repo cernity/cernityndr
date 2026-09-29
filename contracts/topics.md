@@ -114,3 +114,45 @@ Signed sensor-specific directives add defense in depth, but neither payload
 fields nor a MAC establish the original finding producer's transport identity.
 The signed command key is sensor-specific local administration configuration.
 All new runtime bus clients use the shared authenticated-client factories.
+
+## U9 analyst feedback
+
+`ndr.disposition.v1` is reserved for `disposition.v1`
+(`disposition.schema.json`); no existing topic binding collides. This is advisory
+feedback, never a finding or a detector suppression command.
+
+U9 consumes this contract at `POST /dispositions` in feedback-service (port
+8094), through authenticated HTTP sessions. Vantage is outside the bus trust
+boundary: it must not publish directly to the sensor/central bus. This skeleton
+has no Kafka consumer and does not treat Kafka headers/keys as authenticated
+analyst identity. A future bus adapter must preserve the authenticated ingress
+identity; reserving the topic does not claim a deployed bus pipeline.
+
+Server-owned `FEEDBACK_SESSIONS` maps opaque bearer session tokens to
+`emitter`, `analyst`, `tenant`, epoch `expires_at`, and `disposition_write: true`.
+Use a separate expiring session per analyst and tenant, provisioned by the trusted
+authentication system, never one shared Vantage token with caller-selected analyst
+headers. An empty map denies all writes. TLS termination and credential
+provisioning are deployment requirements. Body analyst/tenant/scope are claims,
+not grants: scope is reduced to finding (verdict) or exact entity (allowlist).
+All references are tenant-qualified; this skeleton does not resolve findings.
+
+Verdicts `true_positive` and `benign` route to `anomaly_ground_truth`,
+`false_positive` to `detector_fp_candidate`, and `allowlist` to `ignore_list`.
+Allowlist can have a null finding_id; all forms require an entity and reason.
+The durable SQLite feedback table is the skeleton's routed sink/outbox, with
+separate tenant/sink columns; downstream model/detector integrations are deferred.
+Each accepted record and its audit event commit atomically before HTTP 202.
+Mount a private persistent volume at `/data` (`FEEDBACK_DB` overrides the path).
+No read or approval API is exposed. Retries can create additional audited
+suggestions; delivery is not exactly-once. Do not feed these records directly
+into active suppression lists or train models automatically.
+
+Every suggestion has server-bound owner, justification, audit_id, capabilities,
+creation and expiration. `FEEDBACK_TTL_SECONDS` defaults to 86400 and is bounded
+to 30 days. Payload timestamps are provenance only and cannot extend expiration.
+All entries are `suggested`; there is no activation path. The isolated ignore-list
+evaluation seam additionally requires separate approval provenance, exact tenant
+and entity match, and an unexpired lifetime on every evaluation. Expiration is
+logical, not physical deletion of audit history. Live TLS/session provisioning,
+bus transport, downstream delivery and Vantage emission are not proven by U9.

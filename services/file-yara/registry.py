@@ -132,7 +132,7 @@ def _req_str(val, field, max_len, nonblank=True):
 # Matches contracts/yara_ruleset.schema.json $defs.datetime — created_at/promoted_at
 # must be RFC3339 so a supplied (or refresh-supplied) timestamp can't land a row that
 # fails the wire contract. _now() emits the trailing-Z form, which this accepts.
-_DATETIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
+_DATETIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?([Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
 
 
 def _req_datetime(val, field):

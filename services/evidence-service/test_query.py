@@ -53,6 +53,37 @@ def obs(tenant, entity, secs, obs_id, type_="conn", caps=("flow-only",), extra_e
     }
 
 
+def fobs(tenant, entity, secs, obs_id, sha256=None, sha1=None, md5=None, extra_entities=()):
+    """A canonical file-type observation.v1 record as the view's `observation` column
+    would hold it: entities carry the ip(s), hashes live in fields.file. Used to
+    exercise the file-observation pivot (by entity/time/hash/type + tenant isolation)."""
+    ts = (T0 + timedelta(seconds=secs)).isoformat().replace("+00:00", "Z")
+    entities = [{"type": "ip", "role": "src", "value": entity}]
+    entities += [{"type": "ip", "role": "dst", "value": e} for e in extra_entities]
+    file = {"state": "metadata_only", "first_seen": ts, "last_seen": ts, "mime": None,
+            "size": None, "filename": None, "transfer_ref": None, "session_ref": None,
+            "source_obs_ref": None, "file_artifact_id": None}
+    if any((sha256, sha1, md5)):
+        file["state"] = "hashes_only"
+        for alg, val in (("sha256", sha256), ("sha1", sha1), ("md5", md5)):
+            if val:
+                file[alg] = val
+    return {
+        "schema": "cernity.observation.v1",
+        "obs_id": f"obs:{obs_id:064x}",
+        "tenant": tenant,
+        "sensor_id": "s1",
+        "ts": {"sensor": ts, "normalized": ts, "ingested": ts,
+               "method": "clock-offset", "clock_offset_ms": 0.0},
+        "entities": entities,
+        "type": "file",
+        "fields": {"file": file},
+        "capabilities": [],
+        "source_ref": {"kind": "clickhouse-row", "table": "ndr.file_observation",
+                       "tenant": tenant, "obs_id": f"obs:{obs_id:064x}"},
+    }
+
+
 class _Result:
     def __init__(self, column_names, result_rows):
         self.column_names = column_names
@@ -88,6 +119,10 @@ class FakeCH:
                 continue
             if p.get("type") and o["type"] != p["type"]:        # type = {type}
                 continue
+            if p.get("fhash"):                                   # file-pivot hash filter
+                fj = (o.get("fields") or {}).get("file") or {}
+                if p["fhash"] not in (fj.get("sha256"), fj.get("sha1"), fj.get("md5")):
+                    continue
             matched.append((nt, o["obs_id"], o))
         matched.sort(key=lambda x: (x[0], x[1]))                # ORDER BY normalized_time, obs_id
         rows = [[o["obs_id"], nt, json.dumps(o)] for nt, _id, o in matched[:p["limit"]]]
@@ -245,6 +280,162 @@ def test_multi_tenant_grant_returns_all_granted_tenants():
     ch = FakeCH([obs("A", "e", 0, 1), obs("B", "e", 1, 2), obs("C", "e", 2, 3)])
     r = query.fetch_observations(ch, ["A", "C"], "e", T0, T0 + timedelta(hours=1))
     assert set(_ids(r)) == {obs("A", "e", 0, 1)["obs_id"], obs("C", "e", 2, 3)["obs_id"]}
+
+
+# ── file-observation pivot: entity/time/hash/type + tenant isolation ─────────
+
+def test_validate_type_accepts_file():
+    assert query.validate_type("file") == "file"
+
+
+def test_validate_hash_normalizes_and_rejects_malformed():
+    assert query.validate_hash(None) is None and query.validate_hash("") is None
+    assert query.validate_hash("A" * 64) == "a" * 64            # case-normalized
+    assert query.validate_hash("b" * 40) == "b" * 40            # sha1
+    assert query.validate_hash("c" * 32) == "c" * 32            # md5
+    for bad in ("a" * 63, "g" * 64, "xyz", "a" * 65):
+        try:
+            query.validate_hash(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_file_pivot_returns_file_observations_by_entity_and_time():
+    # A finding pivot: given the finding's ip + window, return its file observations.
+    ch = FakeCH([fobs("A", "10.0.0.5", 0, 1, sha256="a" * 64),
+                 fobs("A", "10.0.0.5", 30, 2),                  # metadata_only file
+                 obs("A", "10.0.0.5", 10, 3, type_="conn")])    # non-file: excluded by type=file
+    r = query.fetch_observations(ch, ["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                 obs_type="file")
+    assert _ids(r) == [fobs("A", "10.0.0.5", 0, 1)["obs_id"],
+                       fobs("A", "10.0.0.5", 30, 2)["obs_id"]]
+    assert all(o["type"] == "file" for o in r["observations"])
+
+
+def test_file_pivot_by_hash_matches_any_hash_slot():
+    ch = FakeCH([fobs("A", "10.0.0.5", 0, 1, sha256="a" * 64),
+                 fobs("A", "10.0.0.5", 1, 2, sha1="b" * 40),
+                 fobs("A", "10.0.0.5", 2, 3, md5="c" * 32),
+                 fobs("A", "10.0.0.5", 3, 4, sha256="d" * 64)])   # different hash
+    for h, want in (("a" * 64, 1), ("b" * 40, 2), ("c" * 32, 3)):
+        r = query.fetch_observations(ch, ["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                     obs_type="file", file_hash=h)
+        assert _ids(r) == [fobs("A", "10.0.0.5", 0, want)["obs_id"]]
+
+
+def test_file_pivot_tenant_isolation_on_shared_entity():
+    # Scenario 3: tenant-A reader never sees tenant-B file observations for a shared
+    # entity id (nor a shared file hash).
+    shared = "e" * 64
+    ch = FakeCH([fobs("A", "10.0.0.5", 0, 1, sha256=shared),
+                 fobs("B", "10.0.0.5", 0, 2, sha256=shared)])
+    a = query.fetch_observations(ch, ["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                 obs_type="file", file_hash=shared)
+    assert _ids(a) == [fobs("A", "10.0.0.5", 0, 1)["obs_id"]]     # only A's file observation
+    b = query.fetch_observations(ch, ["B"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                 obs_type="file", file_hash=shared)
+    assert _ids(b) == [fobs("B", "10.0.0.5", 0, 2)["obs_id"]]
+    assert set(_ids(a)) & set(_ids(b)) == set()
+
+
+def test_build_query_binds_hash_never_interpolates():
+    sql, params = query.build_query(["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                    "file", 50, file_hash="a" * 64)
+    assert "{fhash:String}" in sql and ("a" * 64) not in sql      # bound, not interpolated
+    assert params["fhash"] == "a" * 64
+    assert "fields', 'file', 'sha256'" in sql                     # matches across hash slots
+    # has([row-slots], {fhash}) — the row-dependent slots MUST be the array on the
+    # left, never the RHS of `IN` (ClickHouse requires a constant RHS there).
+    assert "has([JSONExtractString(observation" in sql
+    assert "{fhash:String} IN (" not in sql
+
+
+def _real_ch():
+    """A live ClickHouse client, or pytest.skip. FakeCH evaluates the hash filter in
+    Python and so cannot catch a malformed hash predicate (e.g. row-dependent
+    expressions on the RHS of `IN`); this reaches a real server so the actual SQL is
+    executed. Skips cleanly when the driver or a server isn't present (offline clone)."""
+    import os
+    pytest = __import__("pytest")
+    cc = pytest.importorskip("clickhouse_connect")
+    try:
+        client = cc.get_client(
+            host=os.environ.get("CLICKHOUSE_HOST", "clickhouse"),
+            username=os.environ.get("CLICKHOUSE_USER", "ndr"),
+            password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+            autogenerate_session_id=False)
+        client.command("SELECT 1")
+    except Exception as e:                       # noqa: BLE001 - any connect/auth failure => skip
+        pytest.skip(f"no live ClickHouse: {e}")
+    return client
+
+
+def test_real_clickhouse_hash_pivot_executes_matches_and_isolates_tenants():
+    """Regression for the hash predicate: run build_query's real SQL against a live
+    ClickHouse over a temp table mirroring the evidence view's projected columns.
+    Proves the hash filter (a) actually executes, (b) matches across hash slots and
+    excludes non-matching hashes, and (c) never crosses tenants on a shared hash."""
+    client = _real_ch()
+    table = "default.u1b_evidence_pivot_regression"
+    saved_view = query.VIEW
+    match_h, other_h = "a" * 64, "d" * 64
+    try:
+        client.command(f"DROP TABLE IF EXISTS {table}")
+        client.command(
+            f"CREATE TABLE {table} (tenant_id String, obs_id String, "
+            "normalized_time DateTime64(3,'UTC'), entity_values Array(String), "
+            "type String, observation String) ENGINE = Memory")
+        rows = [
+            fobs("A", "10.0.0.5", 0, 1, sha256=match_h),     # A: matches by sha256
+            fobs("A", "10.0.0.5", 1, 2, sha1=match_h),       # A: same value in the sha1 slot
+            fobs("A", "10.0.0.5", 2, 3, sha256=other_h),     # A: different hash -> excluded
+            fobs("B", "10.0.0.5", 3, 4, sha256=match_h),     # B: shared entity+hash -> must not leak
+        ]
+        client.insert(
+            table,
+            [[o["tenant"], o["obs_id"],
+              query._parse_ts(o["ts"]["normalized"]),
+              [e["value"] for e in o["entities"]],
+              o["type"], json.dumps(o)] for o in rows],
+            column_names=["tenant_id", "obs_id", "normalized_time",
+                          "entity_values", "type", "observation"])
+
+        query.VIEW = table
+        # (a)+(b): tenant A, matching hash -> exactly the two rows carrying it (any slot).
+        r = query.fetch_observations(client, ["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                     obs_type="file", file_hash=match_h)
+        assert sorted(_ids(r)) == sorted([fobs("A", "10.0.0.5", 0, 1)["obs_id"],
+                                          fobs("A", "10.0.0.5", 1, 2)["obs_id"]])
+        # non-matching hash -> no rows (predicate really ran, didn't error or match-all).
+        empty = query.fetch_observations(client, ["A"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                         obs_type="file", file_hash="f" * 64)
+        assert _ids(empty) == []
+        # (c): tenant B sees only its own row for the shared entity+hash; A never sees B's.
+        b = query.fetch_observations(client, ["B"], "10.0.0.5", T0, T0 + timedelta(hours=1),
+                                     obs_type="file", file_hash=match_h)
+        assert _ids(b) == [fobs("B", "10.0.0.5", 3, 4)["obs_id"]]
+        assert set(_ids(r)) & set(_ids(b)) == set()
+    finally:
+        query.VIEW = saved_view
+        try:
+            client.command(f"DROP TABLE IF EXISTS {table}")
+        except Exception:                        # noqa: BLE001 - best-effort cleanup
+            pass
+
+
+def test_http_file_pivot_flows_through_and_bad_hash_is_400():
+    ch = FakeCH([fobs("A", "10.0.0.5", 0, 1, sha256="a" * 64),
+                 fobs("B", "10.0.0.5", 0, 2, sha256="a" * 64)])
+    srv = _serve(ch, {"tokA": ["A"]})
+    try:
+        st, body = _get(srv, f"/observations?entity=10.0.0.5&type=file&hash={'A' * 64}&{WIN}",
+                        token="tokA")                             # uppercase hash normalized server-side
+        assert st == 200
+        assert [o["tenant"] for o in body["observations"]] == ["A"]   # no cross-tenant leak
+        assert _get(srv, f"/observations?entity=10.0.0.5&hash=nothex&{WIN}", token="tokA")[0] == 400
+    finally:
+        srv.shutdown()
 
 
 # ── unknown entity returns empty, not error ──────────────────────────────────
@@ -479,8 +670,13 @@ def test_audit_event_emitted_on_db_error():
 
 
 if __name__ == "__main__":
+    import pytest as _pytest                      # for the Skipped outcome the real-CH test may raise
     for _n, _f in sorted(globals().items()):
         if _n.startswith("test_") and callable(_f):
-            _f()
+            try:
+                _f()
+            except _pytest.skip.Exception as _e:
+                print(f"skip {_n}: {_e}")
+                continue
             print("ok  " + _n)
     print("\nall evidence-service tests passed")

@@ -20,7 +20,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 VIEW = "ndr.evidence_observations"
-OBS_TYPES = ("conn", "dns", "tls", "http")     # observation.v1 type enum (contracts/observation.schema.json)
+OBS_TYPES = ("conn", "dns", "tls", "http", "file")   # observation.v1 type enum (contracts/observation.schema.json)
 
 MAX_PAGE_SIZE = 1000
 DEFAULT_PAGE_SIZE = 500
@@ -31,6 +31,11 @@ MAX_WINDOW = timedelta(days=1)                  # oversize [from,to) is capped t
 # clean 400 rather than a surprise full scan. Covers ip / domain / asset:... ids and
 # IPv6 (colons). Mirrors reconstruct.safe_param.
 _ENTITY_RE = re.compile(r"^[A-Za-z0-9_.:%\-\[\]]{1,255}$")
+
+# The file-observation pivot's optional hash filter (finding -> file observations by
+# hash). md5/sha1/sha256 hex, bound as a param and shape-validated so a malformed hash
+# is a clean 400, never a surprise scan. Lower-cased to the form the producer stores.
+_HASH_RE = re.compile(r"^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$")
 
 
 def grants_for_token(tokens, auth_header):
@@ -90,7 +95,19 @@ def validate_type(obs_type):
     return obs_type
 
 
-def build_query(grants, entity, frm, until, obs_type, page_size, after=""):
+def validate_hash(file_hash):
+    """Optional file-content hash filter for the file-observation pivot. None when
+    unset; a malformed hash raises ValueError (-> 400). Case-normalized to the
+    lower-hex the producer stores. Matching a hash implicitly scopes to file rows."""
+    if file_hash in (None, ""):
+        return None
+    h = str(file_hash).lower()
+    if not _HASH_RE.match(h):
+        raise ValueError("hash must be a hex md5, sha1 or sha256")
+    return h
+
+
+def build_query(grants, entity, frm, until, obs_type, page_size, after="", file_hash=None):
     """Build the half-open [frm,until) query, tenant-scoped to the caller's grants,
     paged by a (normalized_time, obs_id) keyset cursor.
 
@@ -114,6 +131,18 @@ def build_query(grants, entity, frm, until, obs_type, page_size, after=""):
     if obs_type:
         where.append("type = {type:String}")
         params["type"] = obs_type
+    if file_hash is not None:
+        # File-observation pivot: match the file's content hash in any of its
+        # sha256/sha1/md5 slots. Only file rows carry fields.file, so this also
+        # scopes the result to file observations. Bound as a param, never interpolated.
+        # has(array, elem) tests per-row membership: the slots are row-dependent JSON
+        # extractions, so they must be built into an array on the LEFT of the test —
+        # the RHS of ClickHouse `IN` must be a constant set/subquery/table, not
+        # per-row expressions (https://clickhouse.com/docs/sql-reference/operators/in).
+        where.append("has([JSONExtractString(observation, 'fields', 'file', 'sha256'), "
+                     "JSONExtractString(observation, 'fields', 'file', 'sha1'), "
+                     "JSONExtractString(observation, 'fields', 'file', 'md5')], {fhash:String})")
+        params["fhash"] = file_hash
     sql = (f"SELECT obs_id, normalized_time, observation FROM {VIEW} "
            f"WHERE {' AND '.join(where)} "
            f"ORDER BY normalized_time, obs_id LIMIT {{limit:UInt32}}")
@@ -121,7 +150,7 @@ def build_query(grants, entity, frm, until, obs_type, page_size, after=""):
 
 
 def fetch_observations(client, grants, entity, frm, to, obs_type=None,
-                       page_size=DEFAULT_PAGE_SIZE, after=""):
+                       page_size=DEFAULT_PAGE_SIZE, after="", file_hash=None):
     """Serve one page of the evidence query and shape the result.
 
     Bounding is two-layered (§7.5), and continuation is a half-open keyset cursor so
@@ -133,7 +162,7 @@ def fetch_observations(client, grants, entity, frm, to, obs_type=None,
     None on the last page. `next_after=''` when resuming at a fresh window boundary.
     """
     capped = min(to, frm + MAX_WINDOW)
-    sql, params = build_query(grants, entity, frm, capped, obs_type, page_size, after)
+    sql, params = build_query(grants, entity, frm, capped, obs_type, page_size, after, file_hash)
     result = client.query(sql, parameters=params)
     rows = [dict(zip(result.column_names, r)) for r in result.result_rows]
 

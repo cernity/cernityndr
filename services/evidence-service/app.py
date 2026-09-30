@@ -112,6 +112,7 @@ class _Handler(BaseHTTPRequestHandler):
             entity = query.validate_entity(q.get("entity", [""])[0])
             frm, to = query.parse_window(q.get("from", [""])[0], q.get("to", [""])[0])
             obs_type = query.validate_type(q.get("type", [None])[0])
+            file_hash = query.validate_hash(q.get("hash", [None])[0])   # file-pivot filter; None when unset
             page_size = query.clamp_page_size(q.get("page_size", [None])[0])
             after = q.get("after", [""])[0]          # keyset continuation cursor (obs_id); bound as a param
         except ValueError as e:
@@ -119,7 +120,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(e), "request_id": request_id})
         try:
             result = query.fetch_observations(
-                self.client, grants, entity, frm, to, obs_type, page_size, after)
+                self.client, grants, entity, frm, to, obs_type, page_size, after, file_hash)
         except Exception:                            # noqa: BLE001 — any backend failure -> controlled 5xx
             # Diagnostics stay server-side; the client gets a generic message + the
             # request_id to correlate, never the ClickHouse error detail.

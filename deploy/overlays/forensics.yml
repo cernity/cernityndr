@@ -172,6 +172,9 @@ services:
       REDPANDA_BOOTSTRAP: ${REDPANDA_BOOTSTRAP:-redpanda:9092}
       NDR_TENANT: ${NDR_TENANT:-default}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-ndr}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?required}
       YARA_REGISTRY_DB: /var/lib/file-yara/registry.db
     # Persistent ruleset registry (promotions, drafts, retirements) under the
     # read-only root fs. The image chowns this dir to nobody, so the fresh volume

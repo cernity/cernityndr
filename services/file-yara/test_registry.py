@@ -494,42 +494,25 @@ def test_remote_draft_of_bundled_rule_does_not_suppress_baseline(tmp_path, monke
 
 
 # --- regression: refresh loop drops a retired final ruleset from later scans -------
-def test_refresh_once_clears_snapshot_when_all_rules_retired(tmp_path, monkeypatch):
+def test_refresh_once_sees_retirement(tmp_path, monkeypatch):
     import app
     reg = RulesetRegistry()
     monkeypatch.setattr(app, "_registry", reg)
-    # fake compile so the test needs no native yara lib; an empty source list is
-    # guarded before compile is reached, a non-empty one yields a sentinel snapshot.
-    monkeypatch.setattr(app.sc, "compile_rules", lambda srcs: ("compiled", tuple(srcs)))
-    cache = tmp_path / "cache"
-    empty_bundle = tmp_path / "none"
-    _ensure = rr.ensure_rules                                      # app.rr IS rr; capture before patch
-    monkeypatch.setattr(app.rr, "ensure_rules", lambda registry: _ensure(
-        registry, bundled_dir=str(empty_bundle), cache_dir=str(cache)))
-
     rid = reg.register_draft("only", "1", b"rule only { condition: true }", "operator")["id"]
     reg.promote(rid, "shadow", "secops-admin", ADMIN)
     reg.promote(rid, "active", "secops-admin", ADMIN)
-    app._compiled[0] = None
-    assert app._refresh_once() == 1                                # one eligible ruleset compiled
-    assert app._compiled[0] is not None
+    assert app._refresh_once() == 1                                # one eligible ruleset selected
+    assert len(reg.active_for_scan()) == 1
 
     reg.promote(rid, "retired", "secops-admin", ADMIN)             # retire the last ruleset
     assert app._refresh_once() == 0
-    assert app._compiled[0] is None                                # retired rule no longer live
+    assert reg.active_for_scan() == []  # retired rule no longer live
 
 
 # --- regression: periodic refresh re-stages remote rules (reviewer blocking) -----
 def _patch_refresh_env(app, reg, monkeypatch, tmp_path):
-    """Wire app._refresh_once to a real registry + isolated dirs, with a fake
-    compile so no native yara lib is needed. Returns nothing; caller sets _fetch."""
+    """Use a real registry; refresh stages remote bytes without compiling."""
     monkeypatch.setattr(app, "_registry", reg)
-    monkeypatch.setattr(app.sc, "compile_rules", lambda srcs: ("compiled", tuple(srcs)))
-    cache = tmp_path / "cache"
-    empty_bundle = tmp_path / "none"
-    _ensure = rr.ensure_rules
-    monkeypatch.setattr(app.rr, "ensure_rules", lambda registry: _ensure(
-        registry, bundled_dir=str(empty_bundle), cache_dir=str(cache)))
 
 
 def test_refresh_once_stages_changed_remote_content(tmp_path, monkeypatch):
@@ -542,7 +525,6 @@ def test_refresh_once_stages_changed_remote_content(tmp_path, monkeypatch):
 
     body = {"v": b"rule v1 { condition: true }"}
     monkeypatch.setattr(rr, "_fetch_remote", lambda url: body["v"])
-    app._compiled[0] = None
     app._refresh_once()
     drafts = reg.list_rulesets(status="draft")
     assert len(drafts) == 1
@@ -572,7 +554,6 @@ def test_refresh_once_recovers_from_initial_fetch_failure(tmp_path, monkeypatch)
     body = b"rule recovered { condition: true }"
     monkeypatch.setattr(rr, "_fetch_remote", lambda url: body if state["ok"] else None)
 
-    app._compiled[0] = None
     app._refresh_once()                                            # fetch fails -> no draft, no crash
     assert reg.list_rulesets(status="draft") == []
 

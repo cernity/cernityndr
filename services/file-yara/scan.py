@@ -1,6 +1,6 @@
 """file-yara scan logic (plan U6, Track A1). The pure decision and finding-
-shaping functions are testable without yara-python; the yara compile/scan
-wrappers import yara lazily so this module (and its pure tests) load without
+shaping functions are testable without yara-python; the isolated scan
+wrapper import yara lazily so this module (and its pure tests) load without
 the native library present.
 
 Catches novel malware by content: a YARA rule match on a carved file produces a
@@ -53,17 +53,43 @@ def finding_from_matches(event, matched_rules, tenant="default"):
     }
 
 
-def compile_rules(sources):
-    """Compile YARA rule files (list of paths). Imports yara lazily. Returns
-    None when there are no sources."""
+def scan_bytes(registry, data, *, pcap_evidence_id=None, limits=None):
+    """Scan each registry-selected active/shadow version in a bounded child.
+
+    Snapshot metadata in the parent; SQLite locks/connections are never used by
+    the child. A failed scan is an explicit error, never an empty successful scan.
+    """
     import yara
-    if not sources:
-        return None
-    return yara.compile(filepaths={f"r{i}": p for i, p in enumerate(sources)})
+    import workers
+    from registry import IntegrityError
+    results = []
+    if registry is None:
+        return results
+    for row in registry.active_for_scan():
+        result = {
+            "ruleset_id": row["id"], "ruleset_version": row["version"],
+            "ruleset_sha256": row["sha256"], "engine_version": yara.__version__,
+            "status": row["status"], "scanned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if pcap_evidence_id:
+            result["pcap_evidence_id"] = pcap_evidence_id
+        try:
+            source = registry.load_bytes(row["id"])
+        except (KeyError, IntegrityError):
+            result.update(scan_error="ruleset_integrity", matches=[])
+        else:
+            result.update(workers.run_scan(source, data, row, limits or workers.Limits()))
+        result["acted"] = (row["status"] == "active" and not result.get("scan_error")
+                           and bool(result["matches"]))
+        results.append(result)
+    return results
 
 
-def scan_bytes(compiled, data):
-    """Matched rule names for a blob; empty when no rules are loaded."""
-    if compiled is None:
-        return []
-    return [m.rule for m in compiled.match(data=data)]
+def finding_from_results(event, results, tenant="default"):
+    rules = sorted({m["rule"] for r in results if r["acted"] for m in r["matches"]})
+    finding = finding_from_matches(event, rules, tenant)
+    if finding:
+        finding["yara_results"] = results
+        finding["file_forensics"] = next((r["file_forensics"] for r in results
+                                           if r["acted"] and "file_forensics" in r), {})
+    return finding

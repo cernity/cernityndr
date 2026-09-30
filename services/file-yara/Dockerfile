@@ -7,10 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY services/file-yara/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY shared/ndr_runtime.py ./
-COPY services/file-yara/scan.py services/file-yara/rules_refresh.py services/file-yara/registry.py services/file-yara/fileforensics.py services/file-yara/app.py services/file-yara/test_scan.py services/file-yara/test_fileforensics.py ./
+COPY shared/ndr_runtime.py shared/object_keys.py ./
+COPY services/file-artifact/store.py ./artifact_store.py
+COPY contracts/observation.schema.json contracts/file_observation.schema.json ./
+COPY services/file-yara/workers.py services/file-yara/scan.py services/file-yara/rules_refresh.py services/file-yara/registry.py services/file-yara/fileforensics.py services/file-yara/app.py services/file-yara/test_fileforensics.py ./
 COPY services/file-yara/rules/ ./rules/
-RUN python test_scan.py && python test_fileforensics.py
+RUN python -c "import scan, workers" && python test_fileforensics.py
 # Persistent, service-writable registry store. A named volume mounts here at runtime
 # (deploy/overlays/forensics.yml) under the read-only root fs; created + chowned so
 # the fresh volume inherits nobody ownership on first mount.

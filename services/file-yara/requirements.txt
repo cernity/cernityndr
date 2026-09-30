@@ -5,3 +5,6 @@ zstandard
 boto3
 yara-python
 pefile
+
+clickhouse-connect
+jsonschema>=4.0

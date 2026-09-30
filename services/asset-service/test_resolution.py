@@ -849,8 +849,13 @@ def test_evidence_sql_orders_identity_table_and_migrates_is_deleted_defect2():
     # (b) carry an explicit upgrade migration adding is_deleted to pre-U7 asset_fact
     # tables, before the entity_timeline view that reads it. (A live fresh-DB apply is
     # an operational gate — no ClickHouse in the unit env — so this guards the script.)
-    sql = Path(__file__).resolve().parents[2].joinpath(
-        "deploy", "clickhouse", "init", "05-evidence.sql").read_text()
+    # Guards a repo file; skip when the repo layout isn't present (e.g. the flat /app
+    # container build-gate, where deploy/ isn't copied and parents[2] doesn't exist).
+    try:
+        sql = Path(__file__).resolve().parents[2].joinpath(
+            "deploy", "clickhouse", "init", "05-evidence.sql").read_text()
+    except (IndexError, FileNotFoundError, OSError):
+        return
     assert (sql.index("CREATE TABLE IF NOT EXISTS ndr.identity_observation")
             < sql.index("CREATE OR REPLACE VIEW ndr.evidence_observations"))
     alter = "ALTER TABLE ndr.asset_fact ADD COLUMN IF NOT EXISTS is_deleted"

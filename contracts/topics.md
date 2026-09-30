@@ -46,6 +46,25 @@ ndr.enrichment.request.v1
 ndr.enrichment.result.v1
 ```
 
+## File artifact plane (U2)
+
+```text
+ndr.file.extracted.v1     # capture-agent -> file-yara / file-artifact (carved-file announce)
+ndr.file.artifact.v1      # file-artifact -> file-observer (bytes_available linkage)
+```
+
+`ndr.file.extracted.v1` announces a carved file the capture-agent shipped to MinIO under
+a tenant-scoped STAGING key (`ndr-files/<tenant-segment>/incoming/<sha256>`). `file-artifact`
+validates those bytes (size, archive depth/member size, zip-slip) and, only on success,
+promotes them to the ACCEPTED key (`.../artifacts/<sha256>`), then publishes
+`ndr.file.artifact.v1` — the `bytes_available` linkage carrying `file_artifact_id`, the
+accepted `object_ref`, `sha256` and the server-derived `tenant_segment`. `file-observer`
+consumes it and emits the `bytes_available` file observation into `ndr.file_observation`,
+applying the linkage ONLY when its `tenant_segment` matches the observer's configured tenant
+(no cross-tenant linkage). Like the observer's other inputs, `ndr.file.artifact.v1` MUST be a
+broker `LogAppendTime` topic: the observer stops without committing on `CreateTime` records,
+which cannot establish ingest time.
+
 ## Sensor health telemetry
 
 ```text

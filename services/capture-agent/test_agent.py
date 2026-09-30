@@ -97,9 +97,44 @@ def test_should_ship_file():
 
 
 def test_file_extracted_event():
-    e = agent.file_extracted_event("sensor-1", "d" * 64, 500)
-    assert e["object_ref"] == f"{agent.FILES_BUCKET}/{'d' * 64}"
+    # U2: object_ref is now the tenant-scoped STAGING key
+    # (ndr-files/<tenant-segment>/incoming/<sha256>) — an untrusted producer upload the
+    # file-artifact gate validates and promotes, not the legacy collision-prone
+    # ndr-files/<sha256> nor a directly-servable artifact key.
+    sha = "d" * 64
+    e = agent.file_extracted_event("sensor-1", sha, 500, "acme")
+    assert e["object_ref"] == f"{agent.FILES_BUCKET}/{agent.tenant_segment('acme')}/incoming/{sha}"
     assert e["sensor_id"] == "sensor-1" and e["size"] == 500
+    assert e["state"] == "bytes_available" and e["tenant_id"] == "acme"
+
+
+def test_file_object_key_namespaces_by_tenant():
+    # U1a-class regression guard: identical carved bytes for two tenants must NOT
+    # collide on one object key.
+    sha = "e" * 64
+    ka = agent.file_object_key("acme", sha)
+    kb = agent.file_object_key("globex", sha)
+    assert ka != kb
+    assert ka == f"{agent.FILES_BUCKET}/{agent.tenant_segment('acme')}/incoming/{sha}"
+    # absent tenant -> documented default segment, never str(None)
+    kd = agent.file_object_key(None, sha)
+    assert kd == f"{agent.FILES_BUCKET}/{agent.DEFAULT_TENANT_SEGMENT}/incoming/{sha}"
+    assert "None" not in kd.split("/")
+
+
+def test_capture_key_is_accepted_by_file_yara_staging_discipline():
+    # capture-to-file-yara compatibility: the staging ref the agent produces must be
+    # accepted by the SHARED key discipline file-yara now validates with (object_keys.
+    # staging_sha), and its sha leaf recovered — no service-local regex drift. A legacy
+    # unnamespaced ref and an accepted-artifact key are both rejected.
+    import object_keys
+    sha = "f" * 64
+    ref = agent.file_object_key("acme", sha)
+    assert object_keys.staging_sha(ref, agent.FILES_BUCKET) == sha
+    assert object_keys.staging_sha(f"{agent.FILES_BUCKET}/{sha}", agent.FILES_BUCKET) is None
+    assert object_keys.staging_sha(
+        object_keys.accepted_key(agent.tenant_segment("acme"), sha, agent.FILES_BUCKET),
+        agent.FILES_BUCKET) is None
 
 
 # --- U2: look-back retrieval (edge rolling-packet buffer) ----------------------

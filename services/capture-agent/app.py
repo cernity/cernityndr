@@ -25,6 +25,7 @@ log = ndr_runtime.setup_logging("capture-agent")
 
 BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 SENSOR_ID = os.environ.get("SENSOR_ID", "sensor-1")
+TENANT = os.environ.get("NDR_TENANT", "default")   # this sensor's tenant; stamps carved-file keys (U2)
 SOCK = os.environ.get("SURICATA_SOCKET", "/var/run/suricata/suricata-command.socket")
 PCAP_DIR = os.environ.get("PCAP_DIR", "/var/log/suricata/ndr-capture")
 BUCKET = os.environ.get("PCAP_BUCKET", "ndr-pcap")
@@ -248,10 +249,14 @@ def _file_ship_loop(producer, s3):
             if not agent.should_ship_file(size, sha, _shipped_shas):
                 continue
             try:
-                s3.upload_file(p, agent.FILES_BUCKET, sha)
-                producer.send(FILE_TOPIC, agent.file_extracted_event(SENSOR_ID, sha, size))
+                # U2: tenant-scoped key (ndr-files/<tenant-segment>/<sha256>), not the
+                # legacy collision-prone ndr-files/<sha256>.
+                key = agent.file_object_key(TENANT, sha)
+                bucket, _, okey = key.partition("/")
+                s3.upload_file(p, bucket, okey)
+                producer.send(FILE_TOPIC, agent.file_extracted_event(SENSOR_ID, sha, size, TENANT))
                 _shipped_shas.add(sha)
-                log.info("FILE SHIPPED %s (%dB) -> %s/%s", name, size, agent.FILES_BUCKET, sha)
+                log.info("FILE SHIPPED %s (%dB) -> %s", name, size, key)
             except Exception as e:  # noqa: BLE001
                 log.error("file ship %s failed: %s", name, e)
         # Bound the dedup set to what is still on disk, so it cannot grow without

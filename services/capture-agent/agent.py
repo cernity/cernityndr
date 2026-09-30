@@ -14,6 +14,12 @@ import hashlib
 import os
 import re
 
+# Tenant-safe key discipline is shared with the file-artifact plane (U2). These
+# names were lifted verbatim into shared/object_keys.py; re-exported here so existing
+# callers (retrieve_pcap, tests) keep resolving agent.tenant_segment / agent._valid_key.
+import object_keys
+from object_keys import DEFAULT_TENANT_SEGMENT, tenant_segment
+
 # Same mapping the orchestrator uses (v2 §18.2). Kept local so the agent has no
 # import dependency on the orchestrator package.
 PROFILE_DATASET = {
@@ -54,15 +60,10 @@ def dataset_for(profile: str) -> tuple[str, str]:
     return PROFILE_DATASET[profile]
 
 
-_SAFE_KEY = re.compile(r"^[A-Za-z0-9._\-/]{1,256}$")
-
-
 def _valid_key(ref) -> bool:
-    """A MinIO object key we're willing to trust verbatim from a bus directive: safe
-    charset, bounded length, no path traversal, no absolute path. The directive comes
-    off the bus, so an untrusted/forged pcap_ref must not become an arbitrary key."""
-    return (isinstance(ref, str) and bool(_SAFE_KEY.match(ref))
-            and ".." not in ref and not ref.startswith("/"))
+    """See object_keys.valid_key — the shared bus-key trust rule (kept as a local
+    alias so retrieve_pcap and the tests read the same)."""
+    return object_keys.valid_key(ref)
 
 
 def _sanitize(s, default: str = "cap") -> str:
@@ -72,34 +73,13 @@ def _sanitize(s, default: str = "cap") -> str:
     return s or default
 
 
-# Absent/empty tenant -> this explicit, documented segment (never str(None) = 'None').
-# Kept in lock-step with capture-orchestrator's tenant_segment so the agent's computed
-# fallback lands in the same per-tenant namespace the orchestrator advertises.
-DEFAULT_TENANT_SEGMENT = "_no-tenant"
-
-
-def tenant_segment(tenant) -> str:
-    """Collision-free, path-safe tenant namespace for the object key. The FULL SHA-256
-    digest of the raw tenant id is the collision-free part, so distinct tenant ids
-    never map to the same segment and one tenant's PCAP can never overwrite another's.
-    The sanitized 32-char prefix is only a readable label and may collide; the full
-    digest (not a 48-bit truncation) is what guarantees distinctness. Kept in lock-step
-    with capture-orchestrator's tenant_segment. Absent/empty -> DEFAULT_TENANT_SEGMENT."""
-    if tenant is None or not str(tenant).strip():
-        return DEFAULT_TENANT_SEGMENT
-    raw = str(tenant)
-    safe = re.sub(r"[^A-Za-z0-9._\-]", "", raw).replace("..", "").strip(".")[:32] or "t"
-    return f"{safe}-{hashlib.sha256(raw.encode()).hexdigest()}"
-
-
+# tenant_segment + DEFAULT_TENANT_SEGMENT are imported from object_keys above and kept
+# in lock-step with capture-orchestrator's tenant_segment. The bucket-parameterized
+# namespace check is aliased to the PCAP bucket so pcap_key/retrieve_pcap read as before.
 def _in_tenant_namespace(ref: str, tseg: str) -> bool:
-    """Is a (syntactically safe) advertised key inside THIS directive's tenant
-    namespace, i.e. `ndr-pcap/<tseg>/...`? A legacy unnamespaced ref
-    (`ndr-pcap/f1-ip.pcap`) or another tenant's ref carries a different second
-    segment and fails this check — so an advertised reference off the bus can never
-    redirect an upload into a different tenant's space. `tseg` is collision-free
-    (sha-suffixed), so a match genuinely belongs to this tenant."""
-    return ref.startswith(f"ndr-pcap/{tseg}/")
+    """Is a (syntactically safe) advertised key inside THIS directive's tenant PCAP
+    namespace, i.e. `ndr-pcap/<tseg>/...`? See object_keys.in_tenant_namespace."""
+    return object_keys.in_tenant_namespace(ref, tseg, "ndr-pcap")
 
 
 def pcap_key(directive: dict) -> str:
@@ -251,10 +231,33 @@ def should_ship_file(size: int, sha256, seen) -> bool:
     return MIN_FILE_BYTES <= size <= MAX_FILE_BYTES
 
 
-def file_extracted_event(sensor_id: str, sha256: str, size: int, mime: str = "") -> dict:
-    """Shape an ndr.file.extracted.v1 announcement for file-yara."""
-    return {"sensor_id": sensor_id, "sha256": sha256, "size": size,
-            "mime": mime, "object_ref": f"{FILES_BUCKET}/{sha256}"}
+def file_object_key(tenant, sha256: str) -> str:
+    """Tenant-scoped STAGING MinIO key for a carved file (U2). The agent is an untrusted
+    producer: it uploads to `ndr-files/<tenant-segment>/incoming/<sha256>`, NOT the
+    servable artifact key. The file-artifact gate validates those bytes and promotes them
+    to `ndr-files/<tenant-segment>/artifacts/<sha256>`; retrieval serves only the accepted
+    namespace, so an unvalidated (e.g. zip-slip) upload can never be handed to a caller.
+
+    Re-key: the legacy key was `ndr-files/<sha256>` with NO tenant segment — a U1a-class
+    cross-tenant collision (two tenants carving identical bytes shared one object; a
+    forged sha could read/overwrite another tenant's file). Now tenant is the 2nd path
+    segment on both the staging and accepted keys.
+
+    Migration: existing legacy `ndr-files/<sha256>` objects are NOT tenant-scoped and
+    the file-artifact service refuses them (key_tenant_segment -> None). Re-key them
+    under the tenant that produced them, or let the bucket lifecycle expire them; do not
+    read them cross-tenant in the interim."""
+    return object_keys.staging_key(tenant, sha256, FILES_BUCKET)
+
+
+def file_extracted_event(sensor_id: str, sha256: str, size: int, tenant=None,
+                         mime: str = "") -> dict:
+    """Shape an ndr.file.extracted.v1 announcement (consumed by file-yara and, from
+    U2, file-artifact). object_ref is now tenant-scoped (see file_object_key); state
+    is bytes_available because the carved bytes were shipped to MinIO."""
+    return {"sensor_id": sensor_id, "sha256": sha256, "size": size, "mime": mime,
+            "tenant_id": tenant, "state": "bytes_available",
+            "object_ref": file_object_key(tenant, sha256)}
 
 
 # U6: an in-memory rolling PCAP ring fed by tcpdump, not a new packet engine.

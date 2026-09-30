@@ -13,12 +13,10 @@ import tempfile
 import threading
 import time
 
-from kafka import KafkaConsumer, KafkaProducer
-import boto3
-
 import fileforensics
 import scan as sc
 import rules_refresh as rr
+import registry as reg_mod
 
 log = ndr_runtime.setup_logging("file-yara")
 
@@ -27,10 +25,16 @@ ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
 TENANT = os.environ.get("NDR_TENANT", "default")
 MAX_BYTES = int(os.environ.get("MAX_SCAN_BYTES", "67108864"))     # 64 MiB
 REFRESH = float(os.environ.get("REFRESH_SECS", "21600"))          # 6h
+# Control-plane store for the ruleset lifecycle; must persist so promotions,
+# staged drafts, and retirements survive a restart (a :memory: default would
+# silently lose them). /var/lib/file-yara is a named volume owned by the service
+# user (nobody) — see the Dockerfile chown and deploy/overlays/forensics.yml.
+REGISTRY_DB = os.environ.get("YARA_REGISTRY_DB", "/var/lib/file-yara/registry.db")
 IN_TOPIC = "ndr.file.extracted.v1"
 OUT_TOPIC = "ndr.finding.candidate.v1"
 
 _compiled = [None]      # single-element holder, swapped by the refresh thread
+_registry = None        # RulesetRegistry, initialised in main()
 _running = True
 
 
@@ -39,20 +43,52 @@ def _stop(*_):
     _running = False
 
 
+def _stage_remote():
+    """Best-effort staging of REMOTE rulesets as DRAFTS for operator review. Runs on
+    EVERY refresh (not only at startup) so changed upstream content becomes a fresh
+    draft and an initial fetch that failed is retried on the next cycle. Idempotent
+    by content sha256 (refresh_to_registry dedups), so unchanged content re-fetched
+    is a no-op and nothing remote is ever auto-served — it reaches the scanner only
+    via an authorized promotion. A staging failure (remote down) is logged, never
+    raised: the compile below still runs off already-staged/promoted rules."""
+    try:
+        staged = rr.refresh_to_registry(_registry)
+        if staged:
+            log.info("staged %d new remote ruleset draft(s) for review", len(staged))
+    except Exception as e:
+        log.error("ruleset staging failed: %s; will retry next refresh", e)
+
+
+def _refresh_once():
+    """One refresh step, swapping the live compiled snapshot. First STAGES any new/
+    changed remote rules as drafts (see _stage_remote), then compiles ONLY the
+    bundled baseline + registry-promoted (active/shadow) rulesets; remote drafts
+    never enter the compile path until an authorized promotion. Returns the eligible
+    source count.
+
+    An EMPTY eligible set — e.g. the last active/shadow ruleset was retired —
+    CLEARS the snapshot: a retired ruleset must stop matching, not keep running off
+    the previously compiled copy. A compile/ensure ERROR is raised to the caller,
+    which keeps the last-good snapshot (a stale ruleset beats none)."""
+    _stage_remote()
+    srcs = rr.ensure_rules(_registry)
+    if not srcs:
+        if _compiled[0] is not None:
+            log.warning("no eligible yara rules; cleared compiled ruleset (scans now match nothing)")
+        _compiled[0] = None
+        return 0
+    _compiled[0] = sc.compile_rules(srcs)     # non-empty srcs -> never None
+    log.info("compiled %d yara rule file(s)", len(srcs))
+    return len(srcs)
+
+
 def _refresh_loop():
     while _running:
         try:
-            srcs = rr.ensure_rules()
-            compiled = sc.compile_rules(srcs)
-            if compiled is None:
-                # keep the last-good ruleset rather than swapping in an empty one
-                # (which would silently disable all scanning)
-                log.warning("no yara rules compiled (sources=%d); keeping previous ruleset", len(srcs))
-            else:
-                _compiled[0] = compiled
-                log.info("compiled %d yara rule file(s)", len(srcs))
+            _refresh_once()
         except Exception as e:
-            log.error("yara compile failed: %s", e)
+            # keep the last-good ruleset rather than swapping in an empty one
+            log.error("yara refresh failed: %s; keeping previous ruleset", e)
         for _ in range(int(REFRESH)):
             if not _running:
                 return
@@ -60,8 +96,19 @@ def _refresh_loop():
 
 
 def main():
+    global _registry
+    # Imported here, not at module load, so the registry/refresh logic is importable
+    # (and unit-testable) without kafka/boto3 or a running broker present.
+    from kafka import KafkaConsumer, KafkaProducer
+    import boto3
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    os.makedirs(os.path.dirname(REGISTRY_DB) or ".", exist_ok=True)
+    _registry = reg_mod.RulesetRegistry(REGISTRY_DB)
+    # Remote rules are staged as DRAFTS on every refresh cycle (_stage_remote inside
+    # _refresh_once), so the refresh thread below both stages and compiles — nothing
+    # remote is served until an authorized promotion. The bundled in-repo baseline is
+    # served directly by ensure_rules (and honors the registry lifecycle there).
     s3 = boto3.client("s3", endpoint_url=ENDPOINT,
                       aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"])

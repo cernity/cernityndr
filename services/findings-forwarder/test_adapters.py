@@ -179,3 +179,10 @@ if __name__ == "__main__":
         if callable(fn) and getattr(fn, "__name__", "").startswith("test_"):
             fn()
     print("ok test_adapters")
+
+
+def test_new_record_ids_do_not_collide_on_tenant_delimiters():
+    from adapters import ElasticsearchAdapter
+    one = {"schema": "investigation.v1", "tenant": "a:b", "investigation_id": "c"}
+    two = {"schema": "investigation.v1", "tenant": "a", "investigation_id": "b:c"}
+    assert ElasticsearchAdapter._doc_id(one) != ElasticsearchAdapter._doc_id(two)

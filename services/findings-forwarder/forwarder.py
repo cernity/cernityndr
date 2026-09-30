@@ -1,11 +1,13 @@
-"""Pure forward logic: hand findings to the sink adapter. Uses the adapter's
-emit_batch when available (efficient bulk delivery), else per-finding emit."""
+"""Project findings, investigations and verdicts into the existing sink batch path."""
 from datetime import datetime, timezone
+
+from adapters import export_record
 
 
 def handle_batch(findings, adapter):
     if not findings:
         return
+    findings = [export_record(record) for record in findings]
     if hasattr(adapter, "emit_batch"):
         adapter.emit_batch(findings)
     else:

@@ -179,3 +179,23 @@ def test_record_suppressed_writes_withheld_obligation_by_identity():
         assert len(rows) == 1                                          # idempotent by identity
         assert rows[0]["outcome"] == "suppressed" and rows[0]["dest"] == "(withheld)"
         assert rows[0]["finding_id"] == "lo" and rows[0]["revision"] == 1
+
+
+def test_legacy_ledger_and_dlq_remain_replayable(tmp_path):
+    from adapters import DurableLedger, _obl_key
+    row = {"tenant_id": "a", "finding_id": "f", "revision": 1,
+           "dest": "test", "outcome": "dead_lettered"}
+    path = tmp_path / "obligations-test.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    finding = {"tenant_id": "a", "finding_id": "f", "revision": 1}
+    (tmp_path / "dlq-test.jsonl").write_text(json.dumps({"finding": finding}) + "\n")
+    ledger = DurableLedger(str(path))
+    assert ledger.terminal(finding, "test") == "dead_lettered"
+    assert _obl_key("a", "f", 1, "test") == json.dumps(["a", "f", 1, "test"])
+    inner = FlakySink()
+    sink = DurableSink(inner, "test", dlq_dir=str(tmp_path))
+    sink.emit(finding)
+    assert inner.calls == 0
+    assert sink.replay() == (1, 0)
+    assert sink.compact_ledger() == 1
+    assert DurableLedger(str(path)).terminal(finding, "test") == "delivered"

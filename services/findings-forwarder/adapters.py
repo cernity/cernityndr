@@ -1,4 +1,4 @@
-"""Pluggable finding sinks. Select with CERNITY_SINK — a single name, or a
+"""Pluggable finding, investigation and verdict sinks. Select with CERNITY_SINK — a single name, or a
 comma-separated list to fan out to several SIEMs at once (failures isolated per
 sink). Each adapter exposes emit(finding) and emit_batch(findings); payload
 building is factored into pure helpers so formats are testable without a live SIEM.
@@ -54,15 +54,99 @@ DEDUP_MAX = int(os.environ.get("CERNITY_DEDUP_MAX", "100000"))
 def _live(findings):
     """Drop SUPPRESSED findings — they stay on the bus for correlation but must
     not reach the analyst plane."""
-    return [f for f in findings if f.get("state") != "SUPPRESSED"]
+    return [f for f in findings
+            if record_kind(f) != "finding" or f.get("state") != "SUPPRESSED"]
 
 
-def _obl_key(tenant, finding_id, revision, dest):
-    """Stable obligation identity: one TENANT's finding REVISION at one destination (§stage2, R02). A
-    replay of the same revision is the same obligation; a new revision, or the SAME id in a different
-    tenant, is a distinct one. tenant must be included or two tenants sharing a finding_id collapse to a
-    single delivery record."""
-    return json.dumps([tenant or "default", finding_id, revision, dest], sort_keys=True)
+def record_kind(record):
+    """Identify export records without confusing finding pivots with record identity."""
+    kind = record.get("record_kind")
+    if kind is None:
+        if record.get("schema") == "investigation.v1":
+            kind = "investigation"
+        elif "case_id" in record and ("verdict" in record or "finding_id" not in record):
+            kind = "verdict"
+        else:
+            kind = "finding"
+    if kind not in {"finding", "investigation", "verdict"}:
+        raise ValueError("unsupported export record kind")
+    return kind
+
+
+def export_record(record):
+    """Project native records onto U7 pivots, without mutating the source document.
+
+    Finding payloads retain their existing shape. New kinds require a tenant and
+    stable identity; missing identity must never silently deduplicate unrelated data.
+    Multiple finding links are emitted as multivalue CIM/ECS pivot fields.
+    """
+    kind = record_kind(record)
+    if kind == "finding":
+        return record
+    tenant = record.get("tenant") or record.get("tenant_id")
+    if not isinstance(tenant, str) or not tenant.strip():
+        raise ValueError("export record requires tenant")
+    if record.get("tenant_id") and record["tenant_id"] != tenant:
+        raise ValueError("conflicting export tenants")
+    out = dict(record, record_kind=kind, tenant_id=tenant)
+    id_field = "investigation_id" if kind == "investigation" else "case_id"
+    if not isinstance(out.get(id_field), str) or not out[id_field].strip():
+        raise ValueError("export record requires " + id_field)
+    if kind == "investigation":
+        links = record.get("trigger", {}).get("finding_ids", [])
+    else:
+        revision = record.get("verdict_revision")
+        if type(revision) is not int or revision < 0 or not record.get("verdict"):
+            raise ValueError("verdict requires verdict and nonnegative integer verdict_revision")
+        links = record.get("linked_findings", [])
+    if not isinstance(links, list) or any(not isinstance(link, str) or not link.strip() for link in links):
+        raise ValueError("finding links must be a list of nonempty strings")
+    if links:
+        out["finding_id"] = list(links)
+    return out
+
+
+def record_identity(record):
+    record = export_record(record)
+    kind = record_kind(record)
+    if kind == "investigation":
+        return kind, record["investigation_id"], None
+    if kind == "verdict":
+        return kind, [record["case_id"], record["verdict_revision"]], None
+    return kind, record.get("finding_id"), record.get("revision")
+
+
+def _obl_key(tenant, record_id, revision, dest, record_kind="finding"):
+    """Tenant/kind/identity/revision/destination obligation; legacy findings keep their key."""
+    parts = [tenant or "default", record_id, revision, dest]
+    if record_kind != "finding":
+        parts.insert(1, record_kind)
+    return json.dumps(parts, sort_keys=True)
+
+
+def _record_key(record, dest):
+    kind, identity, revision = record_identity(record)
+    tenant = record.get("tenant_id") if kind == "finding" else export_record(record)["tenant_id"]
+    return _obl_key(tenant, identity, revision, dest, kind)
+
+
+def _ledger_key(row):
+    return _obl_key(row.get("tenant_id"), row.get("record_id", row.get("finding_id")),
+                    row.get("revision"), row.get("dest"), row.get("record_kind", "finding"))
+
+
+def _ledger_fields(record):
+    kind, identity, revision = record_identity(record)
+    out = export_record(record)
+    fields = {"tenant_id": out.get("tenant_id"), "record_kind": kind,
+              "record_id": identity, "revision": revision}
+    if kind == "finding":
+        fields["finding_id"] = identity  # historical consumers and on-disk compatibility
+    return fields
+
+
+def _dlq_record(entry):
+    return entry.get("record", entry.get("finding"))
 
 
 def _ts_epoch(ts):
@@ -95,11 +179,11 @@ class DurableLedger:
                     except ValueError:
                         continue
                     if r.get("outcome"):
-                        self.outcome[_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest"))] = r["outcome"]
+                        self.outcome[_ledger_key(r)] = r["outcome"]
 
     def terminal(self, finding, dest):
-        """The recorded terminal outcome for this tenant's finding-revision at this destination, or None."""
-        return self.outcome.get(_obl_key(finding.get("tenant_id"), finding.get("finding_id"), finding.get("revision"), dest))
+        """The terminal outcome for this tenant/kind/record at this destination."""
+        return self.outcome.get(_record_key(finding, dest))
 
     def record(self, findings, dest, outcome, worker):
         if not findings:
@@ -107,11 +191,10 @@ class DurableLedger:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "a") as fh:
             for f in findings:
-                k = _obl_key(f.get("tenant_id"), f.get("finding_id"), f.get("revision"), dest)
+                k = _record_key(f, dest)
                 if k in self.outcome:                # already terminal: don't double-record
                     continue
-                fh.write(json.dumps({"tenant_id": f.get("tenant_id"), "finding_id": f.get("finding_id"),
-                                     "revision": f.get("revision"), "dest": dest, "outcome": outcome,
+                fh.write(json.dumps({**_ledger_fields(f), "dest": dest, "outcome": outcome,
                                      "worker": worker, "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
                 self.outcome[k] = outcome
             fh.flush()
@@ -126,9 +209,8 @@ class DurableLedger:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "a") as fh:
             for f in findings:
-                k = _obl_key(f.get("tenant_id"), f.get("finding_id"), f.get("revision"), dest)
-                fh.write(json.dumps({"tenant_id": f.get("tenant_id"), "finding_id": f.get("finding_id"),
-                                     "revision": f.get("revision"), "dest": dest, "outcome": outcome,
+                k = _record_key(f, dest)
+                fh.write(json.dumps({**_ledger_fields(f), "dest": dest, "outcome": outcome,
                                      "worker": worker, "note": note,
                                      "ts": datetime.now(timezone.utc).isoformat()}) + "\n")
                 self.outcome[k] = outcome
@@ -158,7 +240,7 @@ class DurableLedger:
                     r = json.loads(line)
                 except ValueError:
                     continue
-                latest[_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest"))] = r
+                latest[_ledger_key(r)] = r
         if retain_secs is not None:
             cutoff = datetime.now(timezone.utc).timestamp() - retain_secs
             latest = {k: r for k, r in latest.items() if _ts_epoch(r.get("ts")) >= cutoff}
@@ -169,21 +251,19 @@ class DurableLedger:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)                       # atomic swap
-        self.outcome = {_obl_key(r.get("tenant_id"), r.get("finding_id"), r.get("revision"), r.get("dest")): r["outcome"]
+        self.outcome = {_ledger_key(r): r["outcome"]
                         for r in latest.values() if r.get("outcome")}
         return len(latest)
 
 
 class DurableSink:
-    """Durable per-sink delivery (F07): wraps one sink adapter with retry + dead-letter
-    + idempotent admission. Each sink is INDEPENDENT — a finding already delivered here
-    is recorded (by finding_id) so a Kafka replay (offsets are committed only after
-    delivery) or a duplicate is never re-sent, and a sink outage retries with bounded
-    backoff, then dead-letters the batch to a file (never silently dropped). Because the
-    retry is per-sink, a partial multi-sink outage never re-delivers to the healthy sinks.
-    ponytail: the dedup set is in-memory (bounded FIFO); a stable finding_id (F13) makes an
-    idempotent sink like ES dedup across restarts on its own — add a persistent dedup only
-    if a non-idempotent sink needs cross-restart exactly-once."""
+    """Retry, dead-letter and deduplicate tenant-scoped record obligations per sink.
+
+    Finding revisions, investigation IDs and case/verdict revisions have disjoint
+    identities. The persistent ledger survives restart; each sink resolves only
+    its own obligations. Receiver delivery and ledger writes are not a distributed
+    transaction, so a crash between them can still replay an accepted request.
+    """
 
     def __init__(self, inner, name, dlq_dir=DLQ_DIR, retries=MAX_RETRIES,
                  backoff=BACKOFF_SECS, sleep=time.sleep, dedup_max=DEDUP_MAX, on_health=None, worker=None):
@@ -205,7 +285,10 @@ class DurableSink:
         os.makedirs(os.path.dirname(self._dlq_path) or ".", exist_ok=True)
         with open(self._dlq_path, "a") as fh:
             for f in findings:
-                fh.write(json.dumps({"sink": self.name, "error": str(err), "finding": f}) + "\n")
+                kind = record_kind(f)
+                payload_key = "finding" if kind == "finding" else "record"
+                fh.write(json.dumps({"sink": self.name, "error": str(err),
+                                     "record_kind": kind, payload_key: f}) + "\n")
             fh.flush()
             os.fsync(fh.fileno())               # B-U1: DLQ payload durable BEFORE the ledger records dead_lettered
         log.error("%s: dead-lettered %d finding(s) after %d retries: %s",
@@ -217,7 +300,13 @@ class DurableSink:
     def emit_batch(self, findings):
         # Skip obligations already terminal in the durable ledger (delivered or dead-lettered by this
         # or a prior process) — a replay never re-sends and is not re-counted (§stage2 restart-safe).
-        fresh = [f for f in findings if not self._ledger.terminal(f, self.name)]
+        fresh, seen = [], set()
+        for record in findings:
+            f = export_record(record)
+            key = _record_key(f, self.name)
+            if key not in seen and not self._ledger.terminal(f, self.name):
+                fresh.append(f)
+                seen.add(key)
         if not fresh:
             return
         # Per-item delivery contract (§handoff stage 2): the inner adapter RETURNS the findings that
@@ -272,8 +361,8 @@ class DurableSink:
             entries = [json.loads(x) for x in fh if x.strip()]
         replayed = failing = 0
         for e in entries:
-            f = e.get("finding")
-            if not f:
+            f = _dlq_record(e)
+            if not f or self._ledger.terminal(f, self.name) == "delivered":
                 continue
             try:
                 failed = self.inner.emit_batch([f]) or []
@@ -287,7 +376,7 @@ class DurableSink:
                 replayed += 1
         if replayed:                                     # keep only obligations still not delivered
             kept = [e for e in entries
-                    if self._ledger.terminal(e.get("finding", {}), self.name) != "delivered"]
+                    if self._ledger.terminal(_dlq_record(e) or {}, self.name) != "delivered"]
             with open(self._dlq_path, "w") as fh:
                 for e in kept:
                     fh.write(json.dumps(e) + "\n")
@@ -349,11 +438,13 @@ class ElasticsearchAdapter:
 
     @staticmethod
     def _doc(f):
+        f = dict(export_record(f))
         for k in ("first_seen", "last_seen"):
             v = f.get(k)
             if isinstance(v, str) and " " in v and "T" not in v:
                 f[k] = v.replace(" ", "T")
-        f["@timestamp"] = f.get("last_seen") or f.get("first_seen")
+        f["@timestamp"] = (f.get("last_seen") or f.get("first_seen")
+                           or f.get("window", {}).get("to") or f.get("updated"))
         return f
 
     @staticmethod
@@ -362,6 +453,10 @@ class ElasticsearchAdapter:
         and REVISION-scoped so an enriched update is retained as immutable evidence rather than
         overwriting the initial final (R03). A duplicate of the same revision keeps the same id (an
         idempotent overwrite); the scorer selects the latest revision per (tenant, finding_id)."""
+        if record_kind(d) != "finding":
+            # Namespaced hash avoids delimiter collisions and backend ID length limits.
+            import hashlib
+            return "cernity:" + hashlib.sha256(_record_key(d, "es").encode()).hexdigest()
         tenant = d.get("tenant_id") or "default"
         fid = d.get("finding_id")
         rev = d.get("revision")
@@ -412,7 +507,7 @@ class ElasticsearchAdapter:
             d = self._doc(f)
             # U7: carry the §18.4 stable pivot fields under ECS names alongside the full document,
             # so ES/OpenSearch analysts pivot on stable ECS fields without losing the rich finding.
-            doc = {**d, **mappings.to_ecs(f)}
+            doc = {**d, **mappings.to_ecs(d)}
             lines.append(json.dumps({"index": {"_index": idx, "_id": self._doc_id(d)}}))
             lines.append(json.dumps(doc))
         body = ("\n".join(lines) + "\n").encode()
@@ -464,7 +559,7 @@ class SplunkAdapter:
         # U7: merge the §18.4 stable pivot fields under Splunk CIM names into each event alongside the
         # full finding, so CIM-driven searches/dashboards pivot without losing the rich payload.
         return "".join(json.dumps({"event": {**f, **mappings.to_cim(f)}, "sourcetype": self.sourcetype})
-                       for f in findings).encode()
+                       for f in (export_record(r) for r in findings)).encode()
 
     def emit(self, finding):
         self.emit_batch([finding])

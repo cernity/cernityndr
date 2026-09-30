@@ -9,6 +9,7 @@ COPY shared/ndr_runtime.py shared/metrics.py ./
 # COPY every module the service owns so the image is complete (not a PYTHONPATH shortcut).
 COPY services/threat-intel/ti.py services/threat-intel/app.py services/threat-intel/test_ti.py ./
 COPY services/threat-intel/store.py services/threat-intel/lifecycle.py services/threat-intel/feeds.py services/threat-intel/test_lifecycle.py ./
+COPY services/file-threat/filematch.py ./
 RUN python test_ti.py && python test_lifecycle.py
 USER nobody
 ENTRYPOINT ["python", "app.py"]

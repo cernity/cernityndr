@@ -1,4 +1,9 @@
-"""Tenant-qualified SQLite checkpoints; hits and page progress commit together."""
+"""Tenant-qualified SQLite checkpoints; hits and page progress commit together.
+
+Hash hits from file observations use the same opaque hit identity and JSON record
+as other dimensions, retaining observed_at and intel_known_at across restarts.
+The evidence view already includes file rows, so there is one cursor per hunt.
+"""
 import json
 import sqlite3
 import threading

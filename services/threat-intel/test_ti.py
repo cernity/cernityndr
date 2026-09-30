@@ -81,6 +81,7 @@ import lifecycle
 
 
 CASES = [
+    ("hash", "a"*64, {"event_type": "fileinfo", "fileinfo": {"sha256": "a"*64, "state": "CLOSED", "gaps": False}}, "fileinfo.sha256"),
     ("ip", "2001:db8::1", {"src_ip": "2001:0db8:0:0:0:0:0:1"}, "src_ip"),
     ("ip", "1.2.3.4", {"dest_ip": "1.2.3.4"}, "dest_ip"),
     ("domain", "bad.example", {"tls": {"sni": "BAD.EXAMPLE"}}, "tls.sni"),
@@ -241,10 +242,10 @@ def test_live_consumer_topics_and_candidate_emission():
              patch.object(app.ndr_runtime, "make_consumer", return_value=consumer) as make_consumer:
             app.main()
         assert set(make_consumer.call_args.args) == {
-            "suricata.flow.v1", "suricata.tls.v1", "suricata.dns.v1", "suricata.http.v1"}
+            "suricata.flow.v1", "suricata.tls.v1", "suricata.dns.v1", "suricata.http.v1", "suricata.file.v1"}
         assert len(producer.sent) == len(CASES)
         assert {c["intel_match"]["type"] for _, c in producer.sent} == {
-            "ip", "domain", "url", "ja3", "ja4", "cert"}
+            "ip", "domain", "url", "ja3", "ja4", "cert", "hash"}
         assert all(c["intel_match"]["provenance"] for _, c in producer.sent)
     finally:
         app._intel["store"] = old_store
@@ -259,6 +260,72 @@ def test_multiple_dimensions_are_not_reduced_to_first_hit():
     hits = ti.match({"dest_ip": "1.2.3.4", "tls": {"sni": "bad.example", "ja3": "abc"}},
                     store, "t1", NOW)
     assert {h["type"] for h in hits} == {"ip", "domain", "ja3"}
+
+
+def test_hash_lifecycle_and_single_finding_across_feeds():
+    import app
+    import feeds
+    from unittest.mock import patch
+    digest = ti.filematch.EICAR_SHA256
+    store = IntelStore()
+    conn = app._build_connector(feeds, ti.filematch.malware_feed_spec())
+    lifecycle.ingest(store, conn.records(digest, "t1", NOW), NOW)
+    event = {"event_type": "fileinfo", "src_ip": "10.0.0.1", "dest_ip": "192.0.2.1",
+             "fileinfo": {"sha256": digest, "state": "CLOSED", "gaps": False}}
+    with patch.dict(app._intel, store=store), patch.object(app, "TENANT", "t1"):
+        app._seen.clear()
+        producer = Producer()
+        app.process_observation(event, producer, NOW)
+        lifecycle.ingest(store, [rec(digest, "hash", 80, 1, "other")], NOW)
+        app.process_observation(event, producer, NOW)
+        assert len(producer.sent) == 1
+        app._seen.clear()
+        producer = Producer()
+        app.process_observation(event, producer, NOW)
+        hit = producer.sent[0][1]["intel_match"]
+        assert hit["type"] == "hash" and len(hit["provenance"]) == 2
+        assert producer.sent[0][1]["category"] == "malware"
+        assert hit["source"] and hit["feed"] and hit["expiry"] and hit["tlp"]
+        store.suppress("t1", "hash", digest, "owner", "test", NOW + 100, NOW)
+        app.process_observation(event, producer, NOW)
+        assert len(producer.sent) == 1
+        match_events = [entry for entry in store.audit_log(["t1"])
+                        if entry["action"] == "intel.match"]
+        assert len(match_events) == 1
+        assert match_events[0]["intel_match"]["suppressed"]
+        app.process_observation(dict(event, tenant="t2"), producer, NOW + 100)
+        app.process_observation(event, producer, lifecycle.epoch(FUTURE))
+        assert len(producer.sent) == 1
+        app._seen.clear()
+
+
+def test_file_states_and_all_hash_algorithms():
+    digest = ti.filematch.EICAR_SHA256
+    for alg, value in (("sha256", digest), ("sha1", "a"*40), ("md5", "b"*32)):
+        store = IntelStore()
+        lifecycle.ingest(store, [rec(value, "hash", 80, 1, "f")], NOW)
+        for state in ("hashes_only", "bytes_available", "metadata_only"):
+            event = {"type": "file", "tenant": "t1", "fields": {"file": {"state": state, alg: value}}}
+            assert len(ti.match(event, store, "t1", NOW)) == (state != "metadata_only")
+            assert ti.match(event, store, "t2", NOW) == []
+        raw = {"fileinfo": {"sha256": digest, alg: value, "state": "CLOSED", "gaps": False}}
+        assert len(ti.match(raw, store, "t1", NOW)) == 1
+        for patch in ({"state": "TRUNCATED"}, {"gaps": True}, {"start": 1}, {"gaps": None}):
+            assert ti.match({"fileinfo": {**raw["fileinfo"], **patch}}, store, "t1", NOW) == []
+
+
+def test_init_registers_managed_malware_feed():
+    import app
+    from unittest.mock import patch
+    old = dict(app._intel)
+    try:
+        with patch.object(app, "INTEL_DB", ":memory:"), patch.object(app, "INTEL_FEEDS", ""), patch.object(app, "TENANT", "t1"):
+            app._init_intel()
+            assert [c.feed for c in app._intel["connectors"]] == ["malwarebazaar"]
+            assert app._intel["store"].get("t1", "hash", ti.filematch.EICAR_SHA256)
+    finally:
+        app._intel.update(old)
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

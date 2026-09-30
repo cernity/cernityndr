@@ -394,6 +394,7 @@ class AbuseChConnector(HttpConnector):
     default_score = 90.0   # abuse.ch confirmed-malicious lists are high-confidence
 
     _PARSE = {
+        "malwarebazaar": (ti.filematch.parse_malware_hashes, "hash"),
         "feodo": (ti.parse_feodo, "ip"),
         "sslbl_cert": (ti.parse_hash_csv, "cert"),
         "sslbl_ja3": (ti.parse_hash_csv, "ja3"),

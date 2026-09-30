@@ -4,6 +4,39 @@ Legacy feed parsing and static matching remain available when INTEL_DB is unset.
 from __future__ import annotations
 import re
 
+# Same import bridge as file-observer: one completeness implementation.
+try:
+    import filematch
+except ModuleNotFoundError:
+    import importlib.util
+    from pathlib import Path
+    _spec = importlib.util.spec_from_file_location(
+        "ti_filematch", Path(__file__).resolve().parents[1] / "file-threat/filematch.py")
+    filematch = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(filematch)
+
+
+def hash_dimensions(event):
+    """Canonical states attest completeness at ingress via hash_is_complete.
+
+    Raw EVE must prove completeness itself. Never treat a record hash as file content.
+    """
+    if event.get("type") == "file":
+        fi = event.get("fields", {}).get("file", {})
+        if fi.get("state") not in ("hashes_only", "bytes_available"):
+            return
+        prefix = "file."
+    else:
+        fi = event.get("fileinfo")
+        if not isinstance(fi, dict) or not filematch.hash_is_complete(fi):
+            return
+        prefix = "fileinfo."
+    for alg, length in (("sha256", 64), ("sha1", 40), ("md5", 32)):
+        raw = fi.get(alg)
+        if isinstance(raw, str) and re.fullmatch(r"[a-fA-F0-9]{%d}" % length, raw):
+            yield "hash", prefix + alg, raw
+
+
 _IP = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _HEX = re.compile(r"^[0-9a-f]{32,64}$")
 
@@ -84,6 +117,7 @@ def match_server_fp(ja3s: str, ja4s: str, jarm: str, fp_bl: set) -> tuple[bool, 
 
 def dimensions(eve: dict):
     """Yield only supplied EVE values; never infer a URL scheme or a file hash."""
+    yield from hash_dimensions(eve)
     from urllib.parse import urlsplit
 
     def obj(value):
@@ -158,7 +192,7 @@ def match(eve: dict, store, tenant: str, now: float) -> list[dict]:
             except ValueError:
                 pass
         for record in records:
-            key = (kind, record["indicator"], field, normalized)
+            key = (kind, record["indicator"]) if kind == "hash" else (kind, record["indicator"], field, normalized)
             if key in seen:
                 continue
             seen.add(key)

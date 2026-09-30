@@ -14,7 +14,7 @@ SCHEMA = json.loads((HERE / "finding.schema.json").read_text())
 VALIDATOR = Draft202012Validator(SCHEMA)
 
 
-def candidate():
+def candidate(hash_match=False):
     # Load under a unique name: multiple services own an app.py in this repository.
     sys.path.insert(0, str(SERVICE))
     try:
@@ -25,13 +25,18 @@ def candidate():
         import lifecycle
         store = IntelStore()
         app._intel["store"], app.TENANT = store, "contract-tenant"
-        lifecycle.ingest(store, [rec("bad.example", "domain", 80, 0.9, "feed",
+        indicator, kind = ("a" * 64, "hash") if hash_match else ("bad.example", "domain")
+        lifecycle.ingest(store, [rec(indicator, kind, 80, 0.9, "feed",
                                      tenant=app.TENANT)], NOW)
         sent = []
         class Producer:
             def send(self, topic, value):
                 sent.append(value)
-        app.process_observation({"tls": {"sni": "bad.example"}}, Producer(), NOW)
+        if hash_match:
+            lifecycle.ingest(store, [rec(indicator, kind, 70, 0.8, "second", tenant=app.TENANT)], NOW)
+        event = {"type": "file", "fields": {"file": {"state": "hashes_only", "sha256": indicator}}} if hash_match else {"tls": {"sni": "bad.example"}}
+        app.process_observation(event, Producer(), NOW)
+        assert len(sent) == 1
         return sent[0]
     finally:
         sys.path.pop(0)
@@ -54,7 +59,7 @@ def test_match_requires_evidence_metadata(field):
 
 
 @pytest.mark.parametrize("patch", [
-    {"type": "hash"}, {"type": "invented"}, {"indicator": ""},
+    {"type": "invented"}, {"indicator": ""},
     {"score": 101}, {"score": -1}, {"source_trust": 2}, {"source_trust": -1},
     {"tlp": "unknown"}, {"provenance": []}, {"suppressed": "false"},
     {"observed_field": ""}, {"observed_value": ""}, {"extra": True},
@@ -77,3 +82,16 @@ def test_legacy_candidate_still_valid():
     doc = candidate()
     del doc["intel_match"]
     VALIDATOR.validate(doc)
+
+
+def test_hash_candidate_dedup_and_finding_lifecycle():
+    doc = candidate(hash_match=True)
+    VALIDATOR.validate(doc)
+    assert len(doc["intel_match"]["provenance"]) == 2
+    spec = importlib.util.spec_from_file_location("u5_finding_state", SERVICE.parent / "finding-service/state_machine.py")
+    state = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(state)
+    finding, route = state.build_finding(doc)
+    assert route == "final_and_capture"
+    assert finding["intel_match"] == doc["intel_match"]
+    VALIDATOR.validate(finding)

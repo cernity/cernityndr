@@ -99,7 +99,7 @@ def test_empty_days_continue_and_empty_is_success():
         assert result["status"] == status and result["hits"] == []
 
 
-@pytest.mark.parametrize("kind,value", [("hash", "f"*64), ("url", "https://example.test/path")])
+@pytest.mark.parametrize("kind,value", [("url", "https://example.test/path")])
 def test_deferred(kind, value):
     evidence = Evidence([obs()])
     result = hunt.HuntWorker(evidence, Store()).step(job(kind, value), "a")
@@ -221,7 +221,7 @@ def test_mixed_unsupported_and_no_matching_observation():
                                    "intel_known_at": "2026-09-01T12:00:00Z"})
     result = hunt.HuntWorker(Evidence([obs()]), Store()).step(request, "a")
     assert result["hits"] == [] and result["status"] == "complete"
-    assert result["unsupported"][0]["type"] == "hash"
+    assert result["unsupported"] == []
 
 
 def test_restart_pending_and_backend_failure(tmp_path):
@@ -265,3 +265,33 @@ def test_window_and_cursor_bounds():
     with pytest.raises(ValueError, match="cursor"):
         worker.step(job(), "a")
     assert worker.store.results("a", "h1")["hits"] == []
+
+
+@pytest.mark.parametrize("state", ["hashes_only", "bytes_available", "metadata_only"])
+def test_hash_history_dual_dates_and_restart(tmp_path, state):
+    digest = "a" * 64
+    row = {**obs(fields={"file": {"state": state, "sha256": digest}}), "type": "file"}
+    row["source_ref"]["table"] = "ndr.file_observation"
+    other = {**row, "tenant": "b", "obs_id": "other"}
+    path = str(tmp_path / "hash.db")
+    request = job("hash", digest)
+    result = hunt.HuntWorker(Evidence([row, row, other]), Store(path)).step(request, "a")
+    assert len(result["hits"]) == (state != "metadata_only")
+    if result["hits"]:
+        hit = result["hits"][0]
+        assert hit["observed_at"] < hit["intel_known_at"]
+        assert hit["learned_after_observation"] and hit["matched_fields"] == ["file.sha256"]
+        assert hit["source_ref"]["table"] == "ndr.file_observation"
+    assert hunt.HuntWorker(Evidence(), Store(path)).step(request, "a") == result
+
+
+def test_real_evidence_adapter_reads_file_union():
+    # U1a's existing view is the hunt source; its file arm must remain present.
+    sql = (HERE.parents[1] / "deploy/clickhouse/init/06-file-observation.sql").read_text()
+    assert "FROM ndr.file_observation WHERE observation != ''" in sql
+    class Client:
+        def query(self, sql, parameters):
+            assert "FROM ndr.evidence_observations" in sql
+            assert parameters["tenants"] == ["a"]
+            return type("Result", (), {"column_names": [], "result_rows": []})()
+    assert hunt.EvidenceClient(Client()).page("a", job()["from"], job()["to"], 1, "")["observations"] == []

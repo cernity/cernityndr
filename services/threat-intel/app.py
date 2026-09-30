@@ -1,5 +1,5 @@
 """Threat-intel detector: U2 live U1-store matching, with legacy static fallback
-only when INTEL_DB is unset. Consumes flow/TLS/DNS/HTTP EVE telemetry and emits
+only when INTEL_DB is unset. Consumes flow/TLS/DNS/HTTP/file EVE telemetry and emits
 ndr.finding.candidate.v1. Suppressed and red hits remain in the local intel audit.
 """
 import json
@@ -101,9 +101,15 @@ def _init_intel():
         with open(raw) as fh:
             raw = fh.read()
     specs = json.loads(raw) if raw.strip() else []
+    if not any(s.get("variant") == "malwarebazaar" for s in specs):
+        specs.append(ti.filematch.malware_feed_spec(os.environ.get("MALWAREBAZAAR_FEED", ti.filematch.MALWAREBAZAAR_URL)))
     _intel["store"] = mod.IntelStore(INTEL_DB)
     _intel["connectors"] = [_build_connector(feeds, s) for s in specs]
     _intel["lifecycle"] = lifecycle
+    local = feeds.HttpConnector(feed="operator-file-hashes", source="operator", source_trust=1, tlp="green")
+    payload = "\n".join([ti.filematch.EICAR_SHA256, *os.environ.get("NDR_MALWARE_HASHES", "").split(",")])
+    now = time.time()
+    lifecycle.ingest(_intel["store"], local.records(payload, TENANT, now), now)
     log.info("managed intel lifecycle: %d feed(s) -> %s", len(_intel["connectors"]), INTEL_DB)
 
 
@@ -187,8 +193,12 @@ def _managed_matches(e, producer, now):
         identity = json.dumps([TENANT, e.get("src_ip"), e.get("dest_ip"),
                                {k: v for k, v in hit.items() if k != "suppressed"},
                                int(now // 3600)], sort_keys=True)
+        if hit["type"] == "hash":
+            identity = json.dumps([TENANT, e.get("src_ip"), e.get("dest_ip"),
+                                   "hash", hit["indicator"], int(now // 3600)])
         key = hashlib.sha256(identity.encode()).hexdigest()
-        if key in _seen and _seen[key] == hit["suppressed"]:
+        policy = (hit["suppressed"], lifecycle.is_exportable(hit))
+        if key in _seen and _seen[key] == policy:
             continue
         if hit["suppressed"] or not lifecycle.is_exportable(hit):
             _intel["store"].record_match(TENANT, hit, e, now)
@@ -199,19 +209,32 @@ def _managed_matches(e, producer, now):
                                    extra + join_key_entities(e))
             candidate["finding_id"] = "ti-" + key
             candidate["intel_match"] = hit
+            if hit["type"] == "hash":
+                candidate["category"] = "malware"
+                if e.get("obs_id"):
+                    candidate["evidence_refs"] = [e["obs_id"]]
+                if e.get("sensor_id"):
+                    candidate["sensor_ids"] = [e["sensor_id"]]
+
             # Preserve the U1 score, and use trust to weight candidate confidence.
             candidate["confidence"] = hit["score"] / 100 * hit["source_trust"]
             candidate["severity"] = max(1, min(10, int(hit["score"] / 10)))
             producer.send("ndr.finding.candidate.v1", candidate)
         _seen.pop(key, None)
         _seen_once(key)
-        _seen[key] = hit["suppressed"]
+        _seen[key] = policy
 
 
 def process_observation(e, producer, now=None):
     now = time.time() if now is None else now
     if any(e.get(k) is not None and e[k] != TENANT for k in ("tenant", "tenant_id")):
         return
+    if e.get("type") == "file":
+        # Preserve the envelope for hash completeness and exact evidence identity.
+        e = dict(e)
+        for entity in e.get("entities", []):
+            if entity.get("type") == "ip" and entity.get("role") in ("src", "dst"):
+                e["src_ip" if entity["role"] == "src" else "dest_ip"] = entity["value"]
     if _intel["store"] is not None:
         _managed_matches(e, producer, now)
         return
@@ -246,7 +269,7 @@ def main():
     refresh()
     threading.Thread(target=refresher, daemon=True).start()
     producer = ndr_runtime.make_producer()
-    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.tls.v1", "suricata.dns.v1", "suricata.http.v1", group_id="ndr-threat-intel", auto_offset_reset="latest")
+    consumer = ndr_runtime.make_consumer("suricata.flow.v1", "suricata.tls.v1", "suricata.dns.v1", "suricata.http.v1", "suricata.file.v1", group_id="ndr-threat-intel", auto_offset_reset="latest")
     log.info("threat-intel up")
     while _running:
         for _tp, records in consumer.poll(timeout_ms=1000, max_records=1000).items():

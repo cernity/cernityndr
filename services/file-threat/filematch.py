@@ -1,7 +1,5 @@
-"""File-based malware detection (re-eval gap G2). Consumes suricata.file.v1
-(fileinfo with sha256 — force-hash enabled on the sensor), matches file hashes
-against a malware-hash feed (abuse.ch MalwareBazaar), and flags risky executable
-delivery over cleartext. Pure matching is testable; app.py is the I/O + feed shell.
+"""Executable delivery detection and shared file completeness/feed primitives.
+Hash verdicts are emitted only by threat-intel under the managed lifecycle.
 """
 import hashlib
 import json
@@ -22,15 +20,6 @@ _EXEC_MIMES = (
     "application/vnd.microsoft.portable-executable", "application/x-elf",
     "application/x-executable", "application/x-mach-binary", "application/x-sharedlib",
 )
-
-
-def hash_hit(fi: dict, malware_hashes: set):
-    """Return the matched hash if any of the file's md5/sha1/sha256 is known-bad."""
-    for alg in ("sha256", "sha1", "md5"):
-        h = (fi.get(alg) or "").lower()
-        if h and h in malware_hashes:
-            return h
-    return None
 
 
 def risky_delivery(fi: dict) -> bool:
@@ -77,21 +66,15 @@ def join_key_entities(eve: dict) -> list[dict]:
     return out
 
 
-def to_candidate(eve: dict, malware_hashes: set, tenant: str = "default") -> dict | None:
+def to_candidate(eve: dict, malware_hashes: set | None = None, tenant: str = "default") -> dict | None:
+    """Risky delivery only; malware_hashes is a compatibility argument, unused."""
     if eve.get("event_type") != "fileinfo":
         return None
     fi = eve.get("fileinfo") or {}
     src, dst = eve.get("src_ip"), eve.get("dest_ip")
     complete = hash_is_complete(fi)
-    # Only a fully-captured file can assert a whole-file malware-hash match; a
-    # partial hash from a truncated/gapped/mid-stream file must never produce
-    # file_malware_hash (it would be a false verdict and would spend capture
-    # budget). Such a file can still surface as risky_file_delivery, and file-yara
-    # covers its content.
-    hit = hash_hit(fi, malware_hashes) if complete else None
-    if hit:
-        det, sev, conf, label = "file_malware_hash", 9, 0.95, hit
-    elif risky_delivery(fi):
+    # Hash intel is owned exclusively by the managed threat-intel matcher.
+    if risky_delivery(fi):
         det, sev, conf, label = "risky_file_delivery", 6, 0.5, fi.get("mime_type")
     else:
         return None
@@ -110,3 +93,18 @@ def to_candidate(eve: dict, malware_hashes: set, tenant: str = "default") -> dic
             "category": "malware", "severity": sev, "confidence": conf,
             "first_seen": ts, "last_seen": ts,
             "entities": entities, "state": "CANDIDATE"}
+
+
+MALWAREBAZAAR_URL = "https://bazaar.abuse.ch/export/txt/sha256/recent/"
+
+
+def malware_feed_spec(url=MALWAREBAZAAR_URL):
+    """Register the former file-threat feed with the managed intel lifecycle."""
+    return {"connector": "abusech", "variant": "malwarebazaar", "url": url,
+            "source_trust": 0.9, "tlp": "green", "ttl_days": 1.0}
+
+
+def parse_malware_hashes(text):
+    import re
+    return {line.strip().lower() for line in text.splitlines()
+            if re.fullmatch(r"[a-fA-F0-9]{64}", line.strip())}

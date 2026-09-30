@@ -14,10 +14,10 @@ BENIGN = {"event_type": "fileinfo", "src_ip": "1.2.3.4", "dest_ip": "10.0.0.5",
 FLOW = {"event_type": "flow"}
 
 
-def test_known_malware_hash_high_severity():
+def test_known_hash_does_not_override_delivery_detector():
     c = fm.to_candidate(EICAR, HASHES)
-    assert c and c["detector_id"] == "file_malware_hash"
-    assert c["severity"] == 9 and c["confidence"] == 0.95
+    assert c and c["detector_id"] == "risky_file_delivery"
+    assert c["severity"] == 6 and c["confidence"] == 0.5
     assert fm.EICAR_SHA256 in c["entities"]
 
 
@@ -54,9 +54,15 @@ def test_ignores_non_fileinfo():
     assert fm.to_candidate(FLOW, HASHES) is None
 
 
-def test_hash_hit_matches_any_algo():
-    assert fm.hash_hit({"md5": "deadbeef" * 4, "sha256": "x"}, {"deadbeef" * 4}) == "deadbeef" * 4
-    assert fm.hash_hit({"sha256": "safe"}, {"bad"}) is None
+def test_malware_feed_registration_and_parser():
+    spec = fm.malware_feed_spec()
+    assert spec["variant"] == "malwarebazaar" and spec["source_trust"] == 0.9
+    assert fm.parse_malware_hashes("# comment\n" + fm.EICAR_SHA256.upper() + "\ninvalid") == {fm.EICAR_SHA256}
+
+
+def test_hash_only_never_emits_parallel_finding():
+    event = {**EICAR, "fileinfo": {**EICAR["fileinfo"], "mime_type": "text/plain"}}
+    assert fm.to_candidate(event, HASHES) is None
 
 
 def test_hash_is_complete_requires_positive_evidence_fail_closed():
@@ -99,7 +105,7 @@ def test_incomplete_benign_mime_with_bad_hash_yields_nothing():
 
 def test_complete_file_carries_hash_complete_true():
     c = fm.to_candidate(EICAR, HASHES)
-    assert c["detector_id"] == "file_malware_hash"
+    assert c["detector_id"] == "risky_file_delivery"
     assert '"hash_complete", "value": true' in c["entities"]
 
 

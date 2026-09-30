@@ -24,7 +24,7 @@ lifecycle = load_module("hunt_lifecycle", ROOT / "services/threat-intel/lifecycl
 ti = load_module("hunt_dimensions", ROOT / "services/threat-intel/ti.py")
 validator = Draft202012Validator(json.loads((ROOT / "contracts/hunt.schema.json").read_text()),
                                  format_checker=FormatChecker())
-SUPPORTED = {"ip", "domain", "ja3", "ja4", "cert"}
+SUPPORTED = {"ip", "domain", "ja3", "ja4", "cert", "hash"}
 
 
 class EvidenceClient:
@@ -133,7 +133,7 @@ class HuntWorker:
                     if obs["type"] not in query.OBS_TYPES:
                         continue
                     for ind in state["indicators"]:
-                        fields = sorted({field for kind, field, value in ti.dimensions(obs["fields"])
+                        fields = sorted({field for kind, field, value in ti.dimensions(obs if obs["type"] == "file" else obs["fields"])
                                          if kind in SUPPORTED and matches(ind, kind, value)})
                         if not fields:
                             continue

@@ -128,7 +128,8 @@
             "url",
             "ja3",
             "ja4",
-            "cert"
+            "cert",
+            "hash"
           ]
         },
         "source": {

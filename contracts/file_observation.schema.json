@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cernity.file_observation.v1",
+  "title": "File observation in the canonical observation.v1 envelope",
+  "description": "Register observation.schema.json by its $id (cernity.observation.v1) when resolving this schema. File attributes, including first_seen and last_seen, live in fields.file. The canonical ts and source_ref remain mandatory and unchanged. scan_verdict is a rule-stamped scan result, permitted only with available bytes; an empty matched_rules array means no matches, not a safety verdict.",
+  "allOf": [
+    {
+      "$ref": "cernity.observation.v1"
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "file"
+        }
+      }
+    }
+  ]
+}

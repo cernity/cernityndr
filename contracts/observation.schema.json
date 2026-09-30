@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "cernity.observation.v1",
   "title": "Canonical observation.v1",
-  "description": "U4 supports conn, dns, tls and http. Source reference resolves tenant + obs_id in the named typed table to raw_record (canonical JSON of decoded bus EVE). Capability flags attest only to included source evidence; unadvertised capabilities are unavailable.",
+  "description": "U4 supports conn, dns, tls and http. Source reference resolves tenant + obs_id in the named typed table to raw_record (canonical JSON of decoded bus EVE). Capability flags attest only to included source evidence; unadvertised capabilities are unavailable. U1a adds file metadata, hashes and byte availability under fields.file; no runtime producer is implied.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -133,7 +133,8 @@
         "conn",
         "dns",
         "tls",
-        "http"
+        "http",
+        "file"
       ]
     },
     "fields": {
@@ -193,6 +194,9 @@
         "http": {
           "type": "object",
           "minProperties": 1
+        },
+        "file": {
+          "$ref": "#/$defs/file"
         }
       }
     },
@@ -233,7 +237,8 @@
             "ndr.network_flow",
             "ndr.dns_transaction",
             "ndr.tls_observation",
-            "ndr.http_observation"
+            "ndr.http_observation",
+            "ndr.file_observation"
           ]
         },
         "tenant": {
@@ -593,6 +598,295 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "file"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "required": [
+              "file"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "flow"
+                  ]
+                },
+                {
+                  "required": [
+                    "dns"
+                  ]
+                },
+                {
+                  "required": [
+                    "tls"
+                  ]
+                },
+                {
+                  "required": [
+                    "http"
+                  ]
+                }
+              ]
+            }
+          },
+          "source_ref": {
+            "properties": {
+              "table": {
+                "const": "ndr.file_observation"
+              }
+            }
+          },
+          "capabilities": {
+            "items": {
+              "enum": [
+                "community-id"
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "fields": {
+            "not": {
+              "required": [
+                "file"
+              ]
+            }
+          }
+        }
+      }
     }
-  ]
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "File evidence payload. Absent metadata stays null. source_ref.sha256 hashes the raw source record, not file bytes. A byte artifact is required only for bytes_available; scan results are optional and never inferred from metadata or hashes.",
+      "required": [
+        "state",
+        "first_seen",
+        "last_seen",
+        "mime",
+        "size",
+        "filename",
+        "transfer_ref",
+        "session_ref",
+        "source_obs_ref",
+        "file_artifact_id"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "metadata_only",
+            "hashes_only",
+            "bytes_available"
+          ]
+        },
+        "first_seen": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "last_seen": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "mime": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "filename": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "transfer_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "session_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source_obs_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^obs:[a-f0-9]{64}$"
+        },
+        "file_artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sha1": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "md5": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "scan_verdict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "engine",
+            "ruleset_sha256",
+            "matched_rules",
+            "scanned_at"
+          ],
+          "properties": {
+            "engine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ruleset_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "matched_rules": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "scanned_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "metadata_only"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "sha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "sha1"
+                  ]
+                },
+                {
+                  "required": [
+                    "md5"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "hashes_only"
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "sha256"
+                ]
+              },
+              {
+                "required": [
+                  "sha1"
+                ]
+              },
+              {
+                "required": [
+                  "md5"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "bytes_available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "file_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "file_artifact_id": {
+                "type": "null"
+              }
+            },
+            "not": {
+              "required": [
+                "scan_verdict"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
 }

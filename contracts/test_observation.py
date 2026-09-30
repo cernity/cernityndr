@@ -48,6 +48,28 @@ def test_observation_types_and_preserved_source(kind):
     assert doc['ts']['clock_offset_ms'] is None
 
 
+@pytest.mark.parametrize('kind', ['flow', 'dns', 'tls', 'http'])
+def test_existing_types_reject_file_source_table(kind):
+    doc = transform(kind)[2]
+    doc['source_ref']['table'] = 'ndr.file_observation'
+    with pytest.raises(jsonschema.ValidationError):
+        VALIDATOR.validate(doc)
+
+
+@pytest.mark.parametrize('kind', ['flow', 'dns', 'tls', 'http'])
+def test_existing_types_reject_even_valid_file_payload(kind):
+    doc = transform(kind)[2]
+    payload = dict(state='metadata_only', first_seen=doc['ts']['sensor'],
+                   last_seen=doc['ts']['sensor'], mime=None, size=None,
+                   filename=None, transfer_ref=None, session_ref=None,
+                   source_obs_ref=None, file_artifact_id=None)
+    # Prove rejection is due to mixing observation types, not invalid metadata.
+    jsonschema.Draft202012Validator(SCHEMA['$defs']['file']).validate(payload)
+    doc['fields']['file'] = payload
+    with pytest.raises(jsonschema.ValidationError):
+        VALIDATOR.validate(doc)
+
+
 @pytest.mark.parametrize('field', list(SCHEMA['required']))
 def test_missing_required_rejected(field):
     doc = transform()[2]

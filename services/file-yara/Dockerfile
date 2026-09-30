@@ -1,6 +1,9 @@
 FROM python:3.14.7-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libssl-dev \
+# yara-python compiles its bundled libyara from sdist on 3.14 (no prebuilt wheel yet), so it needs
+# the full autotools/compiler toolchain, not just gcc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc make libtool automake pkg-config flex bison libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY services/file-yara/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -1,0 +1,26 @@
+{
+  "_comment": "Cernity NDR — Evidence (Splunk), portable source (native Simple XML rendering is a downstream deploy step — see README.md, 'Rendering'). The pcap/file drilldowns leave the SIEM for the configured evidence gateway: the search computes pcap_href/file_href with isnull guards (null id -> empty, no link) and urlencode (encoded id) via the cernity_ndr_pcap_link/file_link macros, and the drilldown opens that href. observation/flow drilldowns stay in-SIEM. Every pivot is a Splunk CIM field mapping back to siem_pivot.schema.json. Independently authored (§26).",
+  "pack": "splunk",
+  "kind": "dashboard",
+  "id": "evidence",
+  "title": "Cernity NDR — Evidence",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "inputs": [
+    {"token": "finding", "label": "Finding", "canonical": "finding_id", "pivot_field": "vendor_finding_id"}
+  ],
+  "panels": [
+    {
+      "id": "detail",
+      "title": "Evidence for finding",
+      "viz": "table",
+      "search": "`cernity_ndr_findings` vendor_finding_id=\"$finding$\" | eval pcap_href=if(isnull(vendor_pcap_evidence_id) OR vendor_pcap_evidence_id=\"\",\"\",`cernity_ndr_pcap_link(vendor_pcap_evidence_id)`) | eval file_href=if(isnull(vendor_file_artifact_id) OR vendor_file_artifact_id=\"\",\"\",`cernity_ndr_file_link(vendor_file_artifact_id)`) | table _time, signature_id, dvc, community_id, vendor_observation_id, vendor_pcap_evidence_id, vendor_file_artifact_id, pcap_href, file_href",
+      "produces": ["_time", "signature_id", "dvc", "community_id", "vendor_observation_id", "vendor_pcap_evidence_id", "vendor_file_artifact_id", "pcap_href", "file_href"],
+      "drilldowns": [
+        {"opens": "pcap", "canonical": "pcap_evidence_id", "pivot_field": "vendor_pcap_evidence_id", "bind": "pcap_href"},
+        {"opens": "file_artifact", "canonical": "file_artifact_id", "pivot_field": "vendor_file_artifact_id", "bind": "file_href"},
+        {"opens": "search", "canonical": "community_id", "pivot_field": "community_id", "bind": "community_id"},
+        {"opens": "search", "canonical": "observation_id", "pivot_field": "vendor_observation_id", "bind": "vendor_observation_id"}
+      ]
+    }
+  ]
+}

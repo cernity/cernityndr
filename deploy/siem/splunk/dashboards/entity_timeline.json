@@ -1,0 +1,35 @@
+{
+  "_comment": "Cernity NDR — Entity Timeline (Splunk), portable source (rendering to native Simple XML for import is a downstream deploy step — see deploy/siem/README.md, 'Rendering' — not part of this unit). Each input/drilldown names a Splunk CIM field that maps back to a siem_pivot.schema.json field, and each drilldown's `bind` is a field the panel's query actually produces (deploy/siem/test_packs.py enforces both). The aggregate panel drills only on the surviving split field (signature_id); per-occurrence identifiers (finding/observation) come from the non-aggregated occurrences table that retains them. Independently authored (§26): no Corelight dashboards/wording.",
+  "pack": "splunk",
+  "kind": "dashboard",
+  "id": "entity_timeline",
+  "title": "Cernity NDR — Entity Timeline",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "inputs": [
+    {"token": "entity", "label": "Entity", "canonical": "entity_id", "pivot_field": "risk_object"},
+    {"token": "sensor", "label": "Observation point", "canonical": "observation_point", "pivot_field": "dvc"}
+  ],
+  "panels": [
+    {
+      "id": "over_time",
+      "title": "Findings over time (by signature)",
+      "viz": "timechart",
+      "search": "`cernity_ndr_findings` risk_object=\"$entity$\" dvc=\"$sensor$\" | timechart count by signature_id",
+      "produces": ["_time", "signature_id"],
+      "drilldowns": [
+        {"opens": "search", "canonical": "signature_id", "pivot_field": "signature_id", "bind": "signature_id"}
+      ]
+    },
+    {
+      "id": "occurrences",
+      "title": "Finding occurrences",
+      "viz": "table",
+      "search": "`cernity_ndr_findings` risk_object=\"$entity$\" dvc=\"$sensor$\" | table _time, vendor_finding_id, signature_id, dvc, vendor_observation_id, vendor_pcap_evidence_id",
+      "produces": ["_time", "vendor_finding_id", "signature_id", "dvc", "vendor_observation_id", "vendor_pcap_evidence_id"],
+      "drilldowns": [
+        {"opens": "evidence", "canonical": "finding_id", "pivot_field": "vendor_finding_id", "bind": "vendor_finding_id"},
+        {"opens": "search", "canonical": "observation_id", "pivot_field": "vendor_observation_id", "bind": "vendor_observation_id"}
+      ]
+    }
+  ]
+}

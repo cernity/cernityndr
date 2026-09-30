@@ -1,0 +1,19 @@
+{
+  "_comment": "Splunk-side field typing for the ndr_findings index, kept CONSISTENT with the Elastic template deploy/central/es/ndr-findings-index-template.json (contracts/test_ndr_findings_template.py). Splunk stores raw strings; these declared types drive CIM datamodel acceleration and deterministic sort/agg. deploy/siem/test_packs.py asserts this field set + type family matches the ES template.",
+  "index": "ndr_findings",
+  "sourcetype": "cernity:ndr:finding",
+  "fields": {
+    "finding_id": "string",
+    "tenant_id": "string",
+    "detector_id": "string",
+    "detector_version": "string",
+    "category": "string",
+    "state": "string",
+    "severity": "number",
+    "revision": "number",
+    "@timestamp": "time",
+    "first_seen": "time",
+    "last_seen": "time",
+    "emitted_at": "time"
+  }
+}

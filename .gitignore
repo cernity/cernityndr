@@ -43,3 +43,6 @@ deploy/security/secrets/
 deploy/benchmark/suricata/rules/suricata.rules
 deploy/benchmark/suricata/rules/classification.config
 deploy/benchmark/suricata/rules/*.rules.bak
+
+# B-U8: build.py output (regenerated, validated by test_packs.py; not committed)
+deploy/siem/dist/

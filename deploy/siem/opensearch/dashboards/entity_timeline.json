@@ -1,0 +1,36 @@
+{
+  "_comment": "Cernity NDR — Entity Timeline (OpenSearch), portable source (rendering to OpenSearch Dashboards saved-object NDJSON for import is a downstream deploy step — see README.md, 'Rendering'). Same shape as the Elastic pack (ECS fields): the histogram aggregation drills on its split field (rule.id); occurrence identifiers (event.id, cernity.observation_id) come from the occurrences saved-search panel. Every pivot maps back to siem_pivot.schema.json. Independently authored (§26).",
+  "pack": "opensearch",
+  "kind": "dashboard",
+  "id": "entity_timeline",
+  "title": "Cernity NDR — Entity Timeline",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "index_pattern": "ndr-ecs-*",
+  "inputs": [
+    {"token": "entity", "label": "Entity", "canonical": "entity_id", "pivot_field": "cernity.entity_id"},
+    {"token": "observer", "label": "Observation point", "canonical": "observation_point", "pivot_field": "observer.name"}
+  ],
+  "panels": [
+    {
+      "id": "over_time",
+      "title": "Findings over time (by signature)",
+      "viz": "histogram",
+      "search": "cernity.entity_id : \"{{entity}}\" and observer.name : \"{{observer}}\"",
+      "produces": ["@timestamp", "rule.id"],
+      "drilldowns": [
+        {"opens": "search", "canonical": "signature_id", "pivot_field": "rule.id", "bind": "rule.id"}
+      ]
+    },
+    {
+      "id": "occurrences",
+      "title": "Finding occurrences",
+      "viz": "table",
+      "search": "cernity.entity_id : \"{{entity}}\" and observer.name : \"{{observer}}\"",
+      "produces": ["@timestamp", "event.id", "rule.id", "observer.name", "host.id", "cernity.observation_id", "cernity.pcap_evidence_id"],
+      "drilldowns": [
+        {"opens": "evidence", "canonical": "finding_id", "pivot_field": "event.id", "bind": "event.id"},
+        {"opens": "search", "canonical": "observation_id", "pivot_field": "cernity.observation_id", "bind": "cernity.observation_id"}
+      ]
+    }
+  ]
+}

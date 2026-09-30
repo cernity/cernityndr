@@ -1,0 +1,4 @@
+# Export the add-on's knowledge objects app-wide so dashboards/pivots resolve the CIM aliases.
+[]
+access = read : [ * ], write : [ admin ]
+export = system

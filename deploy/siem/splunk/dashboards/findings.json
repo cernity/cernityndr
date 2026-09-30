@@ -1,0 +1,25 @@
+{
+  "_comment": "Cernity NDR — Findings (Splunk), portable source. Triage entry point over ndr_findings; each drilldown binds a field the recent-findings table retains and opens a resolvable target (entity_timeline / evidence dashboards, or a filtered search). Every pivot is a Splunk CIM field mapping back to siem_pivot.schema.json. Independently authored (§26).",
+  "pack": "splunk",
+  "kind": "dashboard",
+  "id": "findings",
+  "title": "Cernity NDR — Findings",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "inputs": [
+    {"token": "signature", "label": "Signature", "canonical": "signature_id", "pivot_field": "signature_id"}
+  ],
+  "panels": [
+    {
+      "id": "recent",
+      "title": "Recent findings",
+      "viz": "table",
+      "search": "`cernity_ndr_findings` signature_id=\"$signature$\" | table _time, signature_id, risk_object, dvc, vendor_finding_id, vendor_incident_id, vendor_detector_version, vendor_model_version",
+      "produces": ["_time", "signature_id", "risk_object", "dvc", "vendor_finding_id", "vendor_incident_id", "vendor_detector_version", "vendor_model_version"],
+      "drilldowns": [
+        {"opens": "entity_timeline", "canonical": "entity_id", "pivot_field": "risk_object", "bind": "risk_object"},
+        {"opens": "evidence", "canonical": "finding_id", "pivot_field": "vendor_finding_id", "bind": "vendor_finding_id"},
+        {"opens": "search", "canonical": "incident_id", "pivot_field": "vendor_incident_id", "bind": "vendor_incident_id"}
+      ]
+    }
+  ]
+}

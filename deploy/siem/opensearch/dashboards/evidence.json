@@ -1,0 +1,27 @@
+{
+  "_comment": "Cernity NDR — Evidence (OpenSearch), portable source (OpenSearch Dashboards saved-object NDJSON rendering is a downstream deploy step — see README.md, 'Rendering'). pcap/file drilldowns are URL drilldowns to the configured evidence gateway with the id URL-encoded; a null id yields no navigable link. observation/flow drilldowns stay in Discover. Every pivot is an ECS field mapping back to siem_pivot.schema.json. Independently authored (§26).",
+  "pack": "opensearch",
+  "kind": "dashboard",
+  "id": "evidence",
+  "title": "Cernity NDR — Evidence",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "index_pattern": "ndr-ecs-*",
+  "inputs": [
+    {"token": "finding", "label": "Finding", "canonical": "finding_id", "pivot_field": "event.id"}
+  ],
+  "panels": [
+    {
+      "id": "detail",
+      "title": "Evidence for finding",
+      "viz": "table",
+      "search": "event.id : \"{{finding}}\"",
+      "produces": ["@timestamp", "rule.id", "observer.name", "network.community_id", "cernity.observation_id", "cernity.pcap_evidence_id", "cernity.file_artifact_id"],
+      "drilldowns": [
+        {"opens": "pcap", "canonical": "pcap_evidence_id", "pivot_field": "cernity.pcap_evidence_id", "bind": "cernity.pcap_evidence_id"},
+        {"opens": "file_artifact", "canonical": "file_artifact_id", "pivot_field": "cernity.file_artifact_id", "bind": "cernity.file_artifact_id"},
+        {"opens": "search", "canonical": "community_id", "pivot_field": "network.community_id", "bind": "network.community_id"},
+        {"opens": "search", "canonical": "observation_id", "pivot_field": "cernity.observation_id", "bind": "cernity.observation_id"}
+      ]
+    }
+  ]
+}

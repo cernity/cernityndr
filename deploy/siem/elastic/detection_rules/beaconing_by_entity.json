@@ -1,0 +1,27 @@
+{
+  "_comment": "Cernity NDR detection rule (Kibana Security), NATIVE import object. Threshold rule: fires when one detector (rule.id) produces >=5 findings against one entity (cernity.entity_id) in the interval — a repeated-findings/beaconing signal. Grouping is expressed with threshold.field (both grouping fields are ECS fields that map back to siem_pivot.schema.json). It imports directly as a Kibana Security rule (in the Fleet integration layout it lives under kibana/security_rule). Independently authored (§26): no Corelight rules/wording.",
+  "rule_id": "cernity-ndr-beaconing-by-entity",
+  "name": "Cernity NDR — repeated findings for an entity",
+  "description": "A single detector produced 5 or more findings against one entity within the interval, indicating repeated/beaconing activity worth pivoting to the entity timeline and evidence.",
+  "type": "threshold",
+  "language": "kuery",
+  "query": "rule.id : * and cernity.entity_id : *",
+  "index": ["ndr-ecs-*"],
+  "threshold": {
+    "field": ["cernity.entity_id", "rule.id"],
+    "value": 5
+  },
+  "risk_score": 47,
+  "severity": "medium",
+  "from": "now-1h",
+  "to": "now",
+  "interval": "1h",
+  "enabled": false,
+  "version": 1,
+  "author": ["Cernity NDR"],
+  "license": "Elastic-2.0",
+  "tags": ["Cernity NDR", "Network"],
+  "references": [],
+  "false_positives": [],
+  "max_signals": 100
+}

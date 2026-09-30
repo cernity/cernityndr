@@ -1,0 +1,21 @@
+# Cernity NDR — Elastic integration package. Ships ECS index templates, triage dashboards and
+# detection rules for exported findings. Independently authored from the public Elastic Common
+# Schema and Fleet integration docs (§26): no Corelight integration/assets/wording.
+format_version: 1.0.0
+name: cernity_ndr
+title: Cernity NDR
+version: 0.1.0
+description: Maps Cernity NDR exported findings to ECS and ships triage dashboards, entity/evidence pivots, and detection rules.
+type: integration
+categories:
+  - security
+  - network
+conditions:
+  kibana.version: "^8.0.0"
+owner:
+  github: cernity
+  type: community
+policy_templates:
+  - name: cernity_ndr
+    title: Cernity NDR findings
+    description: Index templates, dashboards and detection rules for exported findings.

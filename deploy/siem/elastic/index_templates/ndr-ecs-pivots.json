@@ -1,0 +1,32 @@
+{
+  "index_patterns": ["ndr-ecs-*"],
+  "priority": 100,
+  "_meta": {
+    "owner": "cernity",
+    "purpose": "ECS typing for the stable siem_pivot fields on exported findings (services/findings-forwarder/mappings.py:to_ecs). Every pivot is a keyword (event.sequence is long) so cross-SIEM pivots sort/aggregate deterministically. Custom cernity.* namespace holds the pivots with no ECS core home (ECS's documented vendor convention). Independently authored from public ECS docs (§26)."
+  },
+  "template": {
+    "settings": {
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "event":    { "properties": { "id": { "type": "keyword" }, "sequence": { "type": "long" } } },
+        "rule":     { "properties": { "id": { "type": "keyword" }, "version": { "type": "keyword" } } },
+        "host":     { "properties": { "id": { "type": "keyword" } } },
+        "network":  { "properties": { "community_id": { "type": "keyword" } } },
+        "observer": { "properties": { "name": { "type": "keyword" } } },
+        "cernity":  { "properties": {
+          "incident_id":     { "type": "keyword" },
+          "entity_id":       { "type": "keyword" },
+          "observation_id":  { "type": "keyword" },
+          "pcap_evidence_id":{ "type": "keyword" },
+          "file_artifact_id":{ "type": "keyword" },
+          "investigation_id":{ "type": "keyword" },
+          "model_version":   { "type": "keyword" }
+        } }
+      }
+    }
+  }
+}

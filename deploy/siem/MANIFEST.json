@@ -1,0 +1,17 @@
+{
+  "_comment": "Version + build manifest for the Cernity NDR SIEM content packs (B-U8). Each pack is versioned independently; deploy/siem/test_packs.py asserts every pack has a version matching its native descriptor (Splunk app.conf, Elastic manifest.yml). `evidence.base_url` is the analyst-facing evidence/object-store gateway a deployer sets and the single source of truth for all three platforms; the pcap/file drilldowns URL-encode the id onto it and emit no link for a null id. build.py renders it into the Elastic/OpenSearch URL drilldowns and into the Splunk `cernity_evidence_base` macro. `external_destinations` are the two drilldown targets that leave the SIEM for that gateway.",
+  "schema": "contracts/siem_pivot.schema.json",
+  "packs": {
+    "splunk": {"name": "cernity_ndr_ta", "platform": "Splunk", "version": "0.1.0", "descriptor": "splunk/cernity_ndr_ta/default/app.conf"},
+    "elastic": {"name": "cernity_ndr", "platform": "Elastic", "version": "0.1.0", "descriptor": "elastic/manifest.yml"},
+    "opensearch": {"name": "cernity_ndr", "platform": "OpenSearch", "version": "0.1.0", "descriptor": "opensearch/index_templates/ndr-ecs-pivots.json"}
+  },
+  "evidence": {
+    "base_url": "https://evidence.example.invalid",
+    "_note": "Placeholder. Deployer sets this to their evidence/object-store gateway; the .invalid TLD makes an unconfigured deploy fail loudly instead of silently linking somewhere real."
+  },
+  "external_destinations": {
+    "pcap": {"path": "/pcap/{id}", "label": "Open packet capture", "binds": "pcap_evidence_id"},
+    "file_artifact": {"path": "/file/{id}", "label": "Open extracted file", "binds": "file_artifact_id"}
+  }
+}

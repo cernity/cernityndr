@@ -1,0 +1,26 @@
+{
+  "_comment": "Cernity NDR — Findings (Elastic), portable source. Triage entry point over ndr-ecs-*; a Discover saved search that retains the document fields its drilldowns bind (rendering to Kibana saved-object NDJSON is a downstream deploy step — see README.md, 'Rendering'). Every pivot is an ECS field mapping back to siem_pivot.schema.json. Independently authored (§26).",
+  "pack": "elastic",
+  "kind": "saved_search",
+  "id": "findings",
+  "title": "Cernity NDR — Findings",
+  "keys_on": "contracts/siem_pivot.schema.json",
+  "index_pattern": "ndr-ecs-*",
+  "inputs": [
+    {"token": "signature", "label": "Signature", "canonical": "signature_id", "pivot_field": "rule.id"}
+  ],
+  "panels": [
+    {
+      "id": "recent",
+      "title": "Recent findings",
+      "viz": "table",
+      "search": "rule.id : \"{{signature}}\"",
+      "produces": ["@timestamp", "rule.id", "cernity.entity_id", "observer.name", "event.id", "cernity.incident_id", "rule.version", "cernity.model_version"],
+      "drilldowns": [
+        {"opens": "entity_timeline", "canonical": "entity_id", "pivot_field": "cernity.entity_id", "bind": "cernity.entity_id"},
+        {"opens": "evidence", "canonical": "finding_id", "pivot_field": "event.id", "bind": "event.id"},
+        {"opens": "search", "canonical": "incident_id", "pivot_field": "cernity.incident_id", "bind": "cernity.incident_id"}
+      ]
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.14.7-slim
 WORKDIR /app
 # tcpdump: carve the finding's connection out of the rolling-ring look-back slice
 # by BPF (plan 2026-08-25-002, U2).

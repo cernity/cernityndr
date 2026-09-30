@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.14.7-slim
 WORKDIR /app
 # libsnappy for python-snappy so the consumer can decode ANY producer's codec
 # (Vector uses lz4; rpk/other producers may use snappy/zstd).

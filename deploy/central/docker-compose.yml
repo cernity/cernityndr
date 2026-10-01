@@ -88,13 +88,20 @@ services:
       # in-flight findings/offsets are not lost on redeploy (stable down/up reattachment).
       - cernity-redpanda-data:/var/lib/redpanda/data
       - ./redpanda/entrypoint.sh:/entrypoint.sh:ro
+      - ./redpanda/provision-topics.sh:/provision-topics.sh:ro
       - ./redpanda/provision-capture.sh:/provision-capture.sh:ro
       - ./redpanda/redpanda.yaml.tmpl:/etc/redpanda/redpanda.yaml.tmpl:ro
       - ../security/secrets:/certs:ro
     ports:
       - "19092:19092"        # external Kafka listener for remote sensor shippers
     healthcheck:
-      test: ["CMD", "rpk", "cluster", "health"]
+      # Gate dependent services on topic PROVISIONING, not just broker liveness: the
+      # entrypoint writes /tmp/cernity-bus-ready only after the suricata input topics are
+      # created as LogAppendTime. `rpk cluster health` alone goes green before provisioning
+      # finishes, so services (e.g. the normalizer) could otherwise start against unprovisioned
+      # topics. The broker-level auto-create gate (entrypoint) separately protects the remote
+      # sensor, which this marker cannot reach.
+      test: ["CMD-SHELL", "rpk cluster health >/dev/null 2>&1 && test -f /tmp/cernity-bus-ready"]
       interval: 5s
       timeout: 3s
       retries: 20

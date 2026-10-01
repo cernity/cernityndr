@@ -1,6 +1,6 @@
 name: publish
 
-# Build and push multi-arch service images to Docker Hub. Runs on version tags
+# Build and push linux/amd64 service images to Docker Hub. Runs on version tags
 # (a release) or manually from the Actions tab — not on every push, so it never
 # fails noisily before the Docker Hub secrets are set.
 # Requires two repository secrets: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
@@ -43,11 +43,14 @@ jobs:
           - flink
           - eve-bridge
           - slips-adapter
+          - sensor-registry
+          - coverage-service
+          - intel-hunt
+          - file-observer
+          - file-artifact
+          - investigation-service
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,12 +72,12 @@ jobs:
             type=raw,value=latest
             type=ref,event=tag
 
-      - name: Build and push ${{ matrix.service }} (amd64 + arm64)
+      - name: Build and push ${{ matrix.service }} (amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: services/${{ matrix.service }}/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           # F16: ship an SBOM + provenance attestation with every released image, so

@@ -65,6 +65,10 @@ def test_es_source_events_in_source_and_mapping_guarded():
     props = tb["template"]["mappings"]["properties"]
     assert props["source_events"]["enabled"] is False
     assert props["summary"]["enabled"] is False and props["iocs"]["enabled"] is False
+    # intel/geo enrichment must be flattened (geo 537 + intel 428 sub-fields blew the 1000-field
+    # limit on a live cluster and dead-lettered every finding) + a total_fields backstop.
+    assert props["intel"]["type"] == "flattened" and props["geo"]["type"] == "flattened"
+    assert tb["template"]["settings"]["index.mapping.total_fields.limit"] == 2000
 
 
 def test_es_doc_id_is_tenant_and_revision_scoped():

@@ -26,7 +26,10 @@
         "last_seen": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
         "emitted_at": { "type": "date", "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss||epoch_millis" },
         "intel": { "type": "flattened" },
-        "geo": { "type": "flattened" }
+        "geo": { "type": "flattened" },
+        "source_events": { "type": "object", "enabled": false },
+        "summary": { "type": "object", "enabled": false },
+        "iocs": { "type": "object", "enabled": false }
       }
     }
   }

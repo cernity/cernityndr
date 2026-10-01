@@ -465,15 +465,25 @@ class ElasticsearchAdapter:
 
     @staticmethod
     def _template_body(prefix):
-        """Index template that keeps the nested provenance/enrichment blocks in `_source` but
-        OUT of the dynamic mapping (`enabled:false`) — so arbitrary nDPI/extension keys inside
-        `source_events` never explode the mapping toward Elasticsearch's ~1000-field default limit.
-        The analyst still sees the full native EVE in the stored document; they just don't get a
-        mapped subfield for every key (they pivot on the finding's top-level fields + community_id)."""
+        """Index template that stops daily ndr-findings-* indices from exploding past
+        Elasticsearch's ~1000-field default limit (which silently dead-letters every finding).
+        Two explosion sources, two guards:
+          * arbitrary nDPI/extension keys inside `source_events` (and `summary`/`iocs`) are kept
+            in `_source` but OUT of the dynamic mapping (`enabled:false`) — the analyst still sees
+            the full native EVE in the stored document, they just don't get a mapped subfield per key;
+          * the `intel` and `geo` enrichment objects are mapped as `flattened`, collapsing each to a
+            single field so per-indicator / per-geo keys never mint a mapping (geo alone reached 537
+            sub-fields + intel 428 on a live cluster, blowing the limit). Flattened is still queryable.
+        Also raise total_fields.limit to 2000 as a backstop. Mirrors the checked-in canonical template
+        deploy/central/es/ndr-findings-index-template.json — keep the two in sync."""
         noindex = {"type": "object", "enabled": False}
+        flat = {"type": "flattened"}
         return {"index_patterns": [f"{prefix}-*"],
-                "template": {"mappings": {"properties": {
-                    "source_events": noindex, "summary": noindex, "iocs": noindex}}}}
+                "template": {
+                    "settings": {"index.mapping.total_fields.limit": 2000},
+                    "mappings": {"properties": {
+                        "source_events": noindex, "summary": noindex, "iocs": noindex,
+                        "intel": flat, "geo": flat}}}}
 
     def _ensure_template(self):
         """Best-effort, idempotent PUT of the mapping guard before the first bulk. Never blocks

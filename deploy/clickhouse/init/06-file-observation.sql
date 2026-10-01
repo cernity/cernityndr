@@ -1,5 +1,12 @@
 -- U1a data model only. Apply after 05-evidence.sql; safe to re-run.
 -- Existing volumes require explicit migration; init scripts run on fresh DBs only.
+-- WARNING — DO NOT apply this (or any single later init script) against an OLDER/mismatched
+-- ClickHouse: the CREATE OR REPLACE VIEW below UNIONs tables (http_observation,
+-- identity_observation, file_observation) that a pre-observation.v1 schema lacks, and on an
+-- old flattened `network_flow` (no `obs_id` column) the view fails to compile. In ClickHouse a
+-- CREATE OR REPLACE VIEW that FAILS still DROPS the existing view first — so a partial/out-of-order
+-- apply can leave `ndr.evidence_observations` GONE. Apply the init scripts in order from a matching
+-- baseline (fresh DB), or follow the documented upgrade/migration procedure. See docs: Upgrading.
 -- Writers must validate against file_observation.schema.json before insertion.
 -- As with the other typed rows, observation contains the complete canonical
 -- envelope and raw_record preserves canonical JSON of the decoded source record.

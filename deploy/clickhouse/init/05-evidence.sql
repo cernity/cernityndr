@@ -1,4 +1,9 @@
 -- U4: apply before deploying the new normalizer; safe to re-run.
+-- WARNING: the CREATE OR REPLACE VIEW ndr.evidence_observations here assumes the observation.v1
+-- typed tables exist with their materialized columns. A failed CREATE OR REPLACE VIEW still DROPS the
+-- prior view in ClickHouse, so applying this against an older/mismatched schema can leave the evidence
+-- view missing. Apply init scripts in order from a matching baseline; to upgrade an existing (older)
+-- deployment, follow the documented migration procedure rather than running a single later script.
 -- Existing rows cannot recover absent raw fields/capabilities. Leave observation
 -- empty and exclude them from the canonical view instead of fabricating evidence.
 CREATE TABLE IF NOT EXISTS ndr.http_observation

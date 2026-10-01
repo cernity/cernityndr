@@ -1,3 +1,5 @@
 kafka-python-ng>=2.0
 lz4>=4.0
 prometheus_client>=0.20
+python-snappy>=0.6
+zstandard>=0.22

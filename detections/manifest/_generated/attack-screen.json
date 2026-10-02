@@ -1,0 +1,244 @@
+[
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0831"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0842"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0843"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0846"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0855"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0858"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0859"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "ot-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T0885"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "ids-alerts",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1021"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1021.002"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "ids-alerts",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1046"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "behavioral-detectors",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "dns-detector",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "http-detector",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "ids-alerts",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "protocol-detectors",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "threat-intel",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1071"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "behavioral-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1071.004"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "protocol-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1090.004"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "http-detector",
+        "status": "shipped"
+      },
+      {
+        "detector_id": "protocol-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1110"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1110.003"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1486"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1557.001"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1558.003"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "east-west-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1558.004"
+  },
+  {
+    "detectors": [
+      {
+        "detector_id": "protocol-detectors",
+        "status": "shipped"
+      }
+    ],
+    "status": "shipped",
+    "technique": "T1571"
+  }
+]

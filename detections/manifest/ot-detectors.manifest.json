@@ -1,0 +1,77 @@
+{
+  "detector_id": "ot-detectors",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T0831",
+    "T0842",
+    "T0843",
+    "T0846",
+    "T0855",
+    "T0858",
+    "T0859",
+    "T0885"
+  ],
+  "input_records": [
+    "suricata.modbus.v1"
+  ],
+  "features_used": [
+    "src_ip",
+    "dest_ip",
+    "dest_port",
+    "modbus"
+  ],
+  "config_params": [
+    {
+      "name": "OT_AUTHORIZED_MASTERS",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "name": "OT_MASTER_WARMUP",
+      "type": "integer",
+      "default": 5
+    },
+    {
+      "name": "OT_WINDOW_SECS",
+      "type": "number",
+      "default": 600
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Modbus control, pairing and enumeration heuristics are not e2e-verified. Learned authorized-master baselines can be poisoned; OT_AUTHORIZED_MASTERS provides an override. Other ICS protocols are outside this implementation."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/ot-detectors/test_ot.py, services/ot-detectors/test_ot_state.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/ot-detectors/test_ot.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

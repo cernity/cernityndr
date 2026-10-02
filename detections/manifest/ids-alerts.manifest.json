@@ -1,0 +1,70 @@
+{
+  "detector_id": "ids-alerts",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1021",
+    "T1046",
+    "T1071"
+  ],
+  "input_records": [
+    "suricata.raw.v1"
+  ],
+  "features_used": [
+    "alert.signature",
+    "alert.signature_id",
+    "alert.severity",
+    "alert.category",
+    "alert.metadata",
+    "community_id",
+    "flow_id"
+  ],
+  "config_params": [
+    {
+      "name": "WINDOW_SECS",
+      "type": "number",
+      "default": 600
+    },
+    {
+      "name": "IDS_OCCURRENCE_WINDOW_SECS",
+      "type": "integer",
+      "default": 300
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Signature-alert promotion is not e2e-verified; detection depends on upstream Suricata rules. Techniques reflect coarse finding-category mappings, not per-signature ATT&CK coverage. Exfiltration tactic TA0010 is omitted."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/ids-alerts/test_bu3_identity.py, services/ids-alerts/test_promote.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/ids-alerts/test_promote.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

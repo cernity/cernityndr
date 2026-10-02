@@ -1,0 +1,23 @@
+{
+  "detector_id": "beacon-jitter-timing",
+  "version": "0.1.0",
+  "status": "experimental",
+  "required_capabilities": ["flow-only", "community-id"],
+  "attack_techniques": ["T1071.001"],
+  "input_records": ["ndr.flow"],
+  "features_used": ["interarrival_variance", "bytes_toserver"],
+  "config_params": [],
+  "evidence_produced": {
+    "record": "ndr.finding.candidate.v1",
+    "fields": ["community_id", "interarrival_variance"]
+  },
+  "known_limitations": [
+    { "description": "Experimental: not yet validated against golden pcaps; false-positive rate unmeasured." }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [],
+    "performance": []
+  },
+  "first_supported_version": "0.1.0"
+}

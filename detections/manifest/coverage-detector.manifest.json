@@ -1,0 +1,68 @@
+{
+  "detector_id": "coverage-detector",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [],
+  "input_records": [
+    "suricata.stats.v1"
+  ],
+  "features_used": [
+    "stats.capture.kernel_packets",
+    "stats.capture.kernel_drops",
+    "stats.decoder.pkts",
+    "stats.app_layer.flow"
+  ],
+  "config_params": [
+    {
+      "name": "NDR_COVERAGE_DROP_RATIO",
+      "type": "number",
+      "default": 0.02
+    },
+    {
+      "name": "NDR_COVERAGE_MIN_PKTS",
+      "type": "integer",
+      "default": 5000
+    },
+    {
+      "name": "NDR_COVERAGE_APPLAYER_RATIO",
+      "type": "number",
+      "default": 0.001
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Capture-loss and application-layer visibility heuristics are not e2e-verified. Missing capture statistics cannot establish healthy capture. Coverage is operational visibility, with no ATT&CK mapping."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/coverage-detector/test_coverage.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/coverage-detector/test_coverage.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

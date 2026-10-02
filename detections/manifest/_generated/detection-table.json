@@ -1,0 +1,161 @@
+[
+  {
+    "attack_techniques": [],
+    "detector_id": "anomaly-detector",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "ndr.observation.normalized.v1",
+      "suricata.anomaly.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1071",
+      "T1071.004"
+    ],
+    "detector_id": "behavioral-detectors",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.dns.v1",
+      "suricata.flow.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [],
+    "detector_id": "coverage-detector",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.stats.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1071"
+    ],
+    "detector_id": "dns-detector",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.dns.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1021",
+      "T1021.002",
+      "T1046",
+      "T1110.003",
+      "T1486",
+      "T1557.001",
+      "T1558.003",
+      "T1558.004"
+    ],
+    "detector_id": "east-west-detectors",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.dns.v1",
+      "suricata.flow.v1",
+      "suricata.raw.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1071",
+      "T1110"
+    ],
+    "detector_id": "http-detector",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.http.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1021",
+      "T1046",
+      "T1071"
+    ],
+    "detector_id": "ids-alerts",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.raw.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T0831",
+      "T0842",
+      "T0843",
+      "T0846",
+      "T0855",
+      "T0858",
+      "T0859",
+      "T0885"
+    ],
+    "detector_id": "ot-detectors",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.modbus.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1071",
+      "T1090.004",
+      "T1110",
+      "T1571"
+    ],
+    "detector_id": "protocol-detectors",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.flow.v1",
+      "suricata.http.v1",
+      "suricata.raw.v1",
+      "suricata.ssh.v1",
+      "suricata.tls.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  },
+  {
+    "attack_techniques": [
+      "T1071"
+    ],
+    "detector_id": "threat-intel",
+    "first_supported_version": "0.0.1",
+    "input_records": [
+      "suricata.dns.v1",
+      "suricata.file.v1",
+      "suricata.flow.v1",
+      "suricata.http.v1",
+      "suricata.tls.v1"
+    ],
+    "required_capabilities": [],
+    "status": "shipped",
+    "version": "1.0.0"
+  }
+]

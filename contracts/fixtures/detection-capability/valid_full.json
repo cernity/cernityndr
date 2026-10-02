@@ -1,0 +1,31 @@
+{
+  "detector_id": "dns-tunnel-entropy",
+  "version": "1.3.0",
+  "status": "shipped",
+  "required_capabilities": ["dns-queries", "payload-visible"],
+  "attack_techniques": ["T1071.004"],
+  "input_records": ["ndr.dns"],
+  "features_used": ["qname_entropy", "qname_length", "nxdomain_ratio"],
+  "config_params": [
+    { "name": "entropy_threshold", "type": "float", "default": 3.5 },
+    { "name": "window_seconds", "type": "int", "default": 300 }
+  ],
+  "evidence_produced": {
+    "record": "ndr.finding.candidate.v1",
+    "fields": ["qname", "qname_entropy", "src_ip"]
+  },
+  "known_limitations": [
+    {
+      "description": "Does not attribute tunnels to a specific C2 family; family labelling is unverified.",
+      "claim": "T1568.002",
+      "unverified": true
+    },
+    { "description": "Entropy heuristic misses low-entropy base32 tunnels." }
+  ],
+  "backing_tests": {
+    "golden_pcap": ["pcap/dns-tunnel-iodine.pcap"],
+    "benign_control": ["pcap/benign-dns-cdn.pcap"],
+    "performance": ["bench/dns-10k-qps.json"]
+  },
+  "first_supported_version": "1.1.0"
+}

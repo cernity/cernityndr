@@ -1,0 +1,61 @@
+{
+  "detector_id": "http-detector",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1071",
+    "T1110"
+  ],
+  "input_records": [
+    "suricata.http.v1"
+  ],
+  "features_used": [
+    "http.http_method",
+    "http.url",
+    "http.hostname",
+    "http.http_content_type"
+  ],
+  "config_params": [
+    {
+      "name": "NDR_STATE_BACKEND",
+      "type": "string",
+      "default": "memory"
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "HTTP URI and method heuristics are not e2e-verified and require visible HTTP metadata. T1110 and T1071 are existing coarse category mappings for credentials-in-URL and risky methods, not proof of brute force or C2."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/http-detector/test_http_detect.py, services/http-detector/test_http_state.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/http-detector/test_http_detect.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

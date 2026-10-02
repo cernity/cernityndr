@@ -1,0 +1,24 @@
+{
+  "detector_id": "http-c2-useragent",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": ["payload-visible"],
+  "attack_techniques": ["T1071.001"],
+  "input_records": ["ndr.http"],
+  "features_used": ["user_agent", "http_method"],
+  "config_params": [],
+  "evidence_produced": { "record": "ndr.finding.candidate.v1", "fields": ["user_agent"] },
+  "known_limitations": [
+    {
+      "description": "T1071.001 detection via user-agent is heuristic and has NOT been verified end-to-end.",
+      "claim": "T1071.001",
+      "unverified": true
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": ["pcap/http-c2.pcap"],
+    "benign_control": ["pcap/benign-http.pcap"],
+    "performance": ["bench/http.json"]
+  },
+  "first_supported_version": "1.0.0"
+}

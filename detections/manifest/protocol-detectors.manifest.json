@@ -1,0 +1,81 @@
+{
+  "detector_id": "protocol-detectors",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1071",
+    "T1090.004",
+    "T1110",
+    "T1571"
+  ],
+  "input_records": [
+    "suricata.tls.v1",
+    "suricata.http.v1",
+    "suricata.ssh.v1",
+    "suricata.flow.v1",
+    "suricata.raw.v1"
+  ],
+  "features_used": [
+    "tls",
+    "quic",
+    "http.http_user_agent",
+    "http.hostname",
+    "dest_port",
+    "app_proto",
+    "flow.bytes_toserver",
+    "flow.bytes_toclient"
+  ],
+  "config_params": [
+    {
+      "name": "JA4_WARMUP",
+      "type": "integer",
+      "default": 5
+    },
+    {
+      "name": "JA4_SEEN_TTL",
+      "type": "number",
+      "default": 86400
+    },
+    {
+      "name": "APPROVED_RESOLVERS",
+      "type": "string",
+      "default": ""
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "TLS rarity (JA4 and server fingerprints), certificate anomalies, DoH and protocol heuristics are not e2e-verified. Rarity needs a warmed baseline and supplied fingerprints; encrypted metadata visibility varies. Exfiltration tactic TA0010 is omitted."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/protocol-detectors/test_proto.py, services/protocol-detectors/test_proto_state.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/protocol-detectors/test_proto.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

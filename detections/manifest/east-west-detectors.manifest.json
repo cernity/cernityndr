@@ -1,0 +1,77 @@
+{
+  "detector_id": "east-west-detectors",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1021",
+    "T1021.002",
+    "T1046",
+    "T1110.003",
+    "T1486",
+    "T1557.001",
+    "T1558.003",
+    "T1558.004"
+  ],
+  "input_records": [
+    "suricata.flow.v1",
+    "suricata.raw.v1",
+    "suricata.dns.v1"
+  ],
+  "features_used": [
+    "src_ip",
+    "dest_ip",
+    "dest_port",
+    "krb5",
+    "dcerpc",
+    "smb",
+    "dns"
+  ],
+  "config_params": [
+    {
+      "name": "EW_WINDOW_SECS",
+      "type": "number",
+      "default": 600
+    },
+    {
+      "name": "EVAL_SECS",
+      "type": "number",
+      "default": 30
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Lateral movement, scanning, Kerberos, SMB and LLMNR heuristics are not e2e-verified; require internal-network classification and protocol metadata."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/east-west-detectors/test_ew.py, services/east-west-detectors/test_ew_state.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/east-west-detectors/test_ew.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

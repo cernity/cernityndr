@@ -1,0 +1,69 @@
+{
+  "detector_id": "behavioral-detectors",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1071",
+    "T1071.004"
+  ],
+  "input_records": [
+    "suricata.flow.v1",
+    "suricata.dns.v1"
+  ],
+  "features_used": [
+    "flow.start",
+    "flow.end",
+    "flow.bytes_toserver",
+    "flow.bytes_toclient",
+    "dns.rrname",
+    "ndpi"
+  ],
+  "config_params": [
+    {
+      "name": "WINDOW_SECS",
+      "type": "number",
+      "default": 600
+    },
+    {
+      "name": "EVAL_SECS",
+      "type": "number",
+      "default": 30
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Beaconing and DNS tunneling are not e2e-verified; synthetic scoring and state tests do not establish golden-PCAP detection. Exfiltration maps only to tactic TA0010, omitted from attack_techniques."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/behavioral-detectors/test_config_source.py, services/behavioral-detectors/test_contract.py, services/behavioral-detectors/test_detectors.py, services/behavioral-detectors/test_metrics.py, services/behavioral-detectors/test_ndpi.py, services/behavioral-detectors/test_ndpi_policy.py, services/behavioral-detectors/test_partition_scope.py, services/behavioral-detectors/test_timing.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/behavioral-detectors/test_detectors.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

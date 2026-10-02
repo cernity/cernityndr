@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "detection-capability.v1",
+  "comment": "Per-DETECTOR Detection Capability Manifest (plan 021 U1). One manifest describes ONE detector: what it needs to run, what it claims to detect, and the tests that back those claims. This is DISTINCT from deploy/central/capability-manifest.json, which is the DEPLOYMENT (producer->topic->consumer) capability manifest; do not conflate the two. Two rules this contract enforces: (1) status=verified_e2e requires at least one backing_tests.golden_pcap (encoded below as an if/then); (2) KTD5 claim/limitation consistency is a cross-field semantic rule checked in contracts/test_detection_capability.py, not expressible here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "detector_id",
+    "version",
+    "status",
+    "required_capabilities",
+    "attack_techniques",
+    "input_records",
+    "features_used",
+    "config_params",
+    "evidence_produced",
+    "known_limitations",
+    "backing_tests",
+    "first_supported_version"
+  ],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" }
+  },
+  "properties": {
+    "detector_id": { "$ref": "#/$defs/token" },
+    "version": { "$ref": "#/$defs/version" },
+    "status": {
+      "comment": "Maturity ladder. verified_e2e is the only status that, per the if/then below, requires golden-pcap backing.",
+      "enum": ["experimental", "shipped", "verified_e2e"]
+    },
+    "required_capabilities": {
+      "comment": "Observation capability tokens the detector needs present (e.g. tls-handshake, ja4, payload-visible).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/token" }
+    },
+    "attack_techniques": {
+      "comment": "ATT&CK technique/sub-technique ids this detector claims to detect.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$" }
+    },
+    "input_records": {
+      "comment": "Input record/table names the detector consumes (e.g. ndr.dns, ndr.flow).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/token" }
+    },
+    "features_used": {
+      "comment": "Named features/signals the detector reads off each input record.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/token" }
+    },
+    "config_params": {
+      "comment": "Tunable parameters the detector exposes.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "$ref": "#/$defs/token" },
+          "type": { "$ref": "#/$defs/token" },
+          "default": {}
+        }
+      }
+    },
+    "evidence_produced": {
+      "comment": "The evidence record the detector emits and the fields it populates as evidence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record", "fields"],
+      "properties": {
+        "record": { "$ref": "#/$defs/token" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/token" } }
+      }
+    },
+    "known_limitations": {
+      "comment": "Honest caveats. A limitation may name a `claim` (a capability token or ATT&CK id) it qualifies and mark it `unverified`; KTD5 (checked in the test) forbids asserting that same claim in required_capabilities/attack_techniques.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description"],
+        "properties": {
+          "description": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S" },
+          "claim": { "$ref": "#/$defs/token" },
+          "unverified": { "type": "boolean" }
+        }
+      }
+    },
+    "backing_tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["golden_pcap", "benign_control", "performance"],
+      "properties": {
+        "golden_pcap": { "type": "array", "items": { "$ref": "#/$defs/token" } },
+        "benign_control": { "type": "array", "items": { "$ref": "#/$defs/token" } },
+        "performance": { "type": "array", "items": { "$ref": "#/$defs/token" } }
+      }
+    },
+    "first_supported_version": { "$ref": "#/$defs/version" }
+  },
+  "allOf": [
+    {
+      "comment": "Rule 1: a verified_e2e detector MUST carry at least one golden-pcap backing test.",
+      "if": {
+        "required": ["status"],
+        "properties": { "status": { "const": "verified_e2e" } }
+      },
+      "then": {
+        "properties": {
+          "backing_tests": {
+            "required": ["golden_pcap"],
+            "properties": { "golden_pcap": { "minItems": 1 } }
+          }
+        }
+      }
+    }
+  ]
+}

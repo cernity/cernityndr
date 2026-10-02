@@ -1,0 +1,75 @@
+{
+  "detector_id": "threat-intel",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [
+    "T1071"
+  ],
+  "input_records": [
+    "suricata.flow.v1",
+    "suricata.tls.v1",
+    "suricata.dns.v1",
+    "suricata.http.v1",
+    "suricata.file.v1"
+  ],
+  "features_used": [
+    "dest_ip",
+    "tls",
+    "dns",
+    "http",
+    "fileinfo"
+  ],
+  "config_params": [
+    {
+      "name": "REFRESH_SECS",
+      "type": "number",
+      "default": 21600
+    },
+    {
+      "name": "INTEL_DB",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "name": "INTEL_FEEDS",
+      "type": "string",
+      "default": ""
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Indicator matching is not e2e-verified and depends on feed freshness and observed fields. Managed hash matching requires INTEL_DB; static matching is not equivalent to managed lifecycle enforcement. c2 maps to T1071; malware hash hits have no technique mapping."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/threat-intel/test_bu3_dedup.py, services/threat-intel/test_lifecycle.py, services/threat-intel/test_ti.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/threat-intel/test_ti.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

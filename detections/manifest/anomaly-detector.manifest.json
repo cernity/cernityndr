@@ -1,0 +1,68 @@
+{
+  "detector_id": "anomaly-detector",
+  "version": "1.0.0",
+  "status": "shipped",
+  "required_capabilities": [],
+  "attack_techniques": [],
+  "input_records": [
+    "suricata.anomaly.v1",
+    "ndr.observation.normalized.v1"
+  ],
+  "features_used": [
+    "anomaly",
+    "ts.normalized",
+    "entities",
+    "fields.src_ip",
+    "fields.flow.bytes_toserver",
+    "obs_id",
+    "sensor_id"
+  ],
+  "config_params": [
+    {
+      "name": "FEATURE_WINDOW_SECS",
+      "type": "integer",
+      "default": 300
+    },
+    {
+      "name": "FEATURE_LATENESS_SECS",
+      "type": "integer",
+      "default": 60
+    }
+  ],
+  "evidence_produced": {
+    "record": "contracts/finding.schema.json",
+    "fields": [
+      "finding_id",
+      "tenant_id",
+      "detector_id",
+      "detector_version",
+      "category",
+      "severity",
+      "confidence",
+      "first_seen",
+      "last_seen",
+      "entities",
+      "state",
+      "evidence_refs"
+    ]
+  },
+  "known_limitations": [
+    {
+      "description": "Protocol anomaly promotion and outbound-volume baseline detection are not e2e-verified. Run one replica; local cohort history resets on restart and late observations are excluded. No existing ATT&CK mapping for category anomaly."
+    },
+    {
+      "description": "Unit/state test sources (not golden-PCAP evidence): services/anomaly-detector/test_anomaly.py"
+    },
+    {
+      "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    }
+  ],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": [
+      "services/anomaly-detector/test_anomaly.py"
+    ],
+    "performance": []
+  },
+  "first_supported_version": "0.0.1"
+}

@@ -1,0 +1,18 @@
+{
+  "detector_id": "tls-ja4-known-bad",
+  "version": "2.0.0",
+  "status": "verified_e2e",
+  "required_capabilities": ["tls-handshake", "ja4"],
+  "attack_techniques": ["T1573.002"],
+  "input_records": ["ndr.tls"],
+  "features_used": ["ja4", "sni"],
+  "config_params": [],
+  "evidence_produced": { "record": "ndr.finding.candidate.v1", "fields": ["ja4"] },
+  "known_limitations": [],
+  "backing_tests": {
+    "golden_pcap": [],
+    "benign_control": ["pcap/benign-tls-browsers.pcap"],
+    "performance": ["bench/tls-50k-handshakes.json"]
+  },
+  "first_supported_version": "2.0.0"
+}

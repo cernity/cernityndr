@@ -1,0 +1,11 @@
+{
+  "detection_id": "behavioral-beacon",
+  "source": "behavioral",
+  "status": "shadow",
+  "version": "2.3.1",
+  "manifest_ref": "detections/manifest/behavioral-detectors.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "registry-bootstrap", "from": null, "to": "draft"},
+    {"ts": "2026-09-15T00:00:00Z", "actor": "carter", "from": "draft", "to": "shadow"}
+  ]
+}

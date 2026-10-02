@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "detection-registry.v1",
+  "comment": "Per-DETECTION registry entry (plan 025 U1). One entry tracks one detection's identity (detection_id + source), its lifecycle status, its version, a manifest_ref pointing at the SHIPPED Detection Capability Manifest that backs it (detections/manifest/<id>.manifest.json, contracts/detection-capability.schema.json), and an append-only change_history of status transitions. Two rules this contract carries: (1) manifest_ref must look like a detections/manifest/*.manifest.json path (pattern below) AND resolve to a real file on disk — the file-existence half is a consistency check in contracts/test_detection_registry.py, not expressible here; (2) change_history is APPEND-ONLY with prior entries immutable — a store invariant enforced in services/detection-registry/store.py, not in schema. Lifecycle/promotion rules (which transitions are legal) are U2 and deliberately NOT encoded here: any status is a valid `to`, and this schema does not police the transition graph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "detection_id",
+    "source",
+    "status",
+    "version",
+    "manifest_ref",
+    "change_history"
+  ],
+  "$defs": {
+    "token": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+    "status": {
+      "comment": "Lifecycle rung. The legal transition graph between these is U2; this contract treats every value as a valid state.",
+      "enum": ["draft", "shadow", "active", "retired"]
+    }
+  },
+  "properties": {
+    "detection_id": { "$ref": "#/$defs/token" },
+    "source": {
+      "comment": "Which detection engine/source family produced this detection.",
+      "enum": ["suricata-sig", "behavioral", "dns", "anomaly", "yara", "ti-policy"]
+    },
+    "status": { "$ref": "#/$defs/status" },
+    "version": { "$ref": "#/$defs/version" },
+    "manifest_ref": {
+      "comment": "Repo-relative path to the backing Detection Capability Manifest. Pattern enforces the shape; file existence is checked in the contract test / store.",
+      "type": "string",
+      "pattern": "^detections/manifest/[^/]+\\.manifest\\.json$"
+    },
+    "change_history": {
+      "comment": "Append-only log of status transitions. The first record carries from=null (creation). Append-only + prior-entry immutability is enforced by the store, not here.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ts", "actor", "from", "to"],
+        "properties": {
+          "ts": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "actor": { "$ref": "#/$defs/token" },
+          "from": {
+            "comment": "Prior status, or null for the creation record.",
+            "oneOf": [{ "$ref": "#/$defs/status" }, { "type": "null" }]
+          },
+          "to": { "$ref": "#/$defs/status" }
+        }
+      }
+    }
+  }
+}

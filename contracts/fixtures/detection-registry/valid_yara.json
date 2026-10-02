@@ -1,0 +1,10 @@
+{
+  "detection_id": "yara-cobaltstrike-beacon",
+  "source": "yara",
+  "status": "active",
+  "version": "4.0.0",
+  "manifest_ref": "detections/manifest/protocol-detectors.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "registry-bootstrap", "from": null, "to": "active"}
+  ]
+}

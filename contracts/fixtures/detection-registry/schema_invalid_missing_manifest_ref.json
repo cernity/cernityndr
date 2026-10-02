@@ -1,0 +1,9 @@
+{
+  "detection_id": "missing-manifest-ref",
+  "source": "dns",
+  "status": "active",
+  "version": "1.0.0",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "carter", "from": null, "to": "active"}
+  ]
+}

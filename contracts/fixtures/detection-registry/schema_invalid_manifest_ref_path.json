@@ -1,0 +1,10 @@
+{
+  "detection_id": "manifest-ref-wrong-path",
+  "source": "dns",
+  "status": "active",
+  "version": "1.0.0",
+  "manifest_ref": "detections/manifest/../../etc/passwd",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "carter", "from": null, "to": "active"}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "change_history": [
+    {
+      "actor": "registry-bootstrap",
+      "from": null,
+      "to": "active",
+      "ts": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "detection_id": "dns-tunnel-entropy",
+  "manifest_ref": "detections/manifest/dns-detector.manifest.json",
+  "source": "dns",
+  "status": "active",
+  "version": "1.3.0"
+}

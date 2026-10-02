@@ -1,0 +1,10 @@
+{
+  "detection_id": "dangling-manifest-ref",
+  "source": "yara",
+  "status": "draft",
+  "version": "0.1.0",
+  "manifest_ref": "detections/manifest/does-not-exist.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "carter", "from": null, "to": "draft"}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "comment": "Published MEASURED-quality input for scoreboard.py. This is an ATTRIBUTABLE feedback-service export: scoreboard.py feeds 'dispositions' + the finding -> detector_id join through services/feedback-service/quality.py at generation time and copies the computed rate-dicts verbatim; it NEVER hand-writes a precision/fp number. No attributable production disposition export is available to commit to this repo, so 'dispositions' and 'findings' are EMPTY and every published detection honestly falls to measured:false (reason: insufficient dispositions) per the U3 honesty gate. When a real export with provenance is committed here, measured numbers appear for exactly the detectors it covers. Synthetic dispositions used to exercise the measured path live ONLY in services/detection-registry/test_scoreboard.py fixtures, never here. 'findings' maps finding_id -> the manifest detector_id a finding carries (the key quality.report() groups by); every disposition's source_ts must fall inside 'window'.",
+  "provenance": {
+    "source": "none",
+    "note": "No attributable production feedback-service disposition export is committed to this dev repo. Until one is, the published scoreboard publishes no measured numbers.",
+    "exported_at": null,
+    "exported_by": null
+  },
+  "tenant": "published",
+  "window": {
+    "from": "2026-09-01T00:00:00Z",
+    "to": "2026-10-01T00:00:00Z"
+  },
+  "findings": {},
+  "dispositions": []
+}

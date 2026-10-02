@@ -1,0 +1,21 @@
+{
+  "change_history": [
+    {
+      "actor": "registry-bootstrap",
+      "from": null,
+      "to": "active",
+      "ts": "2026-09-01T00:00:00Z"
+    },
+    {
+      "actor": "carter",
+      "from": "active",
+      "to": "retired",
+      "ts": "2026-09-28T00:00:00Z"
+    }
+  ],
+  "detection_id": "ti-policy-blocklist-match",
+  "manifest_ref": "detections/manifest/threat-intel.manifest.json",
+  "source": "ti-policy",
+  "status": "retired",
+  "version": "1.2.0"
+}

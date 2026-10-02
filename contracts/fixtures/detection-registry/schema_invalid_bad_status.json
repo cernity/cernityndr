@@ -1,0 +1,10 @@
+{
+  "detection_id": "bad-status",
+  "source": "dns",
+  "status": "promoted",
+  "version": "1.0.0",
+  "manifest_ref": "detections/manifest/dns-detector.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "carter", "from": null, "to": "active"}
+  ]
+}

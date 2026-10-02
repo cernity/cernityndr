@@ -1,0 +1,12 @@
+{
+  "detection_id": "suricata-sig-et-malware-c2",
+  "source": "suricata-sig",
+  "status": "active",
+  "version": "1.0.0",
+  "manifest_ref": "detections/manifest/ids-alerts.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-01T00:00:00Z", "actor": "registry-bootstrap", "from": null, "to": "draft"},
+    {"ts": "2026-09-10T00:00:00Z", "actor": "carter", "from": "draft", "to": "shadow"},
+    {"ts": "2026-09-20T00:00:00Z", "actor": "carter", "from": "shadow", "to": "active"}
+  ]
+}

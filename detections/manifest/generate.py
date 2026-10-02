@@ -122,7 +122,11 @@ def check(manifest_dir, generated_dir):
         fresh = Path(tmp)
         write(fresh, rendered)
         fresh_names = {p.name for p in fresh.iterdir()}
-        committed_names = ({p.name for p in generated_dir.iterdir()}
+        # _generated/ is shared: services/detection-registry/scoreboard.py writes its
+        # own file here too and polices it separately (docs/decisions/008). Ignore
+        # sibling-owned outputs so this gate flags only genuine orphans among OUR set.
+        foreign = {"detection-quality-scoreboard.json"}
+        committed_names = ({p.name for p in generated_dir.iterdir() if p.name not in foreign}
                            if generated_dir.exists() else set())
         drift = set(fresh_names) ^ set(committed_names)  # missing or unexpected
         for name in fresh_names & committed_names:        # changed (byte-exact)

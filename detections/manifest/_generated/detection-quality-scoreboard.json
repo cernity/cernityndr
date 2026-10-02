@@ -1,0 +1,68 @@
+[
+  {
+    "attack_techniques": [],
+    "detection_id": "anomaly-flow-volume",
+    "detector_id": "anomaly-detector",
+    "quality": {
+      "measured": false,
+      "reason": "insufficient dispositions"
+    },
+    "source": "anomaly",
+    "status": "shipped"
+  },
+  {
+    "attack_techniques": [
+      "T1071",
+      "T1071.004"
+    ],
+    "detection_id": "behavioral-beacon",
+    "detector_id": "behavioral-detectors",
+    "quality": {
+      "measured": false,
+      "reason": "insufficient dispositions"
+    },
+    "source": "behavioral",
+    "status": "shipped"
+  },
+  {
+    "attack_techniques": [
+      "T1071"
+    ],
+    "detection_id": "dns-tunnel-entropy",
+    "detector_id": "dns-detector",
+    "quality": {
+      "measured": false,
+      "reason": "insufficient dispositions"
+    },
+    "source": "dns",
+    "status": "shipped"
+  },
+  {
+    "attack_techniques": [
+      "T1021",
+      "T1046",
+      "T1071"
+    ],
+    "detection_id": "suricata-sig-et-malware-c2",
+    "detector_id": "ids-alerts",
+    "quality": {
+      "measured": false,
+      "reason": "insufficient dispositions"
+    },
+    "source": "suricata-sig",
+    "status": "shipped"
+  },
+  {
+    "attack_techniques": [
+      "T1071"
+    ],
+    "detection_id": "ti-policy-blocklist-match",
+    "detector_id": "threat-intel",
+    "quality": {
+      "measured": false,
+      "reason": "insufficient dispositions"
+    },
+    "source": "ti-policy",
+    "status": "shipped"
+  }
+]

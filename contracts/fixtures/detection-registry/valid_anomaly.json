@@ -1,0 +1,10 @@
+{
+  "detection_id": "anomaly-flow-volume",
+  "source": "anomaly",
+  "status": "draft",
+  "version": "0.1.0",
+  "manifest_ref": "detections/manifest/anomaly-detector.manifest.json",
+  "change_history": [
+    {"ts": "2026-09-25T00:00:00Z", "actor": "registry-bootstrap", "from": null, "to": "draft"}
+  ]
+}

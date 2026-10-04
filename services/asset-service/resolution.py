@@ -88,7 +88,47 @@ def extract_evidence(eve: dict) -> list[dict]:
             out.append({"ip": ip, "mac": d.get("client_mac"),
                         "hostname": d.get("hostname"),
                         "lease_secs": int(lease) if lease else None, "src": "dhcp"})
+    elif et == "tls":
+        # U3c additive (observed-only): a TLS handshake carries two distinct
+        # fingerprints and a presented cert. The CLIENT (src) fingerprint (ja4)
+        # describes the client; the SERVER (dst) fingerprint (ja4s) and the
+        # presented certificate describe the server. Each value attaches ONLY to
+        # the entity it attests — never the client's ja4 onto the server, nor the
+        # server's cert onto the client (that would fabricate identity the packet
+        # does not carry). A field the record lacks yields no attribute (ADR 010).
+        t = eve.get("tls", {}) or {}
+        src, dst = eve.get("src_ip"), eve.get("dest_ip")
+        client_ja4 = [t["ja4"]] if t.get("ja4") else []
+        server_ja4 = [t["ja4s"]] if t.get("ja4s") else []
+        certs = [c for c in (t.get("subject"), t.get("issuerdn"), t.get("fingerprint")) if c]
+        if src and client_ja4:
+            out.append(_attr_obs(src, "tls", ja4=client_ja4))
+        if dst and (server_ja4 or certs):
+            out.append(_attr_obs(dst, "tls", ja4=server_ja4, certificates=certs))
+    elif et == "http":
+        # U3c additive (observed-only): the user-agent is the CLIENT's software
+        # (src applications); the Host header names the SERVER the client reached
+        # (dst hostname) — NOT the client's own name, so it attaches to dst.
+        h = eve.get("http", {}) or {}
+        src, dst = eve.get("src_ip"), eve.get("dest_ip")
+        ua = h.get("http_user_agent")
+        host = h.get("hostname")
+        if src and ua:
+            out.append(_attr_obs(src, "http", applications=[ua]))
+        if dst and host:
+            out.append(_attr_obs(dst, "http", hostname=host))
+    # dns + flow DO NOT set attributes — they produce relationship edges
+    # (relationships.build_edges). flow still emits its ip-only identity rows above.
     return out
+
+
+def _attr_obs(ip: str, src: str, hostname=None, **attrs) -> dict:
+    """An observation row carrying additive U3c attributes, in the SAME shape as the
+    shipped identity rows (ip/mac/hostname/lease_secs/src) so merge() folds it
+    identically — plus only the observed attribute keys (never a default)."""
+    obs = {"ip": ip, "mac": None, "hostname": hostname, "lease_secs": None, "src": src}
+    obs.update({k: v for k, v in attrs.items() if v})
+    return obs
 
 
 # ── time-bounded identity bindings (§13.5) ─────────────────────────────────────
@@ -233,8 +273,36 @@ def asset_key(obs: dict, bindings: dict, ts) -> str:
     return "ip:" + ip if ip else "ip:unknown"
 
 
+# U3a additive entity attributes (model only — NO ingestion wiring here; extract_evidence
+# does not yet populate these, so they are carried only when a caller supplies them on the
+# obs row). Scalars set-when-observed; lists accumulate like the shipped *_set fields. An
+# attribute is recorded ONLY when the observation actually carries it — role/os/listening-
+# service etc. are NEVER inferred or asserted when unobserved (per-attribute provenance below
+# makes "observed" explicit; absent from provenance == never seen).
+_ATTR_SCALARS = ("username", "role", "os_hint", "criticality", "owner")
+_ATTR_LISTS = ("applications", "listening_services", "certificates", "ja4")
+
+
+def _note_provenance(a: dict, attr: str, obs: dict, ts: str) -> None:
+    """Record that `attr` was set from an OBSERVED value (source + when). Created lazily so a
+    record with no additive attributes carries no provenance key (shipped shape preserved).
+    The schema permits attribute_provenance: null (additive + nullable) — a present-but-null
+    value is normalized to a fresh mapping here, else recording would raise (setdefault keeps
+    the existing None)."""
+    prov = a.get("attribute_provenance")
+    if prov is None:                               # absent OR explicitly null
+        prov = a["attribute_provenance"] = {}
+    prov[attr] = {"source": obs.get("src", ""), "observed_at": ts}
+
+
 def merge(asset: dict | None, obs: dict, ts: str) -> dict:
-    """Merge an observation into an asset record (accumulate sets, advance seen)."""
+    """Merge an observation into an asset record (accumulate sets, advance seen).
+
+    U3a (additive): also carry optional entity attributes (_ATTR_SCALARS / _ATTR_LISTS) ONLY
+    when the observation actually provides them, recording per-attribute provenance. An
+    attribute the obs does not carry stays ABSENT — never fabricated, defaulted, or inferred.
+    Signature and the shipped entity shape are unchanged: an obs with none of the new keys
+    yields exactly the pre-U3a record (no new keys, no provenance)."""
     a = asset or {"ip_set": [], "mac_set": [], "hostname_set": [],
                   "evidence_sources": [], "first_seen": ts, "confidence": 0.5,
                   "role_if_known": ""}
@@ -247,6 +315,19 @@ def merge(asset: dict | None, obs: dict, ts: str) -> dict:
     a["last_seen"] = ts
     # confidence rises with corroborating evidence types.
     a["confidence"] = min(1.0, 0.5 + 0.1 * len(set(a["evidence_sources"])))
+    for attr in _ATTR_SCALARS:
+        val = obs.get(attr)
+        if val is not None:                        # observed -> set + provenance
+            a[attr] = val
+            _note_provenance(a, attr, obs, ts)
+    for attr in _ATTR_LISTS:
+        vals = obs.get(attr)
+        if vals:                                   # observed non-empty -> accumulate
+            existing = a.get(attr) or []
+            new = existing + [v for v in vals if v not in existing]
+            if attr not in a or new != existing:
+                a[attr] = new
+                _note_provenance(a, attr, obs, ts)
     return a
 
 
@@ -593,6 +674,39 @@ def _timeline_for_tenant(client, tenant: str, entity: str) -> dict:
             if _in_window(obs, windows):     # exclude activity outside the binding window
                 observations.append(obs)
     return build_timeline(observations, fact_changes, entity=entity, attribution=attribution)
+
+
+def fetch_relationships(client, grants, entity: str) -> dict:
+    """Read one entity's observed relationship edges from ClickHouse, scoped STRICTLY
+    PER TENANT (§21), mirroring fetch_timeline. An edge is returned whether the entity
+    is the src OR the dst endpoint. Each edge's evidence JSON is decoded back to an
+    object for the caller. entity is a bound parameter, never interpolated; the live
+    SQL is verified in the real env, the per-tenant scoping is unit-tested with a fake
+    client."""
+    return {"entity": entity,
+            "tenants": {t: _relationships_for_tenant(client, t, entity) for t in grants}}
+
+
+def _relationships_for_tenant(client, tenant: str, entity: str) -> list[dict]:
+    sql = (
+        "SELECT tenant_id, src_entity, dst_entity, kind, first_seen, last_seen, evidence "
+        "FROM ndr.entity_relationship FINAL "
+        "WHERE tenant_id = {tenant:String} "
+        "AND (src_entity = {entity:String} OR dst_entity = {entity:String}) "
+        "ORDER BY src_entity, dst_entity, kind LIMIT {limit:UInt32}")
+    fp = {"tenant": tenant, "entity": entity, "limit": _TIMELINE_LIMIT}
+    edges: list[dict] = []
+    for r in _rows(client.query(sql, parameters=fp)):
+        ev = r.get("evidence")
+        if isinstance(ev, str) and ev:
+            try:
+                ev = json.loads(ev)
+            except ValueError:
+                pass                                   # keep the raw string if not JSON
+        edges.append({"src_entity": r["src_entity"], "dst_entity": r["dst_entity"],
+                      "kind": r["kind"], "first_seen": _iso(r["first_seen"]),
+                      "last_seen": _iso(r["last_seen"]), "evidence": ev})
+    return edges
 
 
 def _rows(result) -> list[dict]:

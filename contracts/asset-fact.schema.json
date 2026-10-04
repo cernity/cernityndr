@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/asset-fact.schema.json",
+  "title": "asset-fact",
+  "description": "Origin: entity-graph U4. A ONE-WAY authoritative fact INGESTED from an external CMDB (NetBox) onto an entity. The CMDB is authority for EXTERNALLY-ASSIGNED attributes ONLY — predicate is restricted to {owner, criticality}; it can NEVER carry an OBSERVED predicate (ip/mac/hostname/role/ja4/certs/applications/listening_services come from telemetry, not a CMDB). Every fact carries provenance: source=netbox-cmdb, the entity it describes (entity_ref), and the sync instant (synced_at). Keyed by (tenant_id, entity_ref, predicate) — tenant isolation is a partition invariant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant_id", "entity_ref", "predicate", "value", "source", "authority", "synced_at"],
+  "properties": {
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "entity_ref": { "type": "string", "minLength": 1, "description": "The entity the fact describes — an IP or a stable asset_key." },
+    "predicate": { "enum": ["owner", "criticality"], "description": "EXTERNALLY-ASSIGNED attributes ONLY. A CMDB cannot assert an observed predicate." },
+    "value": { "type": "string", "minLength": 1 },
+    "source": { "const": "netbox-cmdb" },
+    "authority": { "const": true, "description": "The CMDB is authoritative for this predicate (one-way ingest)." },
+    "synced_at": { "type": "string", "format": "date-time" }
+  }
+}

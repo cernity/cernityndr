@@ -24,9 +24,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import ndr_runtime
+import relationships
 import resolution
 
 log = ndr_runtime.setup_logging("asset-service")
@@ -39,11 +40,15 @@ SENSOR = os.environ.get("NDR_SENSOR", "sensor-1")   # fallback id (single-sensor
 FLUSH_SECS = float(os.environ.get("NDR_FLUSH_SECS", "15"))
 API_PORT = int(os.environ.get("PORT", "8093"))
 COLS = ["tenant_id", "asset_key", "first_seen", "last_seen", "ip_set", "mac_set",
-        "hostname_set", "role_if_known", "evidence_sources", "confidence"]
+        "hostname_set", "role_if_known", "evidence_sources", "confidence",
+        "username", "role", "os_hint", "criticality", "owner", "applications",
+        "listening_services", "certificates", "ja4", "attribute_provenance"]
 FACT_COLS = ["tenant_id", "subject", "predicate", "value", "confidence",
              "valid_from", "valid_to", "source_type", "observation_id",
              "method", "classifier_version", "is_deleted"]
 OBS_COLS = ["tenant_id", "obs_id", "normalized_time", "entity_values", "observation"]
+EDGE_COLS = ["tenant_id", "src_entity", "dst_entity", "kind", "first_seen",
+             "last_seen", "evidence"]
 
 _running = True
 _assets: dict = {}          # asset_key -> asset dict
@@ -56,6 +61,10 @@ _emitted: dict = {}         # (subject, predicate) -> set of (valid_from, value)
                             #   dropped; value is in the key so a MAC's multiple IPs at
                             #   one instant are tracked as distinct intervals)
 _pending_obs: dict = {}     # obs_id -> identity evidence row backing a fact's obs_id
+_edges: dict = {}           # (src_entity, dst_entity, kind) -> {first_seen, last_seen,
+                            #   evidence}  (U3c CUMULATIVE observed relationship spans —
+                            #   kept across flushes, reloaded on restart; never cleared)
+_edges_dirty: set = set()   # edge keys whose span/evidence changed since the last flush
 
 
 def _stop(*_):
@@ -127,6 +136,25 @@ def observe(eve: dict, topic: str, partition: int, offset: int, normalized_ts: s
         key = _fold_observation(obs, obs_id, tenant, ts)
         _assets[key] = resolution.merge(_assets.get(key), obs, ts)
         _dirty.add(key)
+    # U3c: observed entity-to-entity edges (dns/flow). Resolved AFTER the fold loop so
+    # endpoints see this record's bindings; keyed by (src, dst, kind) so re-observations
+    # advance the CUMULATIVE span rather than duplicating. _edges is the live span across
+    # flushes/restarts (restore_state reloads it), so a late observation widens the durable
+    # bounds instead of restarting at its own instant. Pure extraction in relationships.py.
+    for edge in relationships.build_edges(eve, _bindings, ts):
+        k = (edge["src_entity"], edge["dst_entity"], edge["kind"])
+        slot = _edges.get(k)
+        if slot is None:
+            _edges[k] = {"first_seen": ts, "last_seen": ts, "evidence": edge["evidence"]}
+            _edges_dirty.add(k)
+        else:
+            if resolution._instant(ts) < resolution._instant(slot["first_seen"]):
+                slot["first_seen"] = ts           # late observation widens first_seen back
+                _edges_dirty.add(k)
+            if resolution._instant(ts) >= resolution._instant(slot["last_seen"]):
+                slot["last_seen"] = ts            # widen the span; carry the latest evidence
+                slot["evidence"] = edge["evidence"]
+                _edges_dirty.add(k)
 
 
 def flush(ch):
@@ -136,7 +164,12 @@ def flush(ch):
             a = _assets[key]
             rows.append([TENANT, key, _dt(a["first_seen"]), _dt(a["last_seen"]),
                          a["ip_set"], a["mac_set"], a["hostname_set"],
-                         a.get("role_if_known", ""), a["evidence_sources"], a["confidence"]])
+                         a.get("role_if_known", ""), a["evidence_sources"], a["confidence"],
+                         *[a.get(attr) or None for attr in resolution._ATTR_SCALARS],
+                         *[a.get(attr) or [] for attr in resolution._ATTR_LISTS],
+                         json.dumps(a["attribute_provenance"], sort_keys=True,
+                                    separators=(",", ":"), ensure_ascii=False)
+                         if a.get("attribute_provenance") else ""])
         ch.insert("ndr.asset", rows, column_names=COLS)
         log.info("upserted %d assets (%d total tracked)", len(rows), len(_assets))
         _dirty.clear()
@@ -181,6 +214,23 @@ def flush(ch):
         _emitted.update(new_emitted)
         log.info("wrote %d fact interval rows", len(rows))
         _pending_facts.clear()
+    if _edges_dirty:
+        # U3c: persist observed relationship edges. Bounds are CUMULATIVE — _edges holds the
+        # live span across flushes (NEVER cleared) and restarts (restore_state reloads it);
+        # only the dirty keys re-emit. Same persist-before-commit ordering (§13.4) — this
+        # runs inside flush(), before persist_and_commit() advances the offset. A raised
+        # insert leaves _edges_dirty intact (cleared only AFTER insert) so the next flush
+        # retries; ReplacingMergeTree(updated_at) collapses the at-least-once re-emit, keeping
+        # the widened span + latest evidence rather than regressing to a single instant.
+        rows = []
+        for k in _edges_dirty:
+            e = _edges[k]
+            rows.append([TENANT, *k, _dt(e["first_seen"]), _dt(e["last_seen"]),
+                         json.dumps(e["evidence"], sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=False)])
+        ch.insert("ndr.entity_relationship", rows, column_names=EDGE_COLS)
+        log.info("wrote %d entity relationship edges", len(rows))
+        _edges_dirty.clear()
 
 
 def persist_and_commit(ch, consumer):
@@ -216,6 +266,46 @@ def _load_emitted(ch):
             (resolution._iso(row["valid_from"]), row["value"], row["observation_id"]))
 
 
+def _load_assets(ch):
+    """Reload durable entity snapshots, keeping unobserved additions absent."""
+    res = ch.query("SELECT " + ", ".join(COLS) +
+                   " FROM ndr.asset FINAL WHERE tenant_id = {tenant:String}",
+                   parameters={"tenant": TENANT})
+    for row in resolution._rows(res):
+        key = row.pop("asset_key")
+        row.pop("tenant_id")
+        row["first_seen"] = resolution._iso(row["first_seen"])
+        row["last_seen"] = resolution._iso(row["last_seen"])
+        provenance = row.pop("attribute_provenance", None)
+        if provenance:
+            decoded = json.loads(provenance)
+            if decoded:
+                row["attribute_provenance"] = decoded
+        for attr in (*resolution._ATTR_SCALARS, *resolution._ATTR_LISTS):
+            if not row.get(attr):
+                row.pop(attr, None)
+        _assets[key] = row
+
+
+def _load_edges(ch):
+    """Reload the CUMULATIVE relationship spans a prior process persisted so a re-observed
+    edge widens [first_seen, last_seen] from the durable bounds instead of restarting at the
+    new observation's instant — which would regress first_seen and lose the span under
+    ReplacingMergeTree(updated_at). Reloaded edges are NOT marked dirty (already durable);
+    only a fresh live observation re-flushes one. evidence is decoded back to the dict shape
+    observe() holds so a later re-flush re-serializes it identically."""
+    res = ch.query(
+        "SELECT src_entity, dst_entity, kind, first_seen, last_seen, evidence "
+        "FROM ndr.entity_relationship FINAL WHERE tenant_id = {tenant:String}",
+        parameters={"tenant": TENANT})
+    for row in resolution._rows(res):
+        ev = row["evidence"]
+        _edges[(row["src_entity"], row["dst_entity"], row["kind"])] = {
+            "first_seen": resolution._iso(row["first_seen"]),
+            "last_seen": resolution._iso(row["last_seen"]),
+            "evidence": json.loads(ev) if isinstance(ev, str) and ev else ev}
+
+
 def restore_state(ch):
     """Rebuild fact + binding state after a restart by REPLAYING the durable RAW evidence
     (ndr.identity_observation) through the SAME fold path observe() uses, so the interval
@@ -231,6 +321,8 @@ def restore_state(ch):
     rebuilt intervals stay dirty and are re-persisted here (idempotent under
     ReplacingMergeTree); nothing is marked clean until that repair flush's insert
     succeeds."""
+    _load_assets(ch)                        # entity attributes are not in raw identity evidence
+    _load_edges(ch)                         # cumulative relationship spans (U3c)
     _load_emitted(ch)                       # reconcile against prior persisted intervals
     sql = ("SELECT tenant_id, obs_id, normalized_time, observation "
            "FROM ndr.identity_observation FINAL WHERE tenant_id = {tenant:String} "
@@ -279,8 +371,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _audit(self, request_id, actor, tenants, entity, outcome, **extra):
-        event = {"action": "entity.timeline", "resource_type": "entity",
+    def _audit(self, request_id, actor, tenants, entity, outcome,
+               action="entity.timeline", **extra):
+        event = {"action": action, "resource_type": "entity",
                  "actor": actor or "anonymous",
                  "tenant_scope": list(tenants) if tenants else [],
                  "source_ip": self.client_address[0], "request_id": request_id,
@@ -296,30 +389,43 @@ class _Handler(BaseHTTPRequestHandler):
         request_id = self.headers.get("X-Request-Id") or uuid.uuid4().hex
         auth = self.headers.get("Authorization", "")
         actor = _actor(auth)
-        # /entity/{id}/timeline
+        # /entity/{id}/timeline  and  /entity/{id}/relationships (U3c) — same shape:
+        # auth (401) -> validate (400) -> per-tenant fetch (503 on backend failure),
+        # audited on EVERY outcome, including a non-matching path (404 routing miss).
         parts = [p for p in u.path.split("/") if p]
-        if not (len(parts) == 3 and parts[0] == "entity" and parts[2] == "timeline"):
+        if not (len(parts) == 3 and parts[0] == "entity"
+                and parts[2] in ("timeline", "relationships")):
+            self._audit(request_id, actor, None,
+                        unquote(parts[1]) if len(parts) > 1 else "", "not_found",
+                        action="entity.route")
             return self._send(404, {"error": "not found"})
-        from urllib.parse import unquote
+        view = parts[2]
+        action = "entity." + view
         entity_raw = unquote(parts[1])
         grants = resolution.grants_for_token(self.tokens, auth)
         if grants is None:
-            self._audit(request_id, actor, None, entity_raw, "denied")
+            self._audit(request_id, actor, None, entity_raw, "denied", action=action)
             return self._send(401, {"error": "unauthorized", "request_id": request_id})
         try:
             entity = resolution.validate_entity(entity_raw)
         except ValueError as e:
-            self._audit(request_id, actor, grants, entity_raw, "bad_request", reason=str(e))
+            self._audit(request_id, actor, grants, entity_raw, "bad_request",
+                        action=action, reason=str(e))
             return self._send(400, {"error": str(e), "request_id": request_id})
+        fetch = (resolution.fetch_timeline if view == "timeline"
+                 else resolution.fetch_relationships)
         try:
-            result = resolution.fetch_timeline(self.client, grants, entity)
+            result = fetch(self.client, grants, entity)
         except Exception:                      # noqa: BLE001 — any backend failure -> controlled 5xx
-            log.exception("timeline query failed request_id=%s", request_id)
-            self._audit(request_id, actor, grants, entity, "error")
-            return self._send(503, {"error": "timeline backend unavailable",
+            log.exception("%s query failed request_id=%s", view, request_id)
+            self._audit(request_id, actor, grants, entity, "error", action=action)
+            return self._send(503, {"error": view + " backend unavailable",
                                     "request_id": request_id})
+        returned = (sum(len(t["events"]) for t in result["tenants"].values())
+                    if view == "timeline"
+                    else sum(len(edges) for edges in result["tenants"].values()))
         self._audit(request_id, actor, grants, entity, "success",
-                    returned=sum(len(t["events"]) for t in result["tenants"].values()))
+                    action=action, returned=returned)
         return self._send(200, result)
 
 

@@ -17,6 +17,28 @@
     "role_if_known": { "type": "string" },
     "evidence_sources": { "type": "array", "items": { "type": "string" } },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "username": { "type": ["string", "null"], "description": "U3a. Observed account on the entity. Set ONLY from observed evidence — never inferred." },
+    "role": { "type": ["string", "null"], "description": "U3a. Observed role (distinct from the shipped role_if_known). Set ONLY from observed evidence." },
+    "os_hint": { "type": ["string", "null"], "description": "U3a. Observed OS hint. Set ONLY from observed evidence — never asserted when unobserved." },
+    "criticality": { "type": ["string", "null"], "description": "U3a. Externally-assigned criticality (e.g. low/medium/high/crown-jewel). Set ONLY when supplied." },
+    "owner": { "type": ["string", "null"], "description": "U3a. Externally-assigned owner. Set ONLY when supplied." },
+    "applications": { "type": ["array", "null"], "description": "U3a. Observed applications. ponytail: item shape settles in U3b ingestion; unconstrained until then." },
+    "listening_services": { "type": ["array", "null"], "description": "U3a. Observed listening services. ponytail: item shape (bare string vs {port,proto}) settles in U3b ingestion." },
+    "certificates": { "type": ["array", "null"], "description": "U3a. Observed certificate identifiers. ponytail: item shape settles in U3b ingestion." },
+    "ja4": { "type": ["array", "null"], "description": "U3a. Observed JA4(+) fingerprints. ponytail: item shape settles in U3b ingestion." },
+    "attribute_provenance": {
+      "description": "U3a. Per-attribute provenance for the additive attributes above. A key present here records WHERE and WHEN that attribute was observed; an attribute absent here was NEVER observed (and therefore never inferred/asserted). Additive + nullable — shipped records omit it.",
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "observed_at"],
+        "properties": {
+          "source": { "type": "string" },
+          "observed_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
     "facts": {
       "description": "U7 (design §13.4): temporal, evidence-backed facts. Each attribution carries a value, a validity interval [valid_from, valid_to), a confidence and an evidence-backed source. A changed value opens a NEW interval (valid_to on the prior); it never overwrites. valid_to null == still valid.",
       "type": "array",

@@ -569,6 +569,8 @@ class _RoundTripCH:
 
     def query(self, sql, parameters):
         tenant = parameters["tenant"]
+        if "FROM ndr.asset FINAL" in sql or "FROM ndr.entity_relationship FINAL" in sql:
+            return _Result([], [])  # this fake exercises only facts/evidence replay
         if "identity_observation" in sql:                 # restore_state evidence replay
             cols = ["tenant_id", "obs_id", "normalized_time", "observation"]
             rows = [[o["tenant_id"], o["obs_id"], o["normalized_time"], o["observation"]]
@@ -856,11 +858,15 @@ def test_evidence_sql_orders_identity_table_and_migrates_is_deleted_defect2():
             "deploy", "clickhouse", "init", "05-evidence.sql").read_text()
     except (IndexError, FileNotFoundError, OSError):
         return
-    assert (sql.index("CREATE TABLE IF NOT EXISTS ndr.identity_observation")
-            < sql.index("CREATE OR REPLACE VIEW ndr.evidence_observations"))
+    # Order against actual declarations, not comments: the file's header comment names
+    # the evidence_observations view before it is declared, so .index() on raw text would
+    # match the comment. Strip -- line comments (the only comment style here) for ordering.
+    decl = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    assert (decl.index("CREATE TABLE IF NOT EXISTS ndr.identity_observation")
+            < decl.index("CREATE OR REPLACE VIEW ndr.evidence_observations"))
     alter = "ALTER TABLE ndr.asset_fact ADD COLUMN IF NOT EXISTS is_deleted"
     assert alter in sql
-    assert sql.index(alter) < sql.index("CREATE OR REPLACE VIEW ndr.entity_timeline")
+    assert decl.index(alter) < decl.index("CREATE OR REPLACE VIEW ndr.entity_timeline")
     # value AND observation_id (the lease id) are in asset_fact's dedup key: value keeps a
     # MAC's two IPs distinct, observation_id keeps two same-start intervals for ONE ip
     # (distinct leases) from collapsing under ReplacingMergeTree.
@@ -1097,6 +1103,95 @@ def test_main_loop_crash_before_first_commit_replays_from_earliest_u7():
     app2.persist_and_commit(ch, con)
     assert con.committed[tp] == 2                       # now acknowledged
     assert _ip_intervals(ch, "mac:" + AA) == ip_before  # identical rebuild, no lost evidence
+
+
+# ── U3a: additive entity attributes on the merged record (model only) ─────────
+# resolve()==merge() here: the function that resolves an observation into the entity
+# record. These pin (2) unchanged shape when no new attrs, (3) carried-only-when-observed
+# never fabricated, (4) signature unchanged.
+
+_SHIPPED_KEYS = {"ip_set", "mac_set", "hostname_set", "evidence_sources",
+                 "first_seen", "last_seen", "confidence", "role_if_known"}
+_U3A_KEYS = {"username", "role", "os_hint", "criticality", "owner",
+             "applications", "listening_services", "certificates", "ja4",
+             "attribute_provenance"}
+
+
+def test_merge_without_new_attrs_yields_shipped_shape_no_new_keys():
+    # (2) An obs with none of the new attributes returns exactly the pre-U3a record:
+    # no new keys, no provenance — existing callers see no change.
+    a = r.merge(None, r.extract_evidence(ARP)[0], T0)
+    assert set(a) == _SHIPPED_KEYS                       # only shipped keys present
+    assert not (_U3A_KEYS & set(a))                      # no additive key fabricated
+    a = r.merge(a, r.extract_evidence(DHCP)[0], T1)      # a second fold still adds none
+    assert not (_U3A_KEYS & set(a))
+
+
+def test_merge_carries_attribute_only_when_observed():
+    # (3) A new attribute is set ONLY when the observation provides it, with provenance;
+    # an attribute the obs omits is ABSENT (never null-defaulted, never inferred).
+    obs = {"ip": "10.0.0.5", "mac": "AA:BB:CC:00:11:22", "hostname": None,
+           "src": "dhcp", "username": "bob", "os_hint": "Win11"}
+    a = r.merge(None, obs, T0)
+    assert a["username"] == "bob" and a["os_hint"] == "Win11"
+    assert "role" not in a and "criticality" not in a and "owner" not in a   # unobserved -> absent
+    assert set(a["attribute_provenance"]) == {"username", "os_hint"}         # only observed ones
+    assert a["attribute_provenance"]["username"] == {"source": "dhcp", "observed_at": T0}
+
+
+def test_merge_does_not_fabricate_role_or_listening_service_when_unobserved():
+    # CRITICAL (codex finding): role / listening-service / os recorded only from observed
+    # evidence — an identity-only obs asserts none of them.
+    a = r.merge(None, r.extract_evidence(DHCP)[0], T0)
+    for attr in ("role", "os_hint", "listening_services"):
+        assert attr not in a                             # never asserted unobserved
+    assert "attribute_provenance" not in a               # nothing observed -> no provenance
+
+
+def test_merge_accumulates_list_attrs_and_records_provenance():
+    obs1 = {"ip": "10.0.0.5", "src": "http", "applications": ["nginx"]}
+    obs2 = {"ip": "10.0.0.5", "src": "http", "applications": ["nginx", "openssh"]}
+    a = r.merge(None, obs1, T0)
+    a = r.merge(a, obs2, T1)
+    assert a["applications"] == ["nginx", "openssh"]     # accumulated, deduped, order-stable
+    assert a["attribute_provenance"]["applications"]["observed_at"] == T1   # last observation
+
+
+def test_merge_empty_list_attr_is_not_recorded():
+    # An observation carrying an EMPTY list is not evidence of a value -> nothing recorded.
+    a = r.merge(None, {"ip": "10.0.0.5", "src": "http", "applications": []}, T0)
+    assert "applications" not in a and "attribute_provenance" not in a
+
+
+def test_merge_into_record_with_null_provenance_scalar_and_list():
+    # Regression (codex): the schema permits attribute_provenance: null. Merging an observed
+    # scalar OR list attribute into such a record must initialize the null mapping, not raise
+    # (setdefault would preserve None -> TypeError at _note_provenance).
+    base = {"ip_set": [], "mac_set": [], "hostname_set": [], "evidence_sources": [],
+            "first_seen": T0, "last_seen": T0, "confidence": 0.5, "role_if_known": "",
+            "attribute_provenance": None}
+    a = r.merge(dict(base), {"ip": "10.0.0.5", "src": "dhcp", "role": "dc"}, T1)  # scalar
+    assert a["role"] == "dc"
+    assert a["attribute_provenance"] == {"role": {"source": "dhcp", "observed_at": T1}}
+    b = r.merge(dict(base), {"ip": "10.0.0.5", "src": "http", "applications": ["nginx"]}, T1)
+    assert b["applications"] == ["nginx"]                                        # list
+    assert b["attribute_provenance"]["applications"] == {"source": "http", "observed_at": T1}
+
+
+def test_merge_signature_unchanged_positional_and_keyword():
+    # (4) Existing positional and keyword call forms still work (additive, no new params).
+    obs = r.extract_evidence(ARP)[0]
+    pos = r.merge(None, obs, T0)
+    kw = r.merge(asset=None, obs=obs, ts=T0)
+    assert pos == kw
+    import inspect
+    assert list(inspect.signature(r.merge).parameters) == ["asset", "obs", "ts"]
+
+
+def test_merge_scalar_attr_none_value_not_recorded():
+    # An explicit None scalar is "unobserved", not "observed as null" -> not recorded.
+    a = r.merge(None, {"ip": "10.0.0.5", "src": "arp", "role": None}, T0)
+    assert "role" not in a and "attribute_provenance" not in a
 
 
 if __name__ == "__main__":

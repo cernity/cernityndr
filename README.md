@@ -40,12 +40,22 @@ remembers across the fleet, analyzes, enriches, prioritizes, and delivers findin
 
 | NDR capability | What Suricata gives | What Cernity adds |
 |---|---|---|
-| **Detection breadth** (known + unknown) | signatures + protocol logging | stateful behavioral (beaconing, exfil, DNS-tunnel, scan), fingerprint rarity (JA3/JA4/JA4+), lateral-movement, nDPI-risk, IoC matching |
+| **Detection breadth** (known + unknown) | signatures + protocol logging | stateful behavioral (beaconing, exfil, DNS-tunnel, scan), per-entity JA4 novelty + transition baselines (JA3/JA4/JA4+ rarity), lateral-movement, nDPI-risk, IoC matching |
 | **Explainable findings + evidence** | an alert | MITRE tags, entities, detection-math, enrichment (Geo/ASN/rDNS/reputation), on-demand pcap + file carving |
-| **High-fidelity triggers** | a firehose of events | dedup + severity gating + prevalence + suppression → a small stream of ready-to-act findings |
+| **High-fidelity triggers** | a firehose of events | dedup + severity gating + prevalence + suppression → a small stream of ready-to-act findings; signal-family caps so one behavior described by several detectors counts once; replay-safe flow aggregates so a redelivered or interim cumulative record cannot manufacture a transfer finding |
+| **Gap-tolerant timing** | per-flow records | beacon periodicity scored first on outlier-robust interval statistics, then re-checked by autocorrelation when callbacks go *missing* — the method and recovered period are on the finding. Heavy per-interval jitter is **not** solved by this |
+| **Observation-quality awareness** | capture/decoder counters | sensor visibility measured from Suricata's own stats, raised as a *separate* health finding, and applied as a confidence discount on findings from that window (never a severity change; unmeasured is never treated as healthy) |
 | **Network forensics / retention** | ephemeral telemetry | ClickHouse retention, MinIO pcaps, correlation + host timelines |
 | **Automated response + integration** | — | SOAR playbooks + pluggable SIEM adapters (Splunk/Devo/ES/syslog/webhook, fan-out) |
 | **Openness & data sovereignty** | open-source sensor | broker-agnostic, `contracts/` schemas, source-available, 100% self-hosted, no phone-home |
+
+Honest boundaries on the baseline work specifically: a per-entity JA4 baseline is **learn-only**
+until it has both enough observations and enough elapsed span, so a newly seen or low-traffic entity
+produces no fingerprint finding by design — a real blind spot, reported rather than hidden.
+Autocorrelation recovers a dominant *period*; it does not prove C2, and it is not a general answer to
+heavy jitter (per-sleep randomisation walks the beacon's phase, so the correlation decays with it).
+Replay-safe aggregates are idempotency, not exactly-once delivery. A JA4 never identifies a program,
+device, person or adversary. Decision records: `docs/decisions/011`–`015`.
 
 Honest boundaries: detection is heuristic/explainable (**not** ML — a future track); the
 analyst console and guided-hunting UI are your SIEM's job (Cernity is the findings engine);

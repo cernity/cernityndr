@@ -41,6 +41,7 @@ CANDIDATE_TOPIC = "ndr.finding.candidate.v1"
 FINAL_TOPIC = "ndr.finding.final.v1"
 CAPTURE_TOPIC = "ndr.capture.request.v1"
 RESULT_TOPIC = "ndr.enrichment.result.v1"     # zeek-central outcome: ok/failed + evidence
+QUALITY_TOPIC = "ndr.sensor.quality.v1"
 STATUS_TOPIC = "ndr.capture.status.v1"        # orchestrator refusal / agent completion
 LIFECYCLE_TOPIC = "ndr.lifecycle.ack.v1"      # §stage3: finding lifecycle disposition (pending capture work)
 LIFECYCLE_ON = os.environ.get("CERNITY_LIFECYCLE_ACKS", "1").strip().lower() not in ("", "0", "false", "no")
@@ -55,13 +56,66 @@ RECOVERY_WINDOW_SECS = int(os.environ.get("NDR_RECOVERY_WINDOW_SECS", "21600")) 
 RECOVERY_MAX = int(os.environ.get("NDR_RECOVERY_MAX", "10000"))      # safety ceiling across all pages
 RECOVERY_PAGE = int(os.environ.get("NDR_RECOVERY_PAGE", "5000"))     # B-U5: page size for paginated recovery
 
+# Last measured visibility is a short-lived hint, never a durable health verdict.
+QUALITY_TTL_SECS = float(os.environ.get("NDR_QUALITY_TTL_SECS", "300"))
+QUALITY_MAX_SENSORS = int(os.environ.get("NDR_QUALITY_MAX_SENSORS", "10000"))
+
+
+class QualityCache:
+    """Bounded per-tenant state. Both event age and receipt age expire a sample,
+    so replayed stats cannot rejuvenate old degradation. No history is inferred."""
+    def __init__(self, ttl=QUALITY_TTL_SECS, maximum=QUALITY_MAX_SENSORS):
+        if ttl <= 0 or maximum < 1:
+            raise ValueError("quality cache TTL and size must be positive")
+        self.ttl, self.maximum = ttl, maximum
+        self.records = OrderedDict()
+
+    def put(self, record, now):
+        if not isinstance(record, dict) or record.get("schema_version") != "sensor-quality.v1":
+            return
+        tenant, sensor = record.get("tenant_id"), record.get("sensor_id")
+        if not all(isinstance(s, str) and s.strip() for s in (tenant, sensor)):
+            return
+        if record.get("quality") not in ("good", "degraded", "blind", "unknown"):
+            return
+        reasons = record.get("reasons")
+        if not isinstance(reasons, list) or not all(isinstance(s, str) for s in reasons):
+            return
+        try:
+            observed = datetime.fromisoformat(record["observed_at"].replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                return
+            observed = observed.timestamp()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return
+        key = (tenant, sensor)
+        prior = self.records.get(key)
+        if prior and observed <= prior[0]["_observed_epoch"]:
+            return                   # an out-of-order/duplicate record cannot refresh TTL
+        self.records[key] = (dict(record, reasons=list(reasons), _observed_epoch=observed), now)
+        self.records.move_to_end(key)
+        while len(self.records) > self.maximum:
+            self.records.popitem(last=False)
+
+    def lookup(self, tenant, sensor, now):
+        entry = self.records.get((tenant, sensor))
+        if entry is None:
+            return {"quality": "unknown", "reasons": []}
+        record, received = entry
+        if now - received >= self.ttl or now - record["_observed_epoch"] >= self.ttl:
+            return {"quality": "unknown", "reasons": ["STALE_QUALITY"]}
+        return record
+
+
+_quality_cache = QualityCache()
+
 COLS = ["finding_id", "tenant_id", "sensor_ids", "detector_id", "detector_version",
         "category", "severity", "confidence", "first_seen", "last_seen", "entities",
         "evidence_refs", "mitre", "state", "enrichment_state", "capture_job_ids",
         "suppression_reason",
         # U4: enrichment + baseline provenance, persisted as JSON strings so they survive restart
         # recovery (the in-memory dict carries objects; _row serializes, _pending_from_rows parses back).
-        "summary", "iocs", "source_events",
+        "summary", "iocs", "source_events", "observation_quality",
         # R03: persist the lifecycle revision so each transition is a DISTINCT, searchable row
         # (the table's sort key is revision-scoped); ingested_at is the ReplacingMergeTree version
         # so re-persisting the SAME revision (Kafka replay) is idempotent.
@@ -97,7 +151,7 @@ def _row(f: dict) -> list:
     for k in ("entities", "suppression_reason", "enrichment_state"):
         r[k] = r.get(k) or ""
     # U4: enrichment/provenance objects -> JSON String columns (entities is already a wire string).
-    for k in ("summary", "iocs", "source_events"):
+    for k in ("summary", "iocs", "source_events", "observation_quality"):
         v = r.get(k)
         r[k] = json.dumps(v) if v not in (None, "", [], {}) else ""
     return [r.get(c) for c in COLS]
@@ -128,7 +182,7 @@ def _pending_from_rows(rows, deadline_secs, now):
         f = dict(r)
         # U4: JSON String columns -> objects (or drop when empty), so a recovered finding carries
         # the same shapes a live one does through re-finalization and delivery.
-        for k in ("summary", "iocs", "source_events"):
+        for k in ("summary", "iocs", "source_events", "observation_quality"):
             v = f.get(k)
             if isinstance(v, str) and v:
                 try:
@@ -265,7 +319,8 @@ def _remember_finalized(finding, delivered):
 def _handle_candidate(cand, producer, geo, pending, deadline_secs, now, ch):
     """Build the finding, deliver-now if it is a confirmed threat, and request capture
     (tracking it for finalization) when packets are needed."""
-    finding, route = sm.build_finding(cand)
+    finding, route = sm.build_finding(
+        cand, quality_lookup=lambda tenant, sensor: _quality_cache.lookup(tenant, sensor, time.time()))
     _persist(ch, finding)
     if route in ("final", "final_and_capture"):
         _deliver_now(finding, producer, geo)
@@ -559,7 +614,7 @@ def main():
         ch = clickhouse_connect.get_client(host=CH_HOST, username=CH_USER, password=CH_PASS)
     producer = ndr_runtime.make_producer()
     consumer = ndr_runtime.make_consumer(
-        CANDIDATE_TOPIC, RESULT_TOPIC, STATUS_TOPIC,
+        CANDIDATE_TOPIC, RESULT_TOPIC, STATUS_TOPIC, QUALITY_TOPIC,
         group_id="ndr-finding-service", auto_offset_reset="earliest")
     geo = geoenrich.open_readers()      # offline GeoIP/ASN; {} (no-op) if DBs unmounted
     ndr_runtime.start_health()          # /healthz /readyz /metrics (plan 003 obs)
@@ -580,8 +635,8 @@ def main():
         log.info("F14: recovered %d un-finalized capture-bound finding(s) from ClickHouse", len(pending))
     import uuid
     worker, seq, delivered_now, capture_requested = uuid.uuid4().hex, 0, 0, 0   # §stage3 lifecycle acks
-    log.info("finding-service up: %s (+%s, %s) -> ClickHouse %s (geoip=%s)",
-             CANDIDATE_TOPIC, RESULT_TOPIC, STATUS_TOPIC,
+    log.info("finding-service up: %s (+%s, %s, %s) -> ClickHouse %s (geoip=%s)",
+             CANDIDATE_TOPIC, RESULT_TOPIC, STATUS_TOPIC, QUALITY_TOPIC,
              CH_HOST if CH_ENABLED else "(disabled)", "+".join(sorted(geo)) or "off")
 
     def emit_lifecycle():
@@ -618,6 +673,8 @@ def main():
                              finding["finding_id"], finding["category"])
                     if route in ("final", "final_and_capture"):
                         metrics.finalization(route)     # R7: finalized at candidate handling
+                elif tp.topic == QUALITY_TOPIC:
+                    _quality_cache.put(rec.value, time.time())
                 elif tp.topic == RESULT_TOPIC:
                     _handle_result(rec.value, producer, geo, pending, ch)
                 elif tp.topic == STATUS_TOPIC:

@@ -78,6 +78,18 @@ asserted tenant/sensor against enrollment and authenticated ingress identity.
 This is health telemetry, not a finding or SIEM input. The secure bus grants the
 sensor principal write/describe/create on this exact topic only.
 
+## Sensor observation quality telemetry
+
+```text
+ndr.sensor.quality.v1
+```
+
+Carries `sensor-quality.v1` (`sensor-quality.schema.json`) from coverage-detector
+to finding-service on every evaluated Suricata stats record, including recovery.
+Key is UTF-8 JSON `[tenant_id, sensor_id]`. This is observability telemetry used
+to discount confidence, not a finding or SIEM input. `unknown` means not measured,
+not healthy. Coverage health findings remain on the candidate topic.
+
 ## Canonical evidence
 
 ```text

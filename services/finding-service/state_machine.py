@@ -151,13 +151,80 @@ def _terminal_state(finding: dict) -> tuple[str, str]:
     return "FINAL", ""
 
 
-def build_finding(cand: dict) -> tuple[dict, str]:
+# Policy discounts, not calibrated probabilities. A floor preserves weak evidence;
+# for an input already below the floor, retaining it takes priority over inflation.
+QUALITY_DEGRADED_FACTOR = float(os.environ.get("NDR_QUALITY_DEGRADED_FACTOR", "0.7"))
+QUALITY_BLIND_FACTOR = float(os.environ.get("NDR_QUALITY_BLIND_FACTOR", "0.4"))
+QUALITY_CONFIDENCE_FLOOR = float(os.environ.get("NDR_QUALITY_CONFIDENCE_FLOOR", "0.05"))
+
+
+def quality_adjust(confidence, quality, degraded_factor=QUALITY_DEGRADED_FACTOR,
+                   blind_factor=QUALITY_BLIND_FACTOR, floor=QUALITY_CONFIDENCE_FLOOR):
+    """Return confidence and the effective multiplier (including floor clamping).
+    Unknown is not measured: deployments without stats must not be penalized.
+    Existing zero/sub-floor confidence stays unchanged rather than being raised."""
+    if quality not in ("degraded", "blind"):
+        return confidence, 1.0
+    if not (0 < floor <= 1 and 0 < degraded_factor <= 1 and 0 < blind_factor <= 1):
+        raise ValueError("quality factors and floor must be in (0, 1]")
+    factor = blind_factor if quality == "blind" else degraded_factor
+    base = max(0.0, min(1.0, confidence))
+    adjusted = min(base, max(floor, base * factor))
+    return adjusted, adjusted / base if base else 1.0
+
+
+def _quality_sensors(cand):
+    ids = cand.get("sensor_ids")
+    ids = [s for s in ids if isinstance(s, str) and s.strip()] if isinstance(ids, list) else []
+    if ids:
+        return list(dict.fromkeys(ids))
+    events = cand.get("source_events")
+    for event in events if isinstance(events, list) else []:
+        record = event.get("record") if isinstance(event, dict) else None
+        if not isinstance(record, dict):
+            continue
+        for name in ("sensor_id", "host"):
+            sensor = record.get(name)
+            if isinstance(sensor, str) and sensor.strip():
+                if sensor not in ids:
+                    ids.append(sensor)
+                break
+    return ids
+
+
+def _apply_quality(f, lookup):
+    sensors = _quality_sensors(f)
+    f["sensor_ids"] = sensors
+    # No attributable sensor means unknown, never guess a sensor id. For a
+    # multi-sensor aggregate use the strongest measured discount once, not a
+    # product of discounts; representative provenance cannot apportion evidence.
+    records = [(s, lookup(f.get("tenant_id"), s)) for s in sensors]
+    rank = {"unknown": 0, "good": 1, "degraded": 2, "blind": 3}
+    sensor, record = max(records, key=lambda pair: rank.get((pair[1] or {}).get("quality"), 0),
+                         default=(None, None))
+    record = record or {}
+    verdict = record.get("quality", "unknown")
+    if verdict not in rank:
+        verdict = "unknown"
+    original = f["confidence"]
+    f["confidence"], factor = quality_adjust(original, verdict)
+    f["observation_quality"] = {"quality": verdict, "reasons": record.get("reasons", []),
+                                "sensor_id": sensor, "factor": factor,
+                                "original_confidence": original}
+
+
+def build_finding(cand: dict, quality_lookup=None) -> tuple[dict, str]:
     """CANDIDATE -> enrichment policy -> terminal state. Returns (finding, route)
     where route is 'final' or 'capture'."""
     policy = decide_enrichment(cand)
     f = dict(cand)
     f.setdefault("sensor_ids", [])
     f.setdefault("evidence_refs", [])
+    # Opt-in keeps legacy callers byte-identical. Quality only changes confidence;
+    # routing/severity retain the candidate policy so degraded visibility cannot
+    # quietly move a delivered finding behind enrichment or suppression.
+    if quality_lookup is not None:
+        _apply_quality(f, quality_lookup)
     # R03: issue a durable monotonic revision at each lifecycle transition, so an initial final and a
     # later enriched update are DISTINCT obligations/documents (not one collapsed record) and the scorer
     # can order them. Revision 1 is the first version; enrichment/timeout finalization bumps it.

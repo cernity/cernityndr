@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homelabai/ndr/contracts/sensor-quality.schema.json",
+  "title": "sensor-quality.v1",
+  "description": "Origin: coverage-detector evaluates Suricata stats counters. Sensor observability telemetry used to DISCOUNT finding confidence; not a finding and not a SIEM input. unknown means not measured, NOT healthy. This describes visibility, not network safety.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_id",
+    "sensor_id",
+    "observed_at",
+    "quality",
+    "signals",
+    "reasons"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "sensor-quality.v1"
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sensor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "quality": {
+      "enum": [
+        "good",
+        "degraded",
+        "blind",
+        "unknown"
+      ]
+    },
+    "signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture_drop_ratio",
+        "applayer_flows_per_pkt"
+      ],
+      "properties": {
+        "capture_drop_ratio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "applayer_flows_per_pkt": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+      },
+      "uniqueItems": true
+    }
+  }
+}

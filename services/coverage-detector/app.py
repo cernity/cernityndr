@@ -3,6 +3,7 @@ finding when a sensor's visibility is degraded (capture loss or app-layer
 blindness). Dedups per (sensor, kind, window) so a persistent condition does not
 spam. See coverage.py for the pure detection logic.
 """
+import json
 import os
 import signal
 import time
@@ -21,6 +22,7 @@ DROP_THRESHOLD = float(os.environ.get("NDR_COVERAGE_DROP_RATIO", "0.02"))
 APPLAYER_MIN_PKTS = int(os.environ.get("NDR_COVERAGE_MIN_PKTS", "5000"))
 APPLAYER_RATIO = float(os.environ.get("NDR_COVERAGE_APPLAYER_RATIO", "0.001"))
 CANDIDATE_TOPIC = os.environ.get("NDR_CANDIDATE_TOPIC", "ndr.finding.candidate.v1")
+QUALITY_TOPIC = "ndr.sensor.quality.v1"
 GROUP_ID = os.environ.get("NDR_GROUP_ID", "ndr-coverage-detector")
 
 _emitted: set = set()          # (sensor, kind, window_bucket) dedup
@@ -35,7 +37,7 @@ def _stop(*_):
 def _sensor_of(eve: dict) -> str:
     """Prefer a sensor/host id stamped on the record (multi-sensor deploys);
     fall back to this container's NDR_SENSOR_ID."""
-    for k in ("sensor", "host", "hostname"):
+    for k in ("sensor_id", "host", "sensor", "hostname"):
         v = eve.get(k)
         if v:
             return str(v)
@@ -66,6 +68,15 @@ def evaluate(producer, eve: dict):
     blind, al_ratio = cov.applayer_blind(stats, APPLAYER_MIN_PKTS, APPLAYER_RATIO)
     if blind:
         _emit_once(producer, "applayer_blind", sensor, al_ratio)
+    # Co-produce with the health finding above: discounting visibility must never
+    # make a broken sensor look secure. Only findings use episode dedup; recovery
+    # and every healthy sample must reach the quality consumer too.
+    quality = cov.to_quality(stats, sensor, TENANT,
+                             observed_at=eve.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                             drop_threshold=DROP_THRESHOLD, min_pkts=APPLAYER_MIN_PKTS,
+                             ratio_threshold=APPLAYER_RATIO)
+    producer.send(QUALITY_TOPIC, quality, key=json.dumps([TENANT, sensor]).encode())
+
 
 
 def main():

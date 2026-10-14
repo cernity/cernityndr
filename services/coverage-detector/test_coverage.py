@@ -66,6 +66,61 @@ def test_to_candidate_rejects_unknown_kind():
     assert c.to_candidate("bogus", "s", 0.5) is None
 
 
+
+def _stats(drops=0, flows=100):
+    return {"capture": {"kernel_packets": 10000, "kernel_drops": drops},
+            "decoder": {"pkts": 10000}, "app_layer": {"flow": {"http": flows}}}
+
+
+def test_quality_verdicts_and_null_measurements():
+    for stats, verdict, reasons in (
+        (_stats(), "good", []), (_stats(3000), "degraded", ["CAPTURE_LOSS"]),
+        (_stats(0, 0), "blind", ["APPLAYER_BLIND"]),
+        (_stats(3000, 0), "blind", ["CAPTURE_LOSS", "APPLAYER_BLIND"]),
+        ({}, "unknown", [])):
+        q = c.to_quality(stats, "s", "acme", observed_at="2026-10-14T00:00:00Z")
+        assert q["quality"] == verdict and q["reasons"] == reasons
+        assert q["tenant_id"] == "acme" and q["sensor_id"] == "s"
+    stats = _stats()
+    del stats["capture"]
+    q = c.to_quality(stats, "s", observed_at="2026-10-14T00:00:00Z")
+    assert q["quality"] == "unknown"
+    assert q["signals"]["capture_drop_ratio"] is None
+    del stats["app_layer"]
+    q = c.to_quality(stats, "s", observed_at="2026-10-14T00:00:00Z")
+    assert q["quality"] == "unknown"
+    assert q["signals"]["applayer_flows_per_pkt"] is None
+    for flow in ({}, {"http": None}):
+        stats = _stats()
+        stats["app_layer"]["flow"] = flow
+        assert c.to_quality(stats, "s", observed_at="2026-10-14T00:00:00Z")["quality"] == "unknown"
+
+
+def test_every_stats_record_emits_quality_without_changing_finding_dedup():
+    import app
+    class Producer:
+        def __init__(self):
+            self.sent = []
+        def send(self, topic, value, key=None):
+            self.sent.append((topic, value, key))
+    producer = Producer()
+    old_emitted, old_window = app._emitted, app.WINDOW
+    try:
+        app._emitted, app.WINDOW = set(), 1e12   # deterministic single episode
+        for stats in (_stats(), _stats(3000), _stats(3000), _stats(), {}):
+            app.evaluate(producer, {"event_type": "stats", "sensor_id": "sensor-a",
+                                    "timestamp": "2026-10-14T00:00:00Z", "stats": stats})
+        quality = [v for topic, v, key in producer.sent if topic == app.QUALITY_TOPIC]
+        assert [q["quality"] for q in quality] == ["good", "degraded", "degraded", "good", "unknown"]
+        assert all(q["sensor_id"] == "sensor-a" for q in quality)
+        findings = [v for topic, v, key in producer.sent if topic == app.CANDIDATE_TOPIC]
+        assert len(findings) == 1 and findings[0]["severity"] == 6
+        count = len(producer.sent)
+        app.evaluate(producer, {"event_type": "flow"})
+        assert len(producer.sent) == count
+    finally:
+        app._emitted, app.WINDOW = old_emitted, old_window
+
 if __name__ == "__main__":
     import inspect
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

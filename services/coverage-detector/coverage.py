@@ -102,3 +102,21 @@ def to_candidate(kind, sensor, value, tenant="homelab", now=None, window=None):
             "category": "coverage", "severity": _SEV[kind], "confidence": 0.8,
             "first_seen": now, "last_seen": now,
             "entities": entities, "state": "CANDIDATE"}
+
+
+def to_quality(stats, sensor, tenant="homelab", *, observed_at,
+               drop_threshold=0.02, min_pkts=5000, ratio_threshold=0.001):
+    """Measured visibility, not network safety. Cumulative counters cannot locate
+    loss within a stats interval; absent app counters are not measured zeros."""
+    loss, drop = capture_loss(stats, drop_threshold)
+    flows = (stats.get("app_layer") or {}).get("flow")
+    measured = isinstance(flows, dict) and any(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in flows.values())
+    blind, ratio = applayer_blind(stats, min_pkts, ratio_threshold) if measured else (False, None)
+    reasons = (["CAPTURE_LOSS"] if loss else []) + (["APPLAYER_BLIND"] if blind else [])
+    quality = ("blind" if blind else "degraded" if loss else
+               "good" if drop is not None and ratio is not None else "unknown")
+    return {"schema_version": "sensor-quality.v1", "tenant_id": tenant,
+            "sensor_id": sensor, "observed_at": observed_at, "quality": quality,
+            "signals": {"capture_drop_ratio": drop, "applayer_flows_per_pkt": ratio},
+            "reasons": reasons}

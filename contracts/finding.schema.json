@@ -93,6 +93,52 @@
     }
   },
   "properties": {
+    "observation_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "quality",
+        "reasons",
+        "sensor_id",
+        "factor",
+        "original_confidence"
+      ],
+      "properties": {
+        "quality": {
+          "enum": [
+            "good",
+            "degraded",
+            "blind",
+            "unknown"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+          },
+          "uniqueItems": true
+        },
+        "sensor_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "original_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
     "intel_match": {
       "type": "object",
       "additionalProperties": false,
@@ -220,7 +266,7 @@
     },
     "source_events": {
       "type": "array",
-      "description": "Provenance (baseline tier): the originating Suricata EVE record(s) that produced this finding, so the SIEM document is self-describing. Each entry is {event_type, community_id?, flow_id?, tx_id?, timestamp, record} where `record` is the native EVE object (verbatim, bounded by NDR_SOURCE_EVENTS_MAX_BYTES; truncated:true + preview on overflow). Single/few-record findings inline the record(s); aggregates carry a representative entry plus a `contributors` summary {count, community_ids[], flow_ids[]}. Additive: never read by detection/scoring/lifecycle; absent identifiers are omitted, never fabricated.",
+      "description": "Provenance (baseline tier): the originating Suricata EVE record(s) that produced this finding, so the SIEM document is self-describing. Each entry is {event_type, community_id?, flow_id?, tx_id?, timestamp, record} where `record` is the native EVE object (verbatim, bounded by NDR_SOURCE_EVENTS_MAX_BYTES; truncated:true + preview on overflow). Single/few-record findings inline the record(s); aggregates carry a representative entry plus a `contributors` summary {count, community_ids[], flow_ids[]}. Sensor identity may be read by finding-service for observation-quality attribution; absent identifiers are omitted, never fabricated.",
       "items": { "type": "object" }
     },
     "mitre": {

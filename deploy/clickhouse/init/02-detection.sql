@@ -59,3 +59,6 @@ ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS source_events String DEFAULT ''
 -- devo_delivery_state dropped: it was write-only (never read/gated on; redundant with `state`,
 -- never advanced past QUEUED). Delivery outcome lives in the forwarder's durable ledger.
 ALTER TABLE ndr.finding DROP COLUMN IF EXISTS devo_delivery_state;
+
+-- Preserve the reason and original confidence through pending-finding recovery.
+ALTER TABLE ndr.finding ADD COLUMN IF NOT EXISTS observation_quality String DEFAULT '';

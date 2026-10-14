@@ -245,6 +245,78 @@ def test_ndpi_structured_delivery_bypass():
         sm.NDPI_DELIVER_ALL = False
 
 
+
+def test_quality_adjust_bounds_and_noop():
+    for confidence in (0, 0.001, 0.05, 0.1, 0.7, 1):
+        for quality in ("good", "unknown"):
+            assert sm.quality_adjust(confidence, quality) == (confidence, 1.0)
+        for quality in ("degraded", "blind"):
+            adjusted, factor = sm.quality_adjust(confidence, quality)
+            assert 0 <= adjusted <= confidence <= 1
+            assert adjusted >= min(confidence, sm.QUALITY_CONFIDENCE_FLOOR)
+            assert adjusted > 0 or confidence == 0
+            assert abs(adjusted - confidence * factor) < 1e-12
+            if confidence > sm.QUALITY_CONFIDENCE_FLOOR:
+                assert adjusted < confidence
+    assert sm.quality_adjust(0.8, "degraded", degraded_factor=0.5) == (0.4, 0.5)
+
+
+def test_no_quality_lookup_is_byte_identical_legacy_output():
+    import json
+    expected = dict(SCAN, sensor_ids=[], evidence_refs=[], revision=1, mitre=["T1046"],
+                    capture_job_ids=[], suppression_reason="low-severity (5) non-threat finding; kept for correlation and audit, not delivered",
+                    enrichment_state="NOT_REQUIRED", state="SUPPRESSED")
+    finding, route = sm.build_finding(SCAN)
+    assert route == "final"
+    assert json.dumps(finding) == json.dumps(expected)
+    # Even provenance is left untouched for legacy callers, including sensor_ids.
+    cand = dict(SCAN, source_events=[{"record": {"host": "s"}}])
+    expected = dict(cand, **{k: v for k, v in expected.items() if k not in cand or k == "state"})
+    assert json.dumps(sm.build_finding(cand)[0]) == json.dumps(expected)
+
+
+def test_quality_attribution_and_explanation():
+    calls = []
+    def lookup(tenant, sensor):
+        calls.append((tenant, sensor))
+        return {"quality": "degraded", "reasons": ["CAPTURE_LOSS"]}
+    for spelling in ("host", "sensor_id"):
+        cand = dict(SCAN, severity=7, source_events=[{"record": {spelling: "s1"}}])
+        finding, route = sm.build_finding(cand, lookup)
+        assert calls[-1] == ("homelab", "s1")
+        assert finding["sensor_ids"] == ["s1"] and "sensor_ids" not in cand
+        assert finding["confidence"] < cand["confidence"]
+        assert finding["severity"] == 7 and route == "final" and finding["state"] == "FINAL"
+        q = finding["observation_quality"]
+        assert q["original_confidence"] == 0.7 and q["reasons"] == ["CAPTURE_LOSS"]
+        assert q["sensor_id"] == "s1" and q["quality"] == "degraded"
+    cand = dict(SCAN, sensor_ids=["explicit"], source_events=[{"record": {"host": "other"}}])
+    assert sm.build_finding(cand, lookup)[0]["sensor_ids"] == ["explicit"]
+
+
+def test_unattributed_finding_is_unknown_and_untouched():
+    def lookup(*args):
+        raise AssertionError("must not guess a sensor")
+    for events in (None, "garbage", {}, [None, 1, {}, {"record": []}, {"record": {"host": {}}}]):
+        f, _ = sm.build_finding(dict(SCAN, source_events=events), lookup)
+        assert f["confidence"] == SCAN["confidence"] and f["sensor_ids"] == []
+        assert f["observation_quality"] == {"quality": "unknown", "reasons": [],
+                                          "sensor_id": None, "factor": 1.0, "original_confidence": 0.7}
+
+
+def test_quality_does_not_change_delivery_route_or_severity():
+    cand = dict(SCAN, category="c2", confidence=0.95, severity=8, sensor_ids=["s"])
+    f, route = sm.build_finding(cand, lambda *args: {"quality": "blind", "reasons": ["APPLAYER_BLIND"]})
+    assert route == sm.build_finding(cand)[1] == "final"
+    assert f["severity"] == 8 and f["confidence"] < 0.95
+
+
+def test_multiple_sensors_use_one_strongest_discount():
+    records = {"a": {"quality": "good"}, "b": {"quality": "blind", "reasons": ["APPLAYER_BLIND"]}}
+    f, _ = sm.build_finding(dict(SCAN, sensor_ids=["a", "b"]), lambda t, s: records[s])
+    assert f["observation_quality"]["sensor_id"] == "b"
+    assert f["confidence"] == sm.quality_adjust(SCAN["confidence"], "blind")[0]
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

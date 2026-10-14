@@ -221,6 +221,95 @@ def test_source_events_persist_roundtrip():
     assert rec["source_events"] == se and rec["iocs"] == {"ja4": ["q13d.."]}   # parsed back to objects
 
 
+
+def test_quality_cache_ttl_bound_tenant_and_recovery():
+    from datetime import datetime, timezone
+    def record(quality="degraded", sensor="s", observed=100):
+        return {"schema_version": "sensor-quality.v1", "tenant_id": "homelab", "sensor_id": sensor,
+                "observed_at": datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+                "quality": quality, "reasons": ["CAPTURE_LOSS"] if quality == "degraded" else [],
+                "signals": {"capture_drop_ratio": 0.3, "applayer_flows_per_pkt": 0.1}}
+    cache = app.QualityCache(ttl=10, maximum=2)
+    cache.put(record(), 100)
+    assert cache.lookup("other", "s", 101)["quality"] == "unknown"
+    cand = dict(SIG, sensor_ids=["s"])
+    fresh, _ = app.sm.build_finding(cand, lambda t, s: cache.lookup(t, s, 109))
+    stale, _ = app.sm.build_finding(cand, lambda t, s: cache.lookup(t, s, 110))
+    assert fresh["confidence"] < cand["confidence"]
+    assert stale["confidence"] == cand["confidence"]
+    assert stale["observation_quality"]["quality"] == "unknown"
+    assert stale["observation_quality"]["reasons"] == ["STALE_QUALITY"]
+    cache.put(record("good", observed=111), 111)
+    assert cache.lookup("homelab", "s", 111)["quality"] == "good"
+    cache.put(record(observed=105), 112)
+    assert cache.lookup("homelab", "s", 112)["quality"] == "good"  # no rollback
+    cache.put(record(sensor="s2"), 115)  # replay is already stale
+    assert cache.lookup("homelab", "s2", 115)["quality"] == "unknown"
+    cache.put(record(sensor="s3", observed=1000), 115)
+    assert len(cache.records) == 2 and cache.lookup("homelab", "s", 115)["quality"] == "unknown"
+    assert cache.lookup("homelab", "s3", 125)["quality"] == "unknown"  # future clock cannot defeat receipt TTL
+    for invalid in (None, {}, dict(record(), observed_at="bad"), dict(record(), sensor_id=[])):
+        cache.put(invalid, 115)
+    assert len(cache.records) == 2
+
+
+def test_live_candidate_quality_and_persistence_roundtrip():
+    from datetime import datetime, timezone
+    now = app.time.time()
+    old = app._quality_cache
+    try:
+        app._quality_cache = app.QualityCache()
+        app._quality_cache.put({"schema_version": "sensor-quality.v1", "tenant_id": "homelab",
+                               "sensor_id": "sensor-7", "quality": "blind", "reasons": ["APPLAYER_BLIND"],
+                               "observed_at": datetime.fromtimestamp(now, timezone.utc).isoformat()}, now)
+        producer = FakeProducer()
+        app._handle_candidate(SIG, producer, {}, {}, 120, now=0, ch=None)
+        finding = _by_topic(producer, app.FINAL_TOPIC)[0]
+        assert finding["confidence"] < SIG["confidence"] and finding["severity"] == SIG["severity"]
+        row = dict(zip(app.COLS, app._row(finding)))
+        pending = app._pending_from_rows([row], 120, 0)
+        restored = pending[("homelab", SIG["finding_id"])]["finding"]
+        assert restored["observation_quality"] == finding["observation_quality"]
+        assert app.sm.finalize_timeout(restored)["observation_quality"] == finding["observation_quality"]
+    finally:
+        app._quality_cache = old
+
+
+def test_consumer_subscribes_and_dispatches_quality_to_findings():
+    from collections import namedtuple
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    Topic = namedtuple("Topic", "topic")
+    quality = {"schema_version": "sensor-quality.v1", "tenant_id": "homelab",
+               "sensor_id": "sensor-7", "quality": "degraded", "reasons": ["CAPTURE_LOSS"],
+               "observed_at": datetime.now(timezone.utc).isoformat()}
+    class Producer(FakeProducer):
+        def flush(self):
+            pass
+        def close(self):
+            pass
+    class Consumer:
+        def poll(self, **kwargs):
+            app._running = False
+            return {Topic(app.QUALITY_TOPIC): [SimpleNamespace(value=quality)],
+                    Topic(app.CANDIDATE_TOPIC): [SimpleNamespace(value=SIG)]}
+        def close(self):
+            pass
+    producer = Producer()
+    with patch.object(app, "_running", True), patch.object(app, "CH_ENABLED", False), \
+         patch.object(app, "_quality_cache", app.QualityCache()), \
+         patch.object(app, "start_case_api", return_value=None), \
+         patch.object(app.signal, "signal"), patch.object(app.ndr_runtime, "start_health"), \
+         patch.object(app.geoenrich, "open_readers", return_value={}), \
+         patch.object(app.ndr_runtime, "make_producer", return_value=producer), \
+         patch.object(app.ndr_runtime, "make_consumer", return_value=Consumer()) as subscribe:
+        app.main()
+        assert app.QUALITY_TOPIC in subscribe.call_args.args
+    finding = _by_topic(producer, app.FINAL_TOPIC)[0]
+    assert finding["confidence"] < SIG["confidence"]
+    assert finding["observation_quality"]["reasons"] == ["CAPTURE_LOSS"]
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

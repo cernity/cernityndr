@@ -188,6 +188,151 @@ def beacon_score(timestamps: list[float], sizes: list[float] | None = None,
     return (score >= threshold), score
 
 
+# --- Jitter- and gap-tolerant periodicity (autocorrelation) -------------------
+# beacon_score above judges the INTERVAL DISTRIBUTION, which is the right first cut
+# (and what RITA does), but two real C2 patterns defeat a distribution measure:
+#   - MISSED callbacks (host asleep, sensor drop, network outage): a skipped beat
+#     turns one interval into 2x or 3x the period, and quartile measures read that
+#     as dispersion rather than as a harmonic of one period. A 1-in-3 drop rate
+#     alone pushes beacon_score to ~0.67 — measured in test_detectors.py.
+#   - jitter on top of those gaps, which compounds the same collapse.
+# Autocorrelating a BINNED EVENT-COUNT series survives both, because a missed beat
+# is a missing sample rather than a wrong interval: the beats that did arrive still
+# line up with themselves one period later. This recovers a DOMINANT PERIOD; it does
+# not prove C2 (schedulers, update checks and health probes are periodic too), which
+# is why it stays a fallback behind the same noise/allowlist gating as the primary
+# scorer rather than becoming a detector of its own.
+#
+# Known ceiling, measured rather than assumed: per-sleep (independent, compounding)
+# jitter random-walks the beacon's PHASE, so at +/-50% per-interval randomisation the
+# autocorrelation peak decays along with it — that case is still better served by the
+# robust interval statistics above, which often fire on it. Recovery of large jitter depends on the observed
+# realization; this is not a guarantee for arbitrary randomized sleep sequences.
+_HARMONIC_TOL = 0.25        # see autocorr_period's harmonic note
+
+
+def autocorr_period(timestamps: list[float], min_conns: int = 8,
+                    min_cycles: float = 4.0, max_lag_fraction: float = 0.5,
+                    bins_per_period: int = 2,
+                    max_bins: int = 512) -> tuple[float, float, float]:
+    """Return (period_secs, strength 0..1, bin_secs) for the dominant period in a
+    timestamp series, or (0.0, 0.0, bin_secs) when there is no usable evidence.
+    Deterministic and clock-free: every quantity is derived from the series."""
+    try:
+        ts = sorted(float(t) for t in timestamps)
+        valid = (all(math.isfinite(t) for t in ts)
+                 and math.isfinite(min_cycles) and min_cycles >= 3
+                 and math.isfinite(max_lag_fraction) and 0 < max_lag_fraction <= 0.5
+                 and isinstance(max_bins, int) and 4 <= max_bins <= 512
+                 and isinstance(bins_per_period, int) and bins_per_period > 0
+                 and min_conns >= 2)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, 0.0, 0.0
+    if not valid or len(ts) < max(2, min_conns):
+        return 0.0, 0.0, 0.0
+    intervals = [b - a for a, b in zip(ts, ts[1:])]
+    if not intervals or _median(intervals) <= 0:
+        return 0.0, 0.0, 0.0
+    # Bin width comes from the series itself, so no caller-supplied period guess is
+    # needed. Q1 of the intervals, not the median: a gap-ridden series' intervals are
+    # BIMODAL (P and 2P), where the median straddles the two modes and flips with the
+    # drop phase, while the lower quartile stays on the fundamental. The cost is that
+    # an unrelated burst to the same destination shrinks Q1 and can push the real
+    # period off the lag grid — a burst-contaminated series is out of scope here (the
+    # robust scorer degrades on it too). Half of that interval per bin is the coarsest
+    # binning that still resolves a period: it makes a perfect beacon alternate
+    # present/absent, which is maximum contrast, at the price of quantising the
+    # reported period to bin_secs.
+    base_interval = _quartiles(intervals)[0]
+    span = ts[-1] - ts[0]
+    if base_interval <= 0 or span <= 0 or not math.isfinite(span):          # degenerate (incl. all-identical timestamps)
+        return 0.0, 0.0, 0.0
+    bin_secs = base_interval / float(bins_per_period)
+    # BOUND: max_bins caps the series length, and with it the O(bins * lags) work, for
+    # ANY span — a day-long window at 1s bins would otherwise be 86400 bins and ~1e9
+    # multiply-adds per destination per evaluate cycle. Over the cap, analyse the most
+    # RECENT max_bins bins at full resolution instead of coarsening the bins over the
+    # whole span: a dominant period is better recovered from a shorter slice than
+    # smeared across bins wider than the period itself, and min_cycles still forces
+    # the slice to cover several cycles.
+    if bin_secs <= 0 or not math.isfinite(span / bin_secs):
+        return 0.0, 0.0, 0.0
+    n_bins = int(span / bin_secs) + 1
+    origin = ts[0]
+    if n_bins > max_bins:
+        n_bins = max_bins
+        origin = ts[-1] - (n_bins - 1) * bin_secs
+        ts = [t for t in ts if t >= origin]
+    if len(ts) < min_conns:
+        return 0.0, 0.0, bin_secs
+    counts = [0] * n_bins
+    for t in ts:
+        counts[min(int((t - origin) / bin_secs), n_bins - 1)] += 1   # counts, not booleans
+    mean = sum(counts) / float(n_bins)
+    c = [v - mean for v in counts]
+    denom = sum(v * v for v in c)
+    if denom <= 0:                               # flat series: nothing to correlate
+        return 0.0, 0.0, bin_secs
+    # Two bounds on the lag, for different reasons. max_lag_fraction: an ACF estimate
+    # at a lag near the series length is computed from almost no overlapping pairs, so
+    # it is noise dressed as a correlation. min_cycles: a "period" the window covers
+    # only once or twice is not periodicity, so a lag longer than span/min_cycles is
+    # not a candidate at all. min_cycles is the tighter of the two at these defaults.
+    max_lag = min(int(n_bins * max_lag_fraction), int((ts[-1] - ts[0]) / bin_secs / min_cycles))
+    if max_lag < 1:
+        return 0.0, 0.0, bin_secs
+    acf = [sum(c[i] * c[i + lag] for i in range(n_bins - lag)) / denom
+           for lag in range(1, max_lag + 1)]
+    peak = max(acf)
+    if peak <= 0:                                # no positive correlation anywhere
+        return 0.0, 0.0, bin_secs
+    lag = acf.index(peak) + 1
+    # Harmonic sanity, deliberately a heuristic: a true period P also correlates at
+    # 2P and 3P, and with beats missing the multiple can even be the stronger peak, so
+    # report the SMALLEST lag that divides the peak lag and still carries a near-peak
+    # correlation. Restricting candidates to divisors is what keeps the tolerance from
+    # wandering onto an unrelated small lag. It has to be loose (_HARMONIC_TOL) because
+    # at a 1-in-3 drop rate the fundamental's own correlation is only ~0.3 of the peak;
+    # the consequence is that a destination carrying two interleaved rhythms reports
+    # the shorter one.
+    for sub in range(1, lag):
+        if lag % sub == 0 and acf[sub - 1] >= peak * _HARMONIC_TOL:
+            lag = sub
+            break
+    return lag * bin_secs, round(min(1.0, peak), 3), bin_secs
+
+
+def beacon_autocorr(timestamps: list[float], sizes: list[float] | None = None,
+                    threshold: float = 0.70,
+                    min_conns: int = 8, count_target: int = 12,
+                    min_strength: float = 0.50,
+                    **kw) -> tuple[bool, float, float]:
+    """Return (is_beacon, score 0..1, period_secs). Score = (2*strength + count)/3 —
+    deliberately beacon_score's shape, with autocorrelation strength standing in for
+    interval regularity (averaged with payload-size regularity when available),
+    so the two scores live on one scale and a finding's
+    confidence means the same thing whichever method produced it. The default gate is
+    lower than beacon_score's 0.80 because a gap-ridden series' peak correlation is
+    structurally below a clean regularity score; at 0.70 a full-count series still
+    needs blended regularity >= 0.55. Raw timing strength must independently clear
+    min_strength: constant payload sizes cannot establish a dominant period.
+    This floor is a heuristic, not a guarantee against all random realizations."""
+    period, strength, _bin = autocorr_period(timestamps, min_conns=min_conns, **kw)
+    if period <= 0:
+        return False, 0.0, 0.0
+    timing_strength = strength
+    # Preserve the primary scorer's payload-size signal: periodic timing alone
+    # also describes benign polling with variable responses. Use the same 50/50
+    # blend and minimum sample rule; this is a soft signal, not a size veto.
+    if sizes and len(sizes) >= min_conns:
+        strength = 0.5 * strength + 0.5 * _regularity(sizes)
+    cnt = _count_score(len(timestamps), count_target)    # same confidence-by-volume as beacon_score
+    score = round((2.0 * strength + cnt) / 3.0, 3)
+    # The size blend can lift a noise peak above the score gate, especially in short
+    # windows. Require timing evidence independently, even for constant-size flows.
+    return (timing_strength >= min_strength and score >= threshold), score, period
+
+
 # --- FQDN / SNI beaconing (fast-flux / CDN-fronted C2) ------------------------
 # The plain beacon keys on the destination IP, so C2 that rotates its IP every
 # callback (fast-flux, or a CDN/domain-fronted controller) never reaches quorum on

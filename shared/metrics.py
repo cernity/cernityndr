@@ -28,6 +28,13 @@ if _ON:
     FINALIZATIONS = Counter("ndr_finalization_total", "finding-service finalizations", ["reason"])
     ENRICH_PENDING = Gauge("ndr_enrichment_pending", "findings awaiting enrichment (current)")
     DLQ_UNRESOLVED = Gauge("ndr_dlq_unresolved", "current unresolved dead-letter obligations", ["sink"])
+    # ADR 011: per-flow field WRITES refused at the per-pair cardinality cap in the CURRENT
+    # window -- writes, not distinct flows: the write path takes no read, so a replayed
+    # refused record is refused (and counted) again. A gauge, not a counter: the value read
+    # back is per-key cumulative within a tumbling window, so re-adding it every evaluate
+    # cycle would over-count. Non-zero means those pairs' aggregates are a floor.
+    FLOW_CAP_REFUSED = Gauge("ndr_flow_cap_refused_updates",
+                             "per-flow field writes refused at the per-pair cap (current window)", ["prefix"])
 
 _ready = {}   # component -> ready?; a service declares its components (plan 003 observability)
 
@@ -70,6 +77,11 @@ def set_enrichment_pending(n):          # R7: current count awaiting enrichment 
 def set_dlq_unresolved(sink, n):        # R7: current unresolved dead-letters per sink (gauge)
     if _ON:
         DLQ_UNRESOLVED.labels(sink).set(n)
+
+
+def set_flow_cap_refused(prefix, n):    # ADR 011: refused per-flow writes for a key prefix (gauge)
+    if _ON:
+        FLOW_CAP_REFUSED.labels(prefix).set(n)
 
 
 def set_ready(component, value=True):

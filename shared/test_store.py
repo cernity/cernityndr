@@ -2,8 +2,11 @@
 InMemoryStore and (when a Redis is reachable) RedisStore, proving the Redis
 backend is equivalent to the in-memory one before app.py is switched over.
 """
+import hashlib
 import os
+import sys
 import time
+import types
 
 import store as st
 
@@ -225,6 +228,146 @@ def test_pipeline_ops():
         assert s.set_contains("pv:t:b", "a"), name
         s.pipeline_ops([])                                            # empty -> no-op
         print(f"  ok pipeline_ops [{name}]")
+
+
+def test_field_set_is_last_write_wins_and_summable():
+    """ADR 011: field_set is a BLIND per-field set, so a replayed write is a no-op and a
+    later cumulative value replaces the earlier one; fields_get returns everything to sum.
+    Same assertions on both backends (and sharded) -- this is the property the exfil /
+    long-connection aggregates now depend on for idempotency."""
+    for name, s in _backends():
+        s.field_set("fx:1:t:a|b", "flow-1", 100, ttl=600)
+        s.field_set("fx:1:t:a|b", "flow-1", 100, ttl=600)          # replay: no-op
+        s.field_set("fx:1:t:a|b", "flow-1", 900, ttl=600)          # later interim: overwrite
+        s.field_set("fx:1:t:a|b", "flow-2", 50, ttl=600)           # distinct flow: adds
+        s.field_set("fx:1:t:a|b", "flow-2", 5, ttl=600)            # counter reset: current truth
+        vals, refused = s.fields_get("fx:1:t:a|b")
+        assert vals == {"flow-1": 900.0, "flow-2": 5.0}, f"{name}: {vals}"
+        assert sum(vals.values()) == 905.0 and len(vals) == 2, name
+        assert refused == 0, name
+        assert s.fields_get("fx:1:t:never") == ({}, 0), name       # unwritten key
+        # counter_add still accumulates on its own key (ssh/icmp rate counters rely on it)
+        assert s.counter_add("fx:cnt", "n", 1, 600) == 1 and s.counter_add("fx:cnt", "n", 1, 600) == 2, name
+        print(f"  ok field_set/fields_get [{name}]")
+
+
+def test_field_set_cap_reports_refused_writes():
+    """The cap bounds fields per key, and a REFUSED WRITE is counted (never silently
+    dropped) so the caller can say its aggregate is a floor. Writes, not identities: the
+    write path takes no read, so re-writing an already-refused field is refused and counted
+    again -- which is why callers must report refused updates, not a flow count (ADR 011).
+    Equivalent on both backends."""
+    for name, s in _backends():
+        for i in range(10):
+            s.field_set("fc:1:t:a|b", f"flow-{i}", 10, ttl=600, cap=4)
+        vals, refused = s.fields_get("fc:1:t:a|b")
+        assert len(vals) == 4, f"{name}: cap not enforced ({len(vals)})"
+        assert refused == 6, f"{name}: refused {refused}"
+        assert sum(vals.values()) == 40, name                      # a floor, not 100
+        s.field_set("fc:1:t:a|b", "flow-0", 99, ttl=600, cap=4)    # an EXISTING field still updates
+        vals2, refused2 = s.fields_get("fc:1:t:a|b")
+        assert vals2["flow-0"] == 99.0 and len(vals2) == 4 and refused2 == 6, name
+        s.field_set("fc:1:t:a|b", "flow-9", 10, ttl=600, cap=4)    # replay of a REFUSED field
+        vals3, refused3 = s.fields_get("fc:1:t:a|b")
+        assert vals3 == vals2 and refused3 == 7, f"{name}: {refused3}"   # aggregate steady, refusals rise
+        print(f"  ok field_set cap [{name}]")
+
+
+def test_field_set_via_pipeline_ops():
+    """The fset op lands like the individual call (app.py buffers every write into ONE
+    pipelined round-trip per poll-batch, so the batched path is the production path)."""
+    stores = [("memory", st.InMemoryStore()),
+              ("sharded-mem", st.ShardedRedisStore([st.InMemoryStore() for _ in range(3)]))]
+    url = os.environ.get("NDR_TEST_REDIS_URL")
+    if url:
+        try:
+            r = st.RedisStore(url); r._r.ping(); r._r.flushdb(); stores.append(("redis", r))
+        except Exception as e:
+            print(f"  (redis backend skipped: {e})")
+    for name, s in stores:
+        s.pipeline_ops([
+            ("fset", "exf:1:t:a|b", "flow-1", 500, 60, "idx:exf:1", 2),
+            ("fset", "exf:1:t:a|b", "flow-1", 500, 60, "idx:exf:1", 2),   # replay: still 500
+            ("fset", "exf:1:t:a|b", "flow-2", 200, 60, "idx:exf:1", 2),
+            ("fset", "exf:1:t:a|b", "flow-3", 900, 60, "idx:exf:1", 2),   # beyond the cap
+        ])
+        vals, refused = s.fields_get("exf:1:t:a|b")
+        assert vals == {"flow-1": 500.0, "flow-2": 200.0}, f"{name}: {vals}"
+        assert refused == 1, f"{name}: {refused}"
+        assert "exf:1:t:a|b" in s.set_members("idx:exf:1"), name     # indexed like cnt/win
+        print(f"  ok pipeline fset [{name}]")
+
+
+def test_redis_fset_is_one_round_trip_per_batch():
+    """Plan 007's invariant asserted at the COMMAND level, not by inspection: a poll-batch
+    containing fset ops is ONE pipeline execute with no immediate (out-of-pipeline) command.
+    redis-py's register_script helper breaks exactly that -- a registered Script queued on a
+    pipeline makes Pipeline.execute issue an immediate SCRIPT EXISTS first (client.py
+    load_scripts), i.e. a second synchronous round-trip per batch -- so the cap script is
+    queued as one SCRIPT LOAD followed by EVALSHA instead, which also rules out NOSCRIPT
+    after a Redis restart or SCRIPT FLUSH. A fake client records what RedisStore issues."""
+    log = []
+
+    class _Pipe:
+        def __getattr__(self, name):                       # any queued command
+            def q(*a, **k):
+                log.append((name.upper(),) + a)
+                return self
+            return q
+
+        def execute(self, *a, **k):
+            log.append(("EXECUTE",))
+            return []
+
+        def immediate_execute_command(self, *a, **k):      # what register_script would use
+            raise AssertionError(f"extra synchronous round-trip: {a}")
+
+    class _Client:
+        def pipeline(self, transaction=False):
+            return _Pipe()
+
+        def register_script(self, script):
+            raise AssertionError("register_script costs a SCRIPT EXISTS preflight per execute")
+
+    fake = types.ModuleType("redis")
+    fake.Redis = type("Redis", (), {"from_url": staticmethod(lambda url, **kw: _Client())})
+    real = sys.modules.get("redis")
+    sys.modules["redis"] = fake
+    try:
+        s = st.RedisStore("redis://fake/0")
+        s.pipeline_ops([("fset", "exf:1:t:a|b", f"flow-{i}", 100 * i, 60, "idx:exf:1", 8)
+                        for i in range(3)]
+                       + [("win", "bc:1:t:a|b", "idx:bc:1", 1.0, 0, 60)])
+    finally:
+        if real is None:
+            del sys.modules["redis"]
+        else:
+            sys.modules["redis"] = real
+    cmds = [c[0] for c in log]
+    assert cmds.count("EXECUTE") == 1, f"not one round-trip: {cmds}"
+    assert cmds.count("SCRIPT_LOAD") == 1, f"script load per op or missing: {cmds}"
+    assert cmds.index("SCRIPT_LOAD") < cmds.index("EVALSHA"), cmds      # cached before first use
+    assert cmds.count("EVALSHA") == 3, cmds                              # one per fset op
+    assert not [c for c in cmds if "EXISTS" in c], cmds                  # no preflight
+    sha = hashlib.sha1(st._FIELD_SET_LUA.encode()).hexdigest()
+    ev = next(c for c in log if c[0] == "EVALSHA")
+    assert ev[1] == sha and ev[2] == 1 and ev[3] == "exf:1:t:a|b", ev
+    assert ev[-1] == st.REFUSED_FIELD and ev[-2] == 8, ev                # cap + refusal field
+    print("  ok redis fset round-trips [fake client]")
+
+
+def test_field_set_window_is_tumbling():
+    """TTL comes from the FIRST write and is not refreshed (F05, same as counter_add), so a
+    pair's per-flow fields cannot carry a previous window's flows forever."""
+    clk = [1000.0]
+    s = st.InMemoryStore(clock=lambda: clk[0])
+    s.field_set("fx:t:a|b", "flow-1", 10, ttl=60)
+    clk[0] += 30
+    s.field_set("fx:t:a|b", "flow-2", 10, ttl=60)        # continuous activity
+    clk[0] += 40                                         # past the FIRST write's ttl
+    assert s.fields_get("fx:t:a|b") == ({}, 0), "per-flow fields outlived their window"
+    s.field_set("fx:t:a|b", "flow-3", 7, ttl=60)         # fresh window starts clean
+    assert s.fields_get("fx:t:a|b") == ({"flow-3": 7.0}, 0)
 
 
 def test_zset_first_seen():

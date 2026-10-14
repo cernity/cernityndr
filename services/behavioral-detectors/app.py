@@ -20,6 +20,7 @@ import re
 import signal
 import time
 from datetime import datetime, timezone
+from statistics import median
 
 import ndr_runtime                      # shared tuned consumer/producer + metrics (plan 003 U1)
 
@@ -48,6 +49,50 @@ I2D_NEG_TTL = float(os.environ.get("I2D_NEG_CACHE_TTL", "5"))    # negative (mis
                                                                  # on another replica is visible within seconds, not a
                                                                  # full WINDOW (review: avoid suppressing FQDN-beacon)
 I2D_CACHE_MAX = int(os.environ.get("I2D_CACHE_MAX", "50000"))    # bounded in-process cache size
+FQDN_BEACON_MIN_IPS = int(os.environ.get("NDR_FQDN_BEACON_MIN_IPS", "2"))   # IP-rotation gate (fqdn_beacon)
+# Jitter/gap-tolerant beacon fallback: autocorrelation over the SAME window, tried only
+# when the regularity scorer did not fire (see evaluate()). NDR_BEACON_AUTOCORR=0 turns
+# it off entirely.
+AUTOCORR = os.environ.get("NDR_BEACON_AUTOCORR", "1") not in ("0", "false", "False", "")
+
+
+def _env_kw(**names):
+    """Kwargs from only the env vars that are actually SET, so an unset knob keeps the
+    default in the pure function's signature (detectors.py) rather than duplicating it
+    here, where the two could drift."""
+    out = {}
+    for kw, (var, cast) in names.items():
+        v = os.environ.get(var)
+        if v not in (None, ""):
+            out[kw] = cast(v)
+    return out
+
+
+AUTOCORR_KW = _env_kw(threshold=("NDR_BEACON_AUTOCORR_THRESHOLD", float),
+                      min_strength=("NDR_BEACON_AUTOCORR_MIN_STRENGTH", float),
+                      min_conns=("NDR_BEACON_AUTOCORR_MIN_CONNS", int),
+                      count_target=("NDR_BEACON_AUTOCORR_COUNT_TARGET", int),
+                      min_cycles=("NDR_BEACON_AUTOCORR_MIN_CYCLES", float),
+                      max_lag_fraction=("NDR_BEACON_AUTOCORR_MAX_LAG_FRACTION", float),
+                      max_bins=("NDR_BEACON_AUTOCORR_MAX_BINS", int),
+                      bins_per_period=("NDR_BEACON_AUTOCORR_BINS_PER_PERIOD", int))
+
+# Per-flow aggregate state lives under its OWN key prefixes, NOT the ex:/lc: the accumulating
+# counters used (ADR 015, rolling-upgrade note). The hash SHAPE is the same but the schema is
+# not: a field is now a flow identity, so a pre-upgrade ex: hash still holding the counter
+# fields b/c (or lc:'s s/n) would be read as two "flows" worth 30 MB and 1 second and could
+# re-manufacture the very finding this fix removes. A new prefix means the two schemas never
+# meet in one key, in EITHER direction (a rollback reads its own keys back), and the old keys
+# and their idx: entries age out within one WINDOW on their existing TTL.
+EX_PFX, LC_PFX = "exf:", "lcf:"
+# Per-flow fields per (src,dst) pair per window (ADR 015). An accumulating counter was O(1)
+# per pair; one field per flow is O(flows per pair per window), so it needs a ceiling. 2048 is
+# ~3.4 flows/s sustained to ONE destination for a 600s window -- a pair that chatty is already
+# strobe/beacon territory -- and bounds a pair's hash to roughly 100 KB. When the cap binds the
+# derived aggregate becomes a FLOOR (see evaluate): the overflow is counted in the hash, logged,
+# exported as a gauge, and carried on the finding, never silently dropped.
+FLOW_CAP = int(os.environ.get("NDR_FLOW_IDENTITY_CAP", "2048"))
+
 
 def _stable(s: str) -> int:
     """Cross-process-stable hash. Python's hash() is PYTHONHASHSEED-randomized, so
@@ -147,6 +192,17 @@ def _timing_evidence(ts):
     return [{"type": "interval_s", "value": round(mean, 1)},
             {"type": "jitter_s", "value": round(jitter, 1)},
             {"type": "connections", "value": len(ts)}]
+
+
+def _method_evidence(method, period_secs, ts):
+    """Regularity reports its median interval; autocorrelation reports its lag.
+    These are timing estimates, not evidence that the destination is malicious."""
+    if method == "regularity":
+        ordered = sorted(ts)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > a]
+        period_secs = median(gaps) if gaps else 0.0
+    return [{"type": "method", "value": method},
+            {"type": "period_secs", "value": period_secs}]
 
 
 def _rfc3339(ep):
@@ -250,8 +306,8 @@ def _win_add(prefix, part, key, score, value):
     _pending.append(("win", key, _idx(prefix, part), score, value, WINDOW))
 
 
-def _cnt_add(prefix, part, key, field, delta):
-    _pending.append(("cnt", key, field, delta, WINDOW, _idx(prefix, part)))
+def _fset_add(prefix, part, key, field, value):
+    _pending.append(("fset", key, field, value, WINDOW, _idx(prefix, part), FLOW_CAP))
 
 
 def _znx_add(prefix, part, key, member, score):
@@ -264,6 +320,60 @@ def _kv_add(key, value):
 
 def _sadd_add(key, member):
     _pending.append(("sadd", key, member, WINDOW))
+
+
+def _flow_identity(e, f):
+    """Identity of the FLOW a record describes. Used as the hash FIELD under the
+    (src|dst) key, so repeated records for one flow overwrite one value instead of
+    accumulating four (ADR 015). Resolution order, most to least specific:
+
+      1. (sensor, flow_id), and ONLY when BOTH are present. Suricata's flow_id is
+         INSTANCE-local -- two sensors can mint the same number for unrelated flows -- so
+         flow_id alone is not an identity: a sensor-less record falls through to 2/3 rather
+         than merging every sensor's flow_id 5 into one field (which would UNDER-count, the
+         dangerous direction). The sensor comes from the fields the normalizer trusts
+         (host / sensor_id, stamped by the shipper).
+      2. (sensor, community_id, flow start, flow_id). community_id hashes the 5-TUPLE, so a
+         pair that reconnects on the same ports REUSES it; the flow's own start time separates
+         those genuinely distinct flows, and flow_id (when the record has one but no sensor)
+         separates concurrent flows further -- it can only split, never merge. The sensor is
+         carried here too even though it alone was not enough to reach 1: two sensors that
+         both see the same 5-tuple (a span tap either side of a hop) mint the SAME
+         community_id and start, so dropping the sensor would merge their records into one
+         field and the second would OVERWRITE the first -- an under-count. Empty when the
+         record has no sensor, which only ever splits. Interim records of one flow share all
+         four, so they still collapse to one identity, which is the point.
+      3. A synthetic digest over what the record does carry (sensor, 5-tuple, proto, flow
+         start, flow_id). Deliberately conservative: including the start time means the
+         worst case is treating one flow as two (over-count, i.e. today's behavior), never
+         merging two flows into one (under-count, which would blind the detector).
+
+    Nothing is fabricated: a record carrying no identifier lands on a digest of its OWN
+    fields, not a generated id. Known ceiling: with neither flow_id nor flow.start the
+    digest falls back to the EVE emit timestamp, so interim records of such a flow can
+    still split -- that is the pre-fix behavior, for a record shape Suricata does not emit.
+    """
+    fid = e.get("flow_id")
+    sensor = e.get("host") or e.get("sensor_id") or ""
+    if sensor and fid is not None:
+        return f"s|{sensor}|{fid}"
+    started = f.get("start") or e.get("timestamp") or ""
+    cid = e.get("community_id")
+    if cid:
+        return f"c|{sensor}|{cid}|{started}|{'' if fid is None else fid}"
+    raw = "|".join(str(x) for x in (sensor, e.get("src_ip", ""), e.get("src_port", ""),
+                                    e.get("dest_ip", ""), e.get("dest_port", ""),
+                                    e.get("proto", ""), started, "" if fid is None else fid))
+    return "x|" + hashlib.sha1(raw.encode()).hexdigest()[:20]
+
+
+def _refused_evidence(n):
+    """Evidence that the aggregate is a FLOOR because the per-pair flow cap bound. `n` is
+    the number of per-flow WRITES the cap refused, not a count of distinct flows: the write
+    path takes no read, so a redelivered refused record is refused again (store.REFUSED_FIELD).
+    So it reads 'at least one flow is missing from this total', nothing more precise. Absent
+    when nothing was refused, so a normal finding is unchanged."""
+    return [{"type": "flow_updates_refused_at_cap", "value": int(n)}] if n else []
 
 
 _i2d_cache = {}                          # dst-ip key -> (value, inserted_ts, ttl): read-through cache (plan 007 U3)
@@ -314,14 +424,25 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
         env = _store.set_len(f"pv:{ten}:{dst}")
         breed, risks = _store.kv_get(f"ctx:{ten}:{src}|{dst}") or ["", []]
         is_b, score = det.beacon_score(ts, sizes, threshold=cfg["beacon_threshold"], count_target=cfg["beacon_count_target"])
+        method, period = "regularity", 0.0
+        if not is_b and AUTOCORR:
+            # Jitter/gap-tolerant FALLBACK, same window, same noise gating (this loop only
+            # sees dsts that passed beacon_noise_dst at write time). It runs ONLY when the
+            # regularity scorer did not fire and emits the SAME detector_id, so a dst can
+            # produce at most one beacon finding and the correlation service's `temporal`
+            # family cap still covers it.
+            is_b, score, period = det.beacon_autocorr(ts, sizes, **AUTOCORR_KW)
+            method = "autocorrelation"
         if is_b:
             sev = det.gated_severity(7, breed, risks, env_assets=env)
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst}]
-                             + _timing_evidence(ts))
+                             + _timing_evidence(ts) + _method_evidence(method, period, ts))
             c = _candidate("beacon", "c2", sev, score, ent, ten, obs=(ts[0], ts[-1]))
             if c:
-                producer.send(CANDIDATE_TOPIC, c); log.info("BEACON %s->%s sev=%s score=%s", src, dst, sev, score)
+                producer.send(CANDIDATE_TOPIC, c); log.info("BEACON %s->%s sev=%s score=%s method=%s", src, dst, sev, score, method)
+        # is_b includes a fallback hit on purpose: a dst reported as a beacon must not
+        # ALSO be reported as a strobe, whichever method found the period.
         is_s, sscore = det.strobe_check(len(rng), dst, is_beacon=is_b, min_conns=cfg["strobe_min_conns"])
         if is_s:
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
@@ -338,14 +459,22 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             _prune_index(key)          # self-clean expired index member (plan 004 U3)
             continue
         n_ips = _store.set_len(f"fi:{ten}:{src}|{dom}")
-        is_fb, fscore = det.fqdn_beacon([s for s, _ in rng], [v for _, v in rng], n_ips)
+        fts = [s for s, _ in rng]
+        is_fb, fscore = det.fqdn_beacon(fts, [v for _, v in rng], n_ips, min_ips=FQDN_BEACON_MIN_IPS)
+        method, period = "regularity", 0.0
+        if not is_fb and AUTOCORR and n_ips >= FQDN_BEACON_MIN_IPS:
+            # Same fallback, same IP-rotation gate as fqdn_beacon — a single-IP domain is
+            # beacon_score's case, so the gate must not re-open here either.
+            is_fb, fscore, period = det.beacon_autocorr(fts, [v for _, v in rng], **AUTOCORR_KW)
+            method = "autocorrelation"
         if is_fb:
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "domain", "role": "c2", "value": dom},
-                              {"type": "rotating_ips", "value": n_ips}])
+                              {"type": "rotating_ips", "value": n_ips}]
+                             + _method_evidence(method, period, fts))
             c = _candidate("beacon_fqdn", "c2", det.gated_severity(8, "", []), fscore, ent, ten, obs=(rng[0][0], rng[-1][0]))
             if c:
-                producer.send(CANDIDATE_TOPIC, c); log.info("BEACON_FQDN %s->%s ips=%d score=%s", src, dom, n_ips, fscore)
+                producer.send(CANDIDATE_TOPIC, c); log.info("BEACON_FQDN %s->%s ips=%d score=%s method=%s", src, dom, n_ips, fscore, method)
     # DNS tunnel + exploded DNS
     for key in _scoped_keys("dn:", dns_parts):
         ten, client = _key_parts(key)
@@ -367,49 +496,70 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             c = _candidate("dns_exploded", "dns_tunnel", 6, xscore, ent, ten, obs=(rng[0][0], rng[-1][0]))
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("DNS_EXPLODED %s parent=%s score=%s", client, parent, xscore)
-    # exfil: the ex: byte counter accrues per flow (write-only in _handle, plan 007);
-    # the threshold check + emit run here. Severity reuses ctx: (breed/risks) + pv:
-    # prevalence, exactly as the inline path did.
-    for key in _scoped_keys("ex:", flow_parts):
+    # exfil: exf: holds one field per FLOW carrying that flow's latest cumulative
+    # bytes_toserver (write-only in _handle, plan 007); the aggregate is DERIVED here,
+    # where the threshold check + emit already live (ADR 015). Summing per-flow fields
+    # instead of accumulating a counter is what makes replay and repeated interim records
+    # harmless. Severity reuses ctx: (breed/risks) + pv: prevalence, as the inline path did.
+    refused = {EX_PFX: 0, LC_PFX: 0}
+    for key in _scoped_keys(EX_PFX, flow_parts):
         ten, entity = _key_parts(key); src, dst = _pair(entity)
-        total = _store.counter_get(key, "b")
-        if not total:
+        flows, capped = _store.fields_get(key)       # {flow identity: that flow's cumulative bytes}
+        total, conns = sum(flows.values()), len(flows)
+        # Refusals are reported BEFORE any early exit: a cap that bound while every admitted
+        # flow happened to carry 0 bytes is still data loss, and the spec forbids losing it
+        # silently (review fix). Likewise prune the index only when the key is ABSENT --
+        # a zero SUM is live state, and dropping it would unindex a key the cap is refusing
+        # writes against, hiding the overflow for the rest of the window.
+        refused[EX_PFX] += capped
+        if capped:
+            log.warning("flow cap bound for %s->%s: %d per-flow writes refused (>=1 flow omitted), "
+                        "exfil bytes/connections are a FLOOR", src, dst, capped)
+        if not flows and not capped:
             _prune_index(key); continue
-        exo = _store.window_range("exo:" + key[len("ex:"):], floor)          # R06: observed exfil event times
+        if not total:
+            continue
+        exo = _store.window_range("exo:" + key[len(EX_PFX):], floor)         # R06: observed exfil event times
         obs = (exo[0][0], exo[-1][0]) if exo else (None, None)
-        exb = _store.window_range("exb:" + key[len("ex:"):], floor)          # §49.4: per-flow bytes-to-server
-        material_flows = sum(1 for _, v in exb if (v or 0) >= cfg.get("exfil_material_flow_bytes", 100_000))
+        # §49.4: per-flow bytes ARE the exf: field values, so distributed-exfil evidence
+        # needs no second structure and cannot be inflated by interim records.
+        material_flows = sum(1 for v in flows.values() if v >= cfg.get("exfil_material_flow_bytes", 100_000))
         is_e, escore = det.exfil_check(int(total), dst, threshold_bytes=cfg["exfil_bytes"])
         if is_e:
             breed, risks = _store.kv_get(f"ctx:{ten}:{src}|{dst}") or ["", []]
             sev = det.gated_severity(8, breed, risks, env_assets=_store.set_len(f"pv:{ten}:{dst}"))
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst},
-                              {"type": "bytes", "value": int(total)}])
+                              {"type": "bytes", "value": int(total)}] + _refused_evidence(capped))
             c = _candidate("exfil", "exfil", sev, escore, ent, ten, obs=obs)
             if c:
                 producer.send(CANDIDATE_TOPIC, c); log.info("EXFIL %s->%s bytes=%d", src, dst, int(total))
         else:
             # low-and-slow exfil: sustained trickle below the burst ceiling (T1030)
-            conns = int(_store.counter_get(key, "c") or 0)
             is_ls, lscore = det.low_slow_exfil(int(total), conns, dst, threshold_bytes=cfg["exfil_bytes"],
                                                material_flows=material_flows)   # §49.4: require distributed flows
             if is_ls:
                 ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                                   {"type": "ip", "role": "dst", "value": dst},
                                   {"type": "bytes", "value": int(total)},
-                                  {"type": "connections", "value": conns}])
+                                  {"type": "connections", "value": conns}] + _refused_evidence(capped))
                 c = _candidate("low_slow_exfil", "exfil", 6, lscore, ent, ten, obs=obs)
                 if c:
                     producer.send(CANDIDATE_TOPIC, c); log.info("LOW_SLOW_EXFIL %s->%s bytes=%d conns=%d", src, dst, int(total), conns)
-    # cumulative long-connection (moved from _handle, plan 007)
-    for key in _scoped_keys("lc:", flow_parts):
+    # cumulative long-connection (moved from _handle, plan 007; per-flow seconds, ADR 015)
+    for key in _scoped_keys(LC_PFX, flow_parts):
         ten, entity = _key_parts(key); src, dst = _pair(entity)
-        secs = _store.counter_get(key, "s")
-        if not secs:
+        flows, capped = _store.fields_get(key)       # {flow identity: that flow's cumulative age}
+        secs, nconn = sum(flows.values()), len(flows)
+        refused[LC_PFX] += capped            # before the early exits, same reason as exf: above
+        if capped:
+            log.warning("flow cap bound for %s->%s: %d per-flow writes refused (>=1 flow omitted), "
+                        "cumulative seconds/connections are a FLOOR", src, dst, capped)
+        if not flows and not capped:
             _prune_index(key); continue
-        nconn = _store.counter_get(key, "n")
-        is_lc, lcs = det.longconn_cumulative_check(secs, int(nconn), dst,
+        if not secs:
+            continue
+        is_lc, lcs = det.longconn_cumulative_check(secs, nconn, dst,
                                                    threshold_secs=(cfg["longconn_cum_secs"] or CUM_LONGCONN_SECS),
                                                    min_conns=cfg["longconn_cum_min_conns"])
         if is_lc:
@@ -418,10 +568,12 @@ def evaluate(producer, flow_parts=None, dns_parts=None):
             ent = json.dumps([{"type": "ip", "role": "src", "value": src},
                               {"type": "ip", "role": "dst", "value": dst},
                               {"type": "total_duration_s", "value": int(secs)},
-                              {"type": "connections", "value": int(nconn)}])
+                              {"type": "connections", "value": nconn}] + _refused_evidence(capped))
             c = _candidate("long_connection_cumulative", "c2", sev, lcs, ent, ten)
             if c:
-                producer.send(CANDIDATE_TOPIC, c); log.info("LONG_CONN_CUM %s->%s total=%ds conns=%d", src, dst, int(secs), int(nconn))
+                producer.send(CANDIDATE_TOPIC, c); log.info("LONG_CONN_CUM %s->%s total=%ds conns=%d", src, dst, int(secs), nconn)
+    for pfx, n in refused.items():       # explicit telemetry: 0 is published too, so the
+        metrics.set_flow_cap_refused(pfx, n)    # series exists before a pair ever hits the cap
     # rare destination (moved, plan 007): first-seen ZSET. Emit ONCE per (src, new-dst),
     # matching the inline "set_len(kd)>=15 AND dst not yet known at arrival" -- NOT once
     # per WINDOW bucket. Only dsts first-seen SINCE the last evaluate (rare_since) are
@@ -480,7 +632,7 @@ def _handle(e, producer, now, part=0, cfg=None):
         # long-conn, rare-destination) run in the partition-scoped evaluate() instead.
         # So _handle issues zero synchronous Redis round-trips per flow in steady state
         # (the sole per-flow read, i2d, is served by _i2d_get's read-through cache).
-        #   - ex:/lc:/kd: are src-keyed -> co-partitioned -> now partition-tagged AND
+        #   - exf:/lcf:/kd: are src-keyed -> co-partitioned -> partition-tagged AND
         #     indexed, so evaluate() enumerates only this replica's assigned partitions.
         #     All three (and exfil/longconn-cum/rare-dest) gate on is_external, so they
         #     are written only for external dsts -- no indexing of internal traffic.
@@ -492,12 +644,21 @@ def _handle(e, producer, now, part=0, cfg=None):
         if det.is_external(dst):
             _kv_add(f"ctx:{ten}:{src}|{dst}", [breed, risks])                # dst-context for severity (read in evaluate)
             _sadd_add(f"pv:{ten}:{dst}", src)                               # fleet prevalence (uncapped; env bucket unaffected)
-            _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "b", b2s)  # exfil bytes -> threshold in evaluate()
-            _cnt_add("ex:", part, f"ex:{part}:{ten}:{src}|{dst}", "c", 1)    # connection count -> low-slow exfil in evaluate()
+            # One field per FLOW holding that flow's LATEST cumulative value, blindly
+            # overwritten (ADR 015). bytes_toserver and age are cumulative per flow and
+            # records are redelivered on restart/rebalance, so accumulating them with
+            # HINCRBYFLOAT counted the same bytes and seconds repeatedly and manufactured
+            # exfil / long-connection findings on benign traffic. evaluate() derives
+            # bytes = SUM(fields), connections = COUNT(fields), seconds = SUM(fields), so
+            # a replayed or interim record is absorbed and _handle still issues no read.
+            flow_identity = _flow_identity(e, f)
+            _fset_add(EX_PFX, part, f"{EX_PFX}{part}:{ten}:{src}|{dst}", flow_identity, b2s)
             _win_add("exo:", part, f"exo:{part}:{ten}:{src}|{dst}", evt, 0)  # R06: observed event times for the exfil interval
-            _win_add("exb:", part, f"exb:{part}:{ten}:{src}|{dst}", evt, b2s)  # §49.4: per-flow bytes (distributed-exfil evidence)
-            _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "s", age)  # cumulative long-conn secs -> evaluate()
-            _cnt_add("lc:", part, f"lc:{part}:{ten}:{src}|{dst}", "n", 1)    # ... and conn count
+            _fset_add(LC_PFX, part, f"{LC_PFX}{part}:{ten}:{src}|{dst}", flow_identity, age)
+            # §49.4's per-flow bytes evidence is these same exf: fields, so the separate
+            # exb: window is gone: as a ZSET of (event time, bytes) it counted each interim
+            # record of one flow as another "material flow". Reading it off exf: also aligns
+            # the evidence with the total it qualifies (one tumbling window, not two).
             _znx_add("kd:", part, f"kd:{part}:{ten}:{src}", dst, time.time())  # first-seen dst -> rare-dest in evaluate().
             # score = PROCESSING wall-clock, NOT event-time evt: the evaluate rare-dest cursor is wall-clock, so kd: scores
             # must share that clock domain -- else under consumer lag (event-time trails wall-time) the cursor excludes
@@ -591,8 +752,9 @@ def main():
         except Exception as ex:                 # a Redis blip must not crash-loop the replica -- mirror the evaluate
             metrics.dropped("flush"); log.warning("flush failed: %s", ex)   # guard below. Drop this batch's buffered
             _pending.clear()                    # writes: windowed detectors (beacon/dns) repopulate from later flows;
-            # the ex:/lc: accumulators just under-count this batch (a lone threshold-crossing flow here is missed for the
-            # window -- offsets auto-commit at the next poll, no redelivery). metrics.dropped("flush") surfaces the rate.
+            # the exf:/lcf: per-flow fields just miss this batch's flows (a lone threshold-crossing flow here is missed for
+            # the window -- offsets auto-commit at the next poll, no redelivery). metrics.dropped("flush") surfaces the
+            # rate. A redelivery that DOES happen is now harmless: the fields are last-write-wins, not accumulators.
         if now - last_eval >= EVAL_EVERY:
             # evaluate only the entities on this replica's assigned partitions
             fp = ndr_runtime.assigned_partitions(consumer, "suricata.flow.v1")

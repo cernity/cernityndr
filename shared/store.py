@@ -12,9 +12,18 @@ Design (KTD1-3 of the enterprise-hardening plan):
   - windows (beacon/dns callbacks) -> sorted set scored by event time, so
     time-pruning is `range(key, min_score)` / `prune(key, min_score)`, atomic in
     Redis, with a key-level TTL as a backstop against leaks.
-  - running accumulators / rate counters (exfil bytes, ssh/icmp) -> hash counters on a
+  - running accumulators / rate counters (ssh/icmp brute-force rates) -> hash counters on a
     TUMBLING window: TTL is set from the FIRST write and NOT refreshed, so continuous
     activity can't keep a counter alive (accumulating a past window's counts) forever (F05).
+  - per-flow CUMULATIVE values (exfil bytes, long-conn seconds) -> the same hash shape, but
+    written with field_set (blind last-write-wins per flow identity) and summed at read time
+    with fields_get, NOT accumulated. counter_add is HINCRBYFLOAT: not idempotent, so a
+    redelivered record (offsets auto-commit independently of processing) or a second
+    cumulative interim record for the same flow added the same bytes/seconds twice and
+    inflated the aggregate over a detector threshold. A blind per-field set is idempotent
+    under replay, correct for interim records (a later one overwrites with the higher
+    cumulative value) and handles a counter reset for free (a lower value is just the
+    current truth for that flow). See ADR 011.
   - baselines (known-dsts, fleet prevalence, rotating IPs) + the partition index ->
     expiry-scored SORTED SETS (member -> its own expiry), pruned on read, so each member
     ages on its OWN window and cardinality stays bounded however busy the key is (F05).
@@ -28,9 +37,19 @@ grow unbounded (the leak the plan fixes), and a moved Kafka partition finds its
 state already in Redis (the rebalance-safety HA depends on).
 """
 from __future__ import annotations
+import hashlib
 import os
 import time
 import zlib
+
+# Reserved hash field: how many field WRITES a capped key refused. Counting writes, not
+# distinct identities: the write path takes no read, so it cannot tell a new identity from
+# one it already refused -- a replayed refused record bumps this again. So this is an
+# upper bound on refusals and a LOWER bound (>=1 means at least one flow is missing) on
+# the flows omitted; callers must label it as refused writes, never as a flow count.
+# Kept in the hash itself so it survives a restart and is read back with the aggregate
+# (the spec forbids silent data loss). '#' cannot begin a caller's identity.
+REFUSED_FIELD = "#refused"
 
 
 class WindowStore:
@@ -46,6 +65,8 @@ class WindowStore:
     def counter_add(self, key: str, field: str, delta: float, ttl: float) -> float: ...
     def counter_get(self, key: str, field: str) -> float: ...
     def counter_clear(self, key: str) -> None: ...
+    def field_set(self, key: str, field: str, value: float, ttl: float, cap: int | None = None) -> None: ...
+    def fields_get(self, key: str) -> tuple[dict, int]: ...   # ({field: value}, refused writes)
     def set_add(self, key: str, member: str, ttl: float, cap: int | None = None) -> None: ...
     def set_len(self, key: str) -> int: ...
     def set_contains(self, key: str, member: str) -> bool: ...
@@ -92,6 +113,7 @@ class InMemoryStore(WindowStore):
         # ALL buffered writes for a poll-batch (plan 007). Op kinds:
         #   ("win",  key, idx|None, score, value, ttl)       zset window + index
         #   ("cnt",  key, field, delta, ttl, idx|None)       hash counter + index
+        #   ("fset", key, field, value, ttl, idx|None, cap)  per-field LWW set + index
         #   ("znx",  key, member, score, ttl, idx|None)      first-seen zset (NX) + index
         #   ("kv",   key, value, ttl)                         key/value
         #   ("sadd", key, member, ttl)                        set add (uncapped)
@@ -105,6 +127,11 @@ class InMemoryStore(WindowStore):
             elif kind == "cnt":
                 _, key, field, delta, ttl, idx = op
                 self.counter_add(key, field, delta, ttl)
+                if idx is not None:
+                    self.set_add(idx, key, ttl)
+            elif kind == "fset":
+                _, key, field, value, ttl, idx, cap = op
+                self.field_set(key, field, value, ttl, cap)
                 if idx is not None:
                     self.set_add(idx, key, ttl)
             elif kind == "znx":
@@ -167,6 +194,35 @@ class InMemoryStore(WindowStore):
     def counter_clear(self, key):
         self._h.pop(key, None)
         self._exp.pop(key, None)
+
+    def field_set(self, key, field, value, ttl, cap=None):
+        """Blind last-write-wins set of one field. Idempotent: re-writing the same
+        (key, field) is a no-op, so a replayed record cannot inflate the aggregate the
+        way counter_add does, and a later cumulative value for the same identity simply
+        replaces the earlier one. Shares the counter hash (_h/_exp), so the tumbling-
+        window TTL (F05) and keys_matching are the counters' existing behavior.
+
+        `cap` bounds the number of identities per key (per-flow fields are O(flows per
+        key per window), where a counter was O(1)). A refused WRITE increments
+        REFUSED_FIELD rather than vanishing, so the caller can report that the derived
+        aggregate is a FLOOR. It counts writes, not identities (see REFUSED_FIELD)."""
+        if not self._alive(key, self._exp):
+            self._h.pop(key, None)
+            self._exp.pop(key, None)              # expired -> a fresh window sets its own TTL
+        h = self._h.setdefault(key, {})
+        if cap is not None and field not in h and len(h) - (REFUSED_FIELD in h) >= cap:
+            h[REFUSED_FIELD] = h.get(REFUSED_FIELD, 0) + 1
+        else:
+            h[field] = value
+        self._exp.setdefault(key, self._now() + ttl)
+
+    def fields_get(self, key):
+        """({field: value}, refused_writes) — every live field plus the cap's refusal count."""
+        if not self._alive(key, self._exp):
+            return {}, 0
+        h = self._h.get(key, {})
+        return ({f: float(v) for f, v in h.items() if f != REFUSED_FIELD},
+                int(h.get(REFUSED_FIELD, 0)))
 
     def _live_set(self, key):
         """Live members of a set, pruning any past their individual expiry (F05: each
@@ -238,6 +294,23 @@ class InMemoryStore(WindowStore):
         return sorted(out)
 
 
+# field_set with a cardinality cap, server-side. Lua (not read-then-write in the client)
+# because the caller's hot path must issue ZERO synchronous round-trips: this runs inside
+# the one pipelined batch per poll-batch, so the cap is enforced without a read turnaround.
+# A refused write bumps the refusal field so the loss is reported, never silent.
+_FIELD_SET_LUA = """
+local cap = tonumber(ARGV[3])
+if cap and redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+  if redis.call('HLEN', KEYS[1]) - redis.call('HEXISTS', KEYS[1], ARGV[4]) >= cap then
+    redis.call('HINCRBY', KEYS[1], ARGV[4], 1)
+    return 0
+  end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return 1
+"""
+
+
 class RedisStore(WindowStore):
     """Redis backend. Windows are sorted sets scored by event time; counters are
     hashes; baselines are sets; dst-context is a JSON value; dedup is SET NX EX.
@@ -257,6 +330,20 @@ class RedisStore(WindowStore):
         # url may be redis://host:port/db (TCP) or unix:///path/to/sock?db=0
         # (local single-box, lower per-op latency). Both parsed by from_url.
         self._r = redis.Redis.from_url(url, decode_responses=True)
+        self._fset_sha = hashlib.sha1(_FIELD_SET_LUA.encode()).hexdigest()
+
+    def _fset_queue(self, pipe, key, field, value, cap):
+        """Queue the capped per-field set on `pipe`. EVALSHA by a locally computed digest,
+        NOT redis-py's register_script helper: a registered Script used inside a pipeline
+        makes Pipeline.execute issue an immediate SCRIPT EXISTS first (redis-py 8.1
+        client.py load_scripts) -- a second synchronous round-trip per poll-batch, which is
+        exactly the cost plan 007's single batched flush exists to avoid. The caller queues
+        ONE SCRIPT LOAD ahead of the EVALSHAs in the same pipeline instead: pipelined
+        commands run in order on one connection, so the script is cached before the first
+        EVALSHA and NOSCRIPT cannot happen even after a Redis restart or SCRIPT FLUSH --
+        still one round-trip, at the cost of the script body once per batch."""
+        pipe.evalsha(self._fset_sha, 1, key, field, value,
+                     "" if cap is None else int(cap), REFUSED_FIELD)
 
     def window_add(self, key, score, value, ttl):
         pipe = self._r.pipeline(transaction=False)   # zadd + expire in one round-trip
@@ -285,6 +372,7 @@ class RedisStore(WindowStore):
         # + set adds, each with its index/TTL) is pipelined together. Op kinds:
         #   ("win",  key, idx|None, score, value, ttl)
         #   ("cnt",  key, field, delta, ttl, idx|None)
+        #   ("fset", key, field, value, ttl, idx|None, cap)   HSET (LWW) under a cap
         #   ("znx",  key, member, score, ttl, idx|None)   ZADD NX (keep earliest)
         #   ("kv",   key, value, ttl)
         #   ("sadd", key, member, ttl)
@@ -292,6 +380,7 @@ class RedisStore(WindowStore):
             return
         now = time.time()
         pipe = self._r.pipeline(transaction=False)
+        fset_loaded = False                                  # one queued SCRIPT LOAD per batch
         expd = set()                                         # dedup EXPIREs within the batch: all
         def _exp(k, ttl):                                    # ttls are WINDOW, so one per key suffices --
             if k not in expd:                                # index keys are shared across every entity
@@ -310,6 +399,16 @@ class RedisStore(WindowStore):
                 # F05: tumbling window — set TTL only if the counter has none (NX), so
                 # continuous writes don't refresh it into never expiring.
                 pipe.hincrbyfloat(key, field, delta); pipe.expire(key, int(ttl) + 1, nx=True)
+                if idx is not None:
+                    _idx(idx, key, ttl)
+            elif kind == "fset":
+                _, key, field, value, ttl, idx, cap = op
+                # blind per-field LWW set (idempotent under replay) + the server-side
+                # cardinality cap; TTL tumbles exactly as the counter's does.
+                if not fset_loaded:
+                    pipe.script_load(_FIELD_SET_LUA); fset_loaded = True   # queued, not immediate
+                self._fset_queue(pipe, key, field, value, cap)
+                pipe.expire(key, int(ttl) + 1, nx=True)
                 if idx is not None:
                     _idx(idx, key, ttl)
             elif kind == "znx":
@@ -359,6 +458,19 @@ class RedisStore(WindowStore):
 
     def counter_clear(self, key):
         self._r.delete(key)
+
+    def field_set(self, key, field, value, ttl, cap=None):
+        pipe = self._r.pipeline(transaction=False)   # load + set + expire in one round-trip
+        pipe.script_load(_FIELD_SET_LUA)
+        self._fset_queue(pipe, key, field, value, cap)
+        # F05: tumbling window, same as counter_add — TTL only when the key has none.
+        pipe.expire(key, int(ttl) + 1, nx=True)
+        pipe.execute()
+
+    def fields_get(self, key):
+        h = self._r.hgetall(key)
+        return ({f: float(v) for f, v in h.items() if f != REFUSED_FIELD},
+                int(float(h.get(REFUSED_FIELD, 0))))
 
     # Sets are expiry-scored ZSETs (member -> its own expiry) so each member ages on its
     # OWN window (F05); reads prune members below `now`, so continuous writes to a key
@@ -477,6 +589,12 @@ class ShardedRedisStore(WindowStore):
 
     def counter_clear(self, key):
         self._s(key).counter_clear(key)
+
+    def field_set(self, key, field, value, ttl, cap=None):
+        self._s(key).field_set(key, field, value, ttl, cap)
+
+    def fields_get(self, key):
+        return self._s(key).fields_get(key)
 
     def set_add(self, key, member, ttl, cap=None):
         self._s(key).set_add(key, member, ttl, cap)

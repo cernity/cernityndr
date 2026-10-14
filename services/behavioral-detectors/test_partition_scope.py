@@ -101,7 +101,7 @@ def test_moved_state_partition_tagged_aux_not():
          "flow": {"bytes_toserver": 100, "bytes_toclient": 100, "age": 1}}
     app._handle(e, _P(), time.time(), part=7)          # partition 7
     app._flush_pending()                                # buffered writes land here (plan 007)
-    for pfx in ("ex:", "lc:", "kd:"):                   # moved prefixes carry the partition segment
+    for pfx in (app.EX_PFX, app.LC_PFX, "kd:"):         # moved prefixes carry the partition segment
         ks = app._store.keys_matching(pfx)
         assert ks, f"expected {pfx} written for an external flow"
         for k in ks:
@@ -123,7 +123,7 @@ def test_index_written_for_scanned_not_aux():
     app._handle(e, _P(), time.time(), part=3)
     app._flush_pending()                                  # window writes are buffered now (plan 006/007)
     assert "bc:3:homelab:10.0.0.1|203.0.113.9" in app._store.set_members(app._index_key("bc:", 3))
-    for pfx in ("ex:", "lc:", "kd:"):                        # moved prefixes ARE indexed (plan 007)
+    for pfx in (app.EX_PFX, app.LC_PFX, "kd:"):               # moved prefixes ARE indexed (plan 007)
         assert app._store.set_members(app._index_key(pfx, 3)), f"moved {pfx} not indexed"
     for pfx in ("pv:", "ctx:", "fi:"):                       # exact-key aux never indexed
         assert app._store.set_members(app._index_key(pfx, 3)) == [], f"aux {pfx} indexed"
@@ -136,11 +136,11 @@ def _plant_flow(part, ten, src, dst, b2s=0, age=0.0):
 
 
 def test_exfil_fires_from_evaluate():
-    """Plan 007 U4: exfil moved from inline _handle to evaluate; a cumulative ex:
+    """Plan 007 U4: exfil moved from inline _handle to evaluate; the derived exf:
     byte total over threshold emits exactly once (dedup) from the scoped evaluate."""
     _fresh()
     _plant_flow(0, "homelab", "10.0.0.1", "203.0.113.9", b2s=100_000_000)
-    _plant_flow(0, "homelab", "10.0.0.1", "203.0.113.9", b2s=100_000_000)   # 200MB total
+    _plant_flow(0, "homelab", "10.0.0.1", "203.0.113.9", b2s=100_000_000)   # same flow identity: 100MB
     p = _P(); app.evaluate(p, flow_parts={0}, dns_parts=set())
     exfils = [m for m in p.sent if m["detector_id"] == "exfil"]
     assert len(exfils) == 1, exfils

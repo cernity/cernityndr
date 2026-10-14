@@ -1,10 +1,11 @@
 """Protocol detectors (plan U8 Tier 3/4). Pure scoring — app.py keeps state and
-consumes tls/http/ssh/dns/flow. Covers JA4 rarity, cloud-staging, DoH, TLS cert
+consumes tls/http/ssh/dns/flow. Covers JA4 novelty, cloud-staging, DoH, TLS cert
 anomalies, suspicious user-agents, SSH brute-force, and ICMP exfil.
 """
 from __future__ import annotations
 import ipaddress
 import os
+import re
 
 _EXTRA = tuple(p.strip() for p in os.environ.get("NDR_INTERNAL_PREFIXES", "").split(",") if p.strip())
 PRIVATE = ("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
@@ -38,11 +39,59 @@ def is_external(ip: str) -> bool:
     return True
 
 
-# --- JA4 rarity (T1071): a client fingerprint not seen before, past warmup ------
-# Warmup default 5: home networks have very low JA4 diversity (~7 distinct), so a
-# high warmup never triggers. A JA4 first-seen after warmup is the rarity signal.
-def is_rare_ja4(ja4: str, seen: set, warmup: int = 5) -> bool:
-    return bool(ja4) and len(seen) >= warmup and ja4 not in seen
+# --- D01: novelty is entity-relative; fleet popularity is context, not trust. ---
+def ja4_valid(fp) -> bool:
+    # Validate before exposing even partial features; flattened hashes have no AC.
+    return isinstance(fp, str) and re.fullmatch(
+        r"[tqd](?:1[0-3]|s[23]|d[12]|00)[di][0-9]{4}[a-z0-9]{2}_[0-9a-f]{12}_[0-9a-f]{12}", fp) is not None
+
+
+def ja4_parts(fp):
+    return tuple(fp.split("_")) if ja4_valid(fp) else None
+
+
+def ja4_ac(fp):
+    parts = ja4_parts(fp)
+    return f"{parts[0]}_{parts[2]}" if parts else ""
+
+
+def baseline_maturity(observations, distinct, first_seen_ts, now,
+                      min_observations=100, min_span_secs=86400):
+    # D01 requires both traffic and coverage: elapsed idle time alone cannot warm a host.
+    if observations < min_observations or distinct < 1 or first_seen_ts is None:
+        return "cold"
+    return "ready" if now - first_seen_ts >= min_span_secs else "warming"
+
+
+def ja4_novelty(fp, entity_seen, entity_ac_seen, fleet_count, maturity,
+                rare_max_entities=2, corroborated=False):
+    if not ja4_valid(fp) or maturity != "ready" or fp in entity_seen:
+        return False, [], 0.0, 0
+    reasons = ["JA4_NEW_TO_ENTITY"]
+    rare = fleet_count <= rare_max_entities
+    if rare:
+        reasons.append("JA4_RARE_IN_FLEET")
+    severity, confidence = (5, 0.5) if rare or corroborated else (2, 0.3)
+    if ja4_ac(fp) in entity_ac_seen:
+        reasons.append("JA4_AC_SIMILARITY")
+        # AC is supporting evidence of a benign variant only, never a malicious verdict.
+        severity, confidence = max(1, severity - 1), confidence * 0.5
+    return True, reasons, confidence, severity
+
+
+def ja4_transition_burst(fp_times, window_secs=600, min_distinct=5):
+    # Anchor to the latest observation, independent of wall clock for replay/tests.
+    if not fp_times:
+        return False, 0
+    now = max(ts for ts, _ in fp_times)
+    count = len({fp for ts, fp in fp_times
+                 if now - window_secs <= ts <= now and ja4_valid(fp)})
+    return count >= min_distinct, count
+
+
+# Retain fingerprints for a week; maturity expires after a week of INACTIVITY, not
+# on a tumbling deadline that would periodically disable a mature detector.
+JA4_BASELINE_TTL_SECS = 604800.0
 
 
 # --- Cloud-staging exfil (TA0010): TLS SNI to a data-sharing/cloud-storage host --

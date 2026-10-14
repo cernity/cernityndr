@@ -1,4 +1,6 @@
 """U8 correlation logic tests (pure, stdlib only)."""
+import json
+
 import correlate as c
 
 
@@ -200,6 +202,99 @@ def test_structured_ndpi_excluded_from_promotion_inputs():
     assert c.is_structured_ndpi(ndpi_anom) is True
     kept = [x for x in [beacon, ndpi_anom] if not c.is_structured_ndpi(x)]
     assert kept == [beacon]                          # the app loop/reload filter drops the nDPI item
+
+
+# --- correlated-signal-family dependency control -----------------------------
+
+def test_same_family_detectors_capped_below_naive_sum():
+    # beacon + beacon_fqdn are ONE periodic callback keyed two ways; summing both
+    # inflated risk as if they were independent evidence.
+    fs = [_f("b", "beacon", "c2", 8, 1000), _f("q", "beacon_fqdn", "c2", 8, 1000)]
+    risk = c.entity_risk(fs, now=1000)
+    assert risk < 16.0                                  # the naive sum
+    assert risk == c.FAMILY_CAP["temporal"]
+
+
+def test_unmapped_detector_is_its_own_family_no_op():
+    # regression guard: a detector_id absent from FAMILY must contribute exactly
+    # what it did before families existed (severity, decayed).
+    fs = [_f("x", "some_new_detector", "c2", 9, 1000)]
+    assert "some_new_detector" not in c.FAMILY
+    assert c.entity_risk(fs, now=1000) == 9.0
+    assert c.entity_risk(fs, now=1000 + 3600) == 4.5
+
+
+def test_different_families_still_sum():
+    # the cap is per family, not global: two unrelated behaviors are independent
+    # evidence and must still add up.
+    fs = [_f("b", "beacon", "c2", 9, 1000), _f("d", "dns_tunnel", "dns_tunnel", 6, 1000)]
+    assert c.entity_risk(fs, now=1000) == round(min(9.0, c.FAMILY_CAP["temporal"])
+                                                + min(6.0, c.FAMILY_CAP["dns"]), 3)
+    assert c.entity_risk(fs, now=1000) > c.entity_risk([fs[0]], now=1000)
+
+
+def test_decay_still_applies_inside_a_family():
+    fresh = [_f("b", "beacon", "c2", 6, 1000)]
+    old = [_f("b", "beacon", "c2", 6, 1000 - 3600)]
+    assert c.entity_risk(old, now=1000) < c.entity_risk(fresh, now=1000)
+    # and an aged family drops under its cap even when the fresh one is clipped
+    stale = [_f("b", "beacon", "c2", 10, 1000 - 7200),
+             _f("q", "beacon_fqdn", "c2", 10, 1000 - 7200)]
+    assert c.entity_risk(stale, now=1000) < c.FAMILY_CAP["temporal"]
+
+
+def test_one_behavior_many_detectors_no_longer_trips_risk_threshold():
+    # five temporal detector_ids, one periodic-callback behavior, all same stage so
+    # the kill-chain/multi-tactic paths cannot fire either.
+    one_behavior = [_f("a", "beacon", "c2", 10, 1000),
+                    _f("b", "beacon_fqdn", "c2", 10, 1000),
+                    _f("c", "strobe", "c2", 10, 1000),
+                    _f("d", "long_connection", "c2", 10, 1000),
+                    _f("e", "long_connection_cumulative", "c2", 10, 1000)]
+    assert c.entity_risk(one_behavior, now=1000) == c.FAMILY_CAP["temporal"]
+    fire, reason = c.should_incident(one_behavior, now=1000)
+    assert not fire, reason
+    # a genuinely multi-family entity (same stage, so still the risk path) does fire
+    multi = one_behavior + [_f("t", "dns_tunnel", "dns_tunnel", 10, 1000),
+                            _f("u", "ja4_rarity", "c2", 10, 1000)]
+    fire, reason = c.should_incident(multi, now=1000)
+    assert fire and reason == "risk-threshold", reason
+
+
+def test_risk_families_deterministic_and_raw_ge_capped():
+    fs = [_f("b", "beacon", "c2", 8, 1000), _f("q", "beacon_fqdn", "c2", 8, 1000),
+          _f("d", "dns_tunnel", "dns_tunnel", 6, 1000), _f("z", "mystery", "c2", 5, 1000)]
+    out = c.risk_families(fs, now=1000)
+    assert out == c.risk_families(list(reversed(fs)), now=1000)
+    assert [g["family"] for g in out] == sorted(g["family"] for g in out)
+    for g in out:
+        assert g["raw"] >= g["capped"] and g["capped"] <= g["cap"]
+        assert g["detectors"] == sorted(g["detectors"])
+    temporal = [g for g in out if g["family"] == "temporal"][0]
+    assert temporal["detectors"] == ["beacon", "beacon_fqdn"]
+    assert temporal["raw"] == 16.0 and temporal["capped"] == c.FAMILY_CAP["temporal"]
+    assert [g for g in out if g["family"] == "mystery"][0]["cap"] == c.FAMILY_CAP_DEFAULT
+
+
+def test_incident_payload_carries_family_breakdown():
+    fs = [_f("b", "beacon", "c2", 8, 1000), _f("q", "beacon_fqdn", "c2", 8, 1000),
+          _f("s", "horizontal_scan", "recon", 5, 1100)]
+    inc = c.build_incident("10.0.0.5", fs, now=1100, reason="multi-tactic")
+    ents = json.loads(inc["entities"])
+    # existing elements keep their order and position
+    assert [e["type"] for e in ents[:5]] == ["entity", "narrative", "tactic_chain",
+                                             "risk_score", "trigger"]
+    fam = [e for e in ents if e["type"] == "risk_families"][0]["value"]
+    assert fam == c.risk_families(fs, now=1100)
+    assert sum(g["capped"] for g in fam) == ents[3]["value"]
+
+
+def test_family_caps_are_tunable_via_params():
+    fs = [_f("b", "beacon", "c2", 8, 1000), _f("q", "beacon_fqdn", "c2", 8, 1000)]
+    # an operator can loosen one family without touching the others
+    assert c.entity_risk(fs, now=1000, family_caps={"temporal": 16.0}) == 16.0
+    fire, reason = c.should_incident(fs, now=1000, params={"family_caps": {"temporal": 16.0}})
+    assert fire and reason == "risk-threshold", reason
 
 
 if __name__ == "__main__":

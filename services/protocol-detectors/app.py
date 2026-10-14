@@ -1,15 +1,12 @@
-"""Protocol-detectors service (plan U8 Tier 2): ja4-rarity / cloud-staging / DoH /
+"""Protocol-detectors service (plan U8 Tier 2): ja4-novelty / cloud-staging / DoH /
 cert-anomaly / suspicious-UA / ssh-brute / icmp-exfil. Consumes the protocol
 topics. Scoring covered by test_proto.py.
 
-State is externalized to the shared Redis so the service scales horizontally with
-no double-emit (plan 006): the JA4-rarity "seen" set is a GLOBAL shared set (a JA4
-is rare only if the WHOLE fleet has not seen it, so a per-replica set would false-
-positive); ssh session counts and icmp byte totals are TTL'd counters keyed by
-src|dst (the old in-process dicts never reset -- a latent leak); emission dedup is
-shared-Redis with a STABLE cross-process finding hash (Python hash() is per-process
-seeded). Detection is otherwise stateless per record.
+State is externalized to shared Redis: JA4 baselines belong to source entities,
+with fleet entity counts as context. SSH/ICMP counters and emission dedup remain
+shared across replicas. D01 learns silently until count and span are sufficient.
 """
+import inspect
 import hashlib
 import json
 import os
@@ -32,7 +29,20 @@ GROUP_ID = os.environ.get("NDR_GROUP_ID", "ndr-protocol-detectors")
 STATE_BACKEND = os.environ.get("NDR_STATE_BACKEND", "memory")
 REDIS_URL = os.environ.get("NDR_REDIS_URL", "redis://ndr-redis:6379/0")
 JA4_WARMUP = int(os.environ.get("JA4_WARMUP", "5"))
-JA4_TTL = float(os.environ.get("JA4_SEEN_TTL", "86400"))         # rarity window (1 day)
+JA4_TTL = float(os.environ.get("JA4_SEEN_TTL", "86400"))         # legacy JA3/server rarity window
+
+
+# Defaults belong to pure scoring signatures so tests and deployment cannot drift.
+def _ja4_option(name, fn, param, cast):
+    return cast(os.environ.get(name, inspect.signature(fn).parameters[param].default))
+
+
+JA4_MIN_OBSERVATIONS = _ja4_option("JA4_MIN_OBSERVATIONS", proto.baseline_maturity, "min_observations", int)
+JA4_MIN_SPAN_SECS = _ja4_option("JA4_MIN_SPAN_SECS", proto.baseline_maturity, "min_span_secs", float)
+JA4_BASELINE_TTL = float(os.environ.get("JA4_BASELINE_TTL", proto.JA4_BASELINE_TTL_SECS))
+JA4_RARE_MAX_ENTITIES = _ja4_option("JA4_RARE_MAX_ENTITIES", proto.ja4_novelty, "rare_max_entities", int)
+JA4_TRANSITION_WINDOW_SECS = _ja4_option("JA4_TRANSITION_WINDOW_SECS", proto.ja4_transition_burst, "window_secs", float)
+JA4_TRANSITION_MIN_DISTINCT = _ja4_option("JA4_TRANSITION_MIN_DISTINCT", proto.ja4_transition_burst, "min_distinct", int)
 SSH_WINDOW = float(os.environ.get("SSH_WINDOW_SECS", "600"))
 ICMP_WINDOW = float(os.environ.get("ICMP_WINDOW_SECS", "600"))
 CAND = "ndr.finding.candidate.v1"
@@ -61,16 +71,58 @@ def _fp_hash(v):
 
 
 def _fp_rare(fp, kind):
-    """Fleet-wide TLS-client-fingerprint rarity via a shared Redis set (mirrors
-    proto.is_rare_ja4: warmed up + not previously seen). `kind` is 'ja4' or 'ja3'
-    so the two fingerprint types get separate seen-sets and never mix. Adds the
-    fingerprint to the seen-set."""
+    """Legacy JA3/client and server rarity; JA4 clients use entity baselines."""
     if not fp:
         return False
     key = f"fpseen:{TENANT}:{kind}"
     rare = _store.set_len(key) >= JA4_WARMUP and not _store.set_contains(key, fp)
     _store.set_add(key, fp, JA4_TTL)
     return rare
+
+
+def _ja4_observe(fp, src, e, producer):
+    if not src:
+        return
+    now = time.time()  # arrival-time coverage, consistent with store TTLs
+    key = f"ja4:{TENANT}:{src}"
+    fleet_key = f"ja4fleet:{TENANT}:{fp}"
+    seen = set(_store.set_members(key + ":seen"))
+    ac_seen = set(_store.set_members(key + ":ac"))
+    baseline = _store.kv_get(key + ":baseline") or {}
+    observations = baseline.get("observations", 0)
+    first = baseline.get("first")
+    maturity = proto.baseline_maturity(observations, len(seen), first, now,
+                                       JA4_MIN_OBSERVATIONS, JA4_MIN_SPAN_SECS)
+    fleet_count = _store.set_len(fleet_key)
+    hit, reasons, confidence, severity = proto.ja4_novelty(
+        fp, seen, ac_seen, fleet_count, maturity, JA4_RARE_MAX_ENTITIES)
+    entities = [{"type": "ip", "role": "src", "value": src},
+                {"type": "ja4", "value": fp, "transport": e["event_type"]},
+                {"type": "ja4_ac", "value": proto.ja4_ac(fp)},
+                {"type": "maturity", "value": maturity},
+                {"type": "fleet_entity_count", "value": fleet_count}] + _cid(e)
+    if hit:
+        _emit(producer, "ja4_novelty", "c2", severity, confidence,
+              json.dumps(entities + [{"type": "reason_codes", "value": reasons}]))
+    history = _store.window_range(key + ":transitions", now - JA4_TRANSITION_WINDOW_SECS)
+    burst, distinct = proto.ja4_transition_burst(
+        history + [(now, fp)], JA4_TRANSITION_WINDOW_SECS, JA4_TRANSITION_MIN_DISTINCT)
+    if maturity == "ready" and burst:
+        _emit(producer, "ja4_transition_burst", "c2", 5, 0.5,
+              json.dumps(entities + [{"type": "reason_codes", "value": ["JA4_TRANSITION_BURST"]},
+                                     {"type": "distinct_count", "value": distinct}]))
+    # Score before learning: the current event must not erase its own novelty.
+    # D01 coverage survives continuous activity, including low-volume hosts that
+    # need more than a week to accumulate 100 observations. TTL means inactivity,
+    # not a tumbling deadline that periodically disables a mature detector. Keep
+    # count and span together so they expire together after an actual traffic gap.
+    _store.kv_set(key + ":baseline",
+                  {"observations": observations + 1, "first": now if first is None else first},
+                  JA4_BASELINE_TTL)
+    _store.set_add(key + ":seen", fp, JA4_BASELINE_TTL)
+    _store.set_add(key + ":ac", proto.ja4_ac(fp), JA4_BASELINE_TTL)
+    _store.set_add(fleet_key, src, JA4_BASELINE_TTL)
+    _store.window_add(key + ":transitions", now, fp, JA4_TRANSITION_WINDOW_SECS)
 
 
 def _emit(producer, detector, category, sev, conf, entities, mitre=None):
@@ -114,14 +166,16 @@ def _handle(e, producer):
     if et in ("tls", "quic"):
         obj = e.get(et, {}) or {}
         sni = obj.get("sni")
-        # Prefer JA4 (newer, more robust); fall back to JA3 so rarity still works
-        # if the sensor only emits ja3-fingerprints.
+        # D01 permits JA4 features only after validation; flattened/invalid JA4
+        # still allows the legacy JA3 fallback when the sensor supplies it.
         ja4, ja3 = _fp_hash(obj.get("ja4")), _fp_hash(obj.get("ja3"))
-        fp, kind = (ja4, "ja4") if ja4 else (ja3, "ja3")
+        fp, kind = (ja4, "ja4") if proto.ja4_valid(ja4) else (ja3, "ja3")
         transport = [{"type": kind, "value": fp}]
         if et != "tls":
             transport[0]["transport"] = "quic"
-        if _fp_rare(fp, kind):
+        if kind == "ja4":
+            _ja4_observe(fp, src, e, producer)
+        elif _fp_rare(fp, kind):
             _emit(producer, "ja4_rarity", "c2", 5, 0.5,
                   json.dumps(transport + [{"type": "ip", "role": "src", "value": src},
                                           {"type": "sni", "value": sni}] + _cid(e)))

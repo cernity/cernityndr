@@ -34,11 +34,61 @@ STAGE = {
     "exfil": (4, "exfiltration"),
 }
 
+# detector_id -> signal family. Several detectors describe THE SAME underlying
+# behavior under different ids (beacon vs beacon_fqdn is one periodic callback keyed
+# by dst IP vs resolved domain; long_connection vs long_connection_cumulative is the
+# overlap detectors.py documents itself; the dns_* detectors all read one qname
+# series). Per-detector_id dedup cannot see that, so their severities summed as
+# independent evidence and inflated entity risk. A detector_id absent here is its own
+# family, so unmapped and future detectors keep today's behavior exactly.
+FAMILY = {
+    # ja4_novelty and ja4_transition_burst both read one entity's TLS handshake
+    # series, and server_fp_rarity reads the same handshake from the server side.
+    "ja4_novelty": "fingerprint",
+    "ja4_transition_burst": "fingerprint",
+    "ja4_rarity": "fingerprint",
+    "server_fp_rarity": "fingerprint",
+    "beacon": "temporal",
+    "beacon_fqdn": "temporal",
+    "strobe": "temporal",
+    "long_connection": "temporal",
+    "long_connection_cumulative": "temporal",
+    "exfil": "volume",
+    "low_slow_exfil": "volume",
+    "icmp_exfil": "volume",
+    "dns_tunnel": "dns",
+    "dns_exploded": "dns",
+    "dga_domain": "dns",
+    "nxdomain_burst": "dns",
+    "rare_destination": "destination",
+    "ids_signature": "signature",
+    "threat_intel": "signature",
+    "feodo": "signature",
+    "zeek_notice": "signature",
+}
+
+# Per-family ceiling on total decayed contribution. The spec's proportions
+# (fingerprint 20, temporal 30, destination 15, volume 15, dns 20, signature 30) are
+# points on its own scale, so they are scaled by 1/3 to cernity's 1..10 severities:
+# that keeps the proportions intact and puts the LARGEST family at 10.0 — one
+# maximum-severity finding, and below the 12.0 risk_threshold. The property that
+# buys: no single behavior, however many detector_ids describe it, can alone trip an
+# incident, while two independent behaviors still can.
+FAMILY_CAP = {f: round(points / 3.0, 2) for f, points in {
+    "fingerprint": 20, "temporal": 30, "destination": 15,
+    "volume": 15, "dns": 20, "signature": 30,
+}.items()}
+# An unmapped detector is its own family, so its total is one finding's decayed
+# severity (<=10 by the finding contract); 100 is deliberately out of reach, i.e. a
+# no-op. Cap a specific unmapped detector by naming its id in family_caps.
+FAMILY_CAP_DEFAULT = 100.0
+
 # Defaults; the shell overrides these from env.
 DEFAULTS = {
     "risk_threshold": 12.0,    # decayed severity-sum that alone trips an incident
     "min_tactics": 2,          # distinct kill-chain stages that trip an incident
     "half_life_secs": 3600.0,  # risk halves every hour
+    "family_caps": FAMILY_CAP, # per-family ceilings; merged over FAMILY_CAP
 }
 
 
@@ -90,11 +140,11 @@ def _ts(f: dict, default: float) -> float:
         return default
 
 
-def entity_risk(findings, now, half_life_secs=DEFAULTS["half_life_secs"]):
-    """Severity-weighted, time-decayed risk for one entity, deduped per
-    detector_id so one chatty detector cannot inflate the score. Each detector
-    contributes only its single strongest (tie-broken by most recent) finding.
-    """
+def _family_totals(findings, now, half_life_secs, family_caps=None):
+    """family -> {raw, cap, detectors}. Dedup is per detector_id first (unchanged),
+    then those contributions are grouped by family so correlated detectors share one
+    ceiling instead of summing as independent evidence."""
+    caps = {**FAMILY_CAP, **(family_caps or {})}
     strongest = {}  # detector_id -> (severity, ts)
     for f in findings:
         det = f.get("detector_id", "")
@@ -102,11 +152,39 @@ def entity_risk(findings, now, half_life_secs=DEFAULTS["half_life_secs"]):
         cur = strongest.get(det)
         if cur is None or sev > cur[0] or (sev == cur[0] and ts > cur[1]):
             strongest[det] = (sev, ts)
-    risk = 0.0
-    for sev, ts in strongest.values():
+    fams = {}
+    for det, (sev, ts) in strongest.items():
         age = max(0.0, now - ts)
-        risk += sev * 0.5 ** (age / half_life_secs)
-    return round(risk, 3)
+        fam = FAMILY.get(det, det)
+        g = fams.setdefault(fam, {"raw": 0.0, "cap": caps.get(fam, FAMILY_CAP_DEFAULT),
+                                  "detectors": []})
+        g["raw"] += sev * 0.5 ** (age / half_life_secs)
+        g["detectors"].append(det)
+    return fams
+
+
+def entity_risk(findings, now, half_life_secs=DEFAULTS["half_life_secs"], family_caps=None):
+    """Severity-weighted, time-decayed risk for one entity, deduped per
+    detector_id so one chatty detector cannot inflate the score. Each detector
+    contributes only its single strongest (tie-broken by most recent) finding.
+    Correlated detectors (see FAMILY) then share one per-family ceiling, so one
+    behavior described by several detector_ids counts once, at its family's weight.
+    """
+    fams = _family_totals(findings, now, half_life_secs, family_caps)
+    return round(sum(min(g["raw"], g["cap"]) for g in fams.values()), 3)
+
+
+def risk_families(findings, now, half_life_secs=DEFAULTS["half_life_secs"], family_caps=None):
+    """Per-family breakdown behind entity_risk, so an incident can show WHICH
+    behavior was capped and by how much rather than just a shrunken number.
+    Sorted by family for a stable payload; raw >= capped always."""
+    fams = _family_totals(findings, now, half_life_secs, family_caps)
+    return [{"family": fam,
+             "raw": round(g["raw"], 3),
+             "capped": round(min(g["raw"], g["cap"]), 3),
+             "cap": g["cap"],
+             "detectors": sorted(g["detectors"])}
+            for fam, g in sorted(fams.items())]
 
 
 def tactic_stages(findings):
@@ -150,7 +228,7 @@ def should_incident(findings, now, params=None):
     # forward progression cannot be proven (the ordered chain above scores higher).
     if len(distinct) >= p["min_tactics"] and len(active) >= 2:
         return True, "multi-tactic"
-    if entity_risk(active, now, p["half_life_secs"]) >= p["risk_threshold"]:
+    if entity_risk(active, now, p["half_life_secs"], p["family_caps"]) >= p["risk_threshold"]:
         return True, "risk-threshold"
     return False, "below threshold"
 
@@ -163,7 +241,8 @@ def build_incident(entity, findings, now, tenant="homelab", reason="", params=No
     above the strongest constituent finding."""
     p = {**DEFAULTS, **(params or {})}
     active = [f for f in findings if not is_correlation(f)]
-    risk = entity_risk(active, now, p["half_life_secs"])
+    risk = entity_risk(active, now, p["half_life_secs"], p["family_caps"])
+    families = risk_families(active, now, p["half_life_secs"], p["family_caps"])
     by_stage = {}
     for idx, _ts_, label in tactic_stages(active):
         by_stage.setdefault(idx, label)
@@ -180,6 +259,8 @@ def build_incident(entity, findings, now, tenant="homelab", reason="", params=No
         {"type": "tactic_chain", "value": chain},
         {"type": "risk_score", "value": risk},
         {"type": "trigger", "value": reason},
+        # appended, never inserted: downstream consumers index these positionally.
+        {"type": "risk_families", "value": families},
     ])
     return {
         "finding_id": f"incident-{entity}-{int(now)}",

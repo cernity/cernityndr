@@ -7,11 +7,55 @@ def test_multicast_not_external():
     assert p.is_multicast("ff02::fb") and p.is_external("8.8.8.8")
 
 
-def test_rare_ja4():
-    seen = {f"ja4_{i}" for i in range(35)}
-    assert p.is_rare_ja4("brand_new_ja4", seen)
-    assert not p.is_rare_ja4("ja4_5", seen)          # already seen
-    assert not p.is_rare_ja4("x", {"a", "b"})        # pre-warmup
+def _fp(i=0, c=0):
+    return f"t13d1516h2_{i:012x}_{c:012x}"
+
+
+def test_ja4_validation_and_parts():
+    fp = "t13d1516h2_8daaf6152771_02713d6af862"
+    assert p.ja4_valid(fp)
+    assert p.ja4_parts(fp) == tuple(fp.split("_"))
+    assert p.ja4_ac(fp) == "t13d1516h2_02713d6af862"
+    for bad in (None, "", "8daaf6152771", {}, {"hash": fp}, 42,
+                fp + "_extra", fp.replace("8daaf", "zzzzz"), fp[1:],
+                fp.replace("t13d", "x13d")):
+        assert not p.ja4_valid(bad)
+        assert p.ja4_parts(bad) is None and p.ja4_ac(bad) == ""
+
+
+def test_baseline_maturity():
+    assert p.baseline_maturity(1, 1, 0, 100000) == "cold"
+    assert p.baseline_maturity(100, 1, 0, 60) == "warming"
+    assert p.baseline_maturity(100, 1, 0, 86400) == "ready"
+    assert p.baseline_maturity(2, 1, 0, 10, 2, 10) == "ready"
+    assert p.baseline_maturity(100, 0, None, 100000) == "cold"
+
+
+def test_ja4_novelty():
+    fp = _fp()
+    for maturity in ("cold", "warming"):
+        assert p.ja4_novelty(fp, set(), set(), 0, maturity) == (False, [], 0.0, 0)
+    standalone = p.ja4_novelty(fp, set(), set(), 100, "ready")
+    assert standalone[0] and standalone[1] == ["JA4_NEW_TO_ENTITY"]
+    assert 1 <= standalone[3] <= 2 and standalone[2] <= 0.3
+    rare = p.ja4_novelty(fp, set(), set(), 2, "ready")
+    assert "JA4_RARE_IN_FLEET" in rare[1]
+    assert standalone[3] < rare[3] <= 6 and standalone[2] < rare[2]
+    similar = p.ja4_novelty(fp, set(), {p.ja4_ac(fp)}, 2, "ready")
+    assert "JA4_AC_SIMILARITY" in similar[1]
+    assert similar[3] < rare[3] and similar[2] < rare[2]
+    corroborated = p.ja4_novelty(fp, set(), set(), 100, "ready", corroborated=True)
+    assert standalone[3] < corroborated[3] <= 6
+    assert not p.ja4_novelty(fp, {fp}, set(), 0, "ready")[0]
+    assert not p.ja4_novelty("invalid", set(), set(), 0, "ready")[0]
+
+
+def test_ja4_transition_burst():
+    assert p.ja4_transition_burst([(i, _fp(i)) for i in range(5)]) == (True, 5)
+    assert p.ja4_transition_burst([(i, _fp()) for i in range(10)]) == (False, 1)
+    assert p.ja4_transition_burst([(0, _fp()), (601, _fp(1))]) == (False, 1)
+    assert p.ja4_transition_burst([(0, "bad")]) == (False, 0)
+    assert p.ja4_transition_burst([]) == (False, 0)
 
 
 def test_cloud_staging():

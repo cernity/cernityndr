@@ -39,7 +39,7 @@ project, as licenses change by version.
 | JA4 (TLS client fingerprint), `FoxIO-LLC/ja4` Zeek package | base client-fingerprint rarity; bundled in the `cernity/zeek-central` image | BSD-3-Clause (base JA4 is open source, no patent claims) |
 | JA4+ suite (JA4S / JA4H / JA4X / JA4SSH …), `FoxIO-LLC/ja4` Zeek package | on-demand forensic fingerprints via `zeek-central` enrichment; bundled in the image | **FoxIO License 1.1** (patent-pending; free for internal & academic use, **not** for monetization) — see note below |
 | JA3, `salesforce/ja3` Zeek package | legacy TLS fingerprint + abuse.ch SSLBL matching; bundled in the image | BSD-3-Clause |
-| nDPI (ntop) | optional Suricata plugin; `flow_risk` verdict feeds `behavioral-detectors` (operator-built into Suricata, not shipped) | LGPL-3.0 (library) / GPL-3.0 (some tools) — verify by component |
+| nDPI (ntop) | optional Suricata plugin; the `ndpi` risk/breed verdict feeds `behavioral-detectors` (operator-built into Suricata, **not shipped** — no Cernity image links or distributes it) | **≤ 5.x:** LGPL-3.0 (library) / GPL-3.0 (some tools) — verify by component. **6.0+:** core library stays LGPL-3.0, but ntop added *dual-licensed components on top* whose terms depend on whether the project generates direct or indirect revenue — see note below |
 | Fluent Bit | sensor-side log shipper | Apache-2.0 |
 | Redpanda | message bus | Redpanda Community License / BSL (source-available) |
 | Redis | detector window state | AGPL-3.0 (Redis 8+) or RSALv2 / SSPL (7.4–7.8); pre-7.4 is BSD — verify by version |
@@ -76,6 +76,40 @@ image, however, does bundle that package. If you redistribute Cernity images com
 or offer JA4+ output as part of a paid product, review the FoxIO License 1.1 and contact
 FoxIO. Running Cernity for your own organization's security is squarely within the
 permitted non-commercial/internal use.
+
+## Note on nDPI 6.0+ (LGPL-3.0 core + dual-licensed components)
+
+**Cernity does not ship, link, or distribute nDPI.** No Cernity image contains it. The
+sensor deployment (`deploy/sensor/docker-compose.yml`) does not run Suricata at all — it
+mounts the operator's `/var/log/suricata` read-only and ships EVE. Cernity's services only
+*read* the `ndpi` object out of EVE when the operator's own Suricata build emits one. The
+library's licensing obligations therefore sit with whoever built that Suricata, not with
+Cernity. (`deploy/benchmark/` is the one place Cernity runs Suricata itself, for PCAP
+replay; see the note at the end.)
+
+From **nDPI 6.0 (Aug 2026)** ntop moved to a dual-license model. The core library remains
+**LGPL-3.0**. On top of it sit additional ntop components whose terms depend on the
+project's classification, which the host application now declares in code via the
+`ndpi_init_detection_module()` call:
+
+- **Not-for-profit** — "all projects where nDPI does not create *direct* revenue (e.g. a
+  product that includes nDPI) or *indirect* revenue (e.g. providing a service using
+  nDPI)". The dual-licensed components may be used freely.
+- **For-profit** — any project where nDPI is used to generate direct or indirect revenue.
+  Such a project may either use **only** the core LGPL-3.0 components, or sign a
+  commercial agreement with ntop (`license@ntop.org`).
+
+The test is **revenue**, not license shape. Cernity is free to use and is not sold, and no
+paid service is offered on top of it, so a Cernity deployment creates neither direct nor
+indirect nDPI revenue. PolyForm Perimeter is orthogonal to ntop's test — it restricts
+building a competing product; it does not make a project revenue-generating. An operator
+who *does* monetize a deployment makes their own classification, and that declaration
+happens in their sensor build, not in Cernity.
+
+Benchmark caveat: `deploy/benchmark/suricata/suricata.yaml` lists
+`/usr/lib/suricata/ndpi.so`, but the `jasonish/suricata:latest` image it runs is built with
+`nDPI: no`. The replay harness therefore cannot exercise the nDPI path; production sensors
+built with `--enable-ndpi` can and do.
 
 ## Note on SLIPS (GPL-2.0)
 

@@ -14,8 +14,12 @@ else
 fi
 
 # Service tests import the shared modules (ndr_runtime/metrics/store) that the
-# images COPY in flat; make them importable here via PYTHONPATH.
-export PYTHONPATH="$SHARED"
+# images COPY in flat; make them importable here via PYTHONPATH. The repo ROOT is
+# on the path too: contracts/test_detection_manifest_coverage.py imports its
+# sibling as `from contracts.test_detection_capability import ...`, which needs
+# `contracts` resolvable as a package from the root. Without it that one file
+# fails on a clean checkout and `set -e` aborts the whole run.
+export PYTHONPATH="$ROOT:$SHARED"
 
 run_dir() {
   local dir="$1"

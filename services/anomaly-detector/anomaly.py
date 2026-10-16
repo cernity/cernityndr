@@ -65,7 +65,8 @@ class OutboundBytesModel:
     VERSION = '1.0.0'
 
     def __init__(self, history_windows=288, min_samples=3, min_peers=2,
-                 threshold=6.0, scale_floor=1024):
+                 threshold=6.0, scale_floor=1024, *, store=None,
+                 retention_seconds=28 * 86400, clock=time.time):
         if history_windows < min_samples or min_samples < 1 or min_peers < 1 or threshold <= 0 or scale_floor <= 0:
             raise ValueError('invalid baseline configuration')
         self.history_windows = history_windows
@@ -74,6 +75,12 @@ class OutboundBytesModel:
         self.threshold = threshold
         self.scale_floor = scale_floor
         self.history = []
+        if retention_seconds <= 0:
+            raise ValueError('retention_seconds must be positive')
+        self.store = store
+        self.retention_seconds = retention_seconds
+        self._clock = clock
+        self._snapshot = None
 
     def baseline(self, rows):
         values = [r['bytes_out'] for r in rows]
@@ -87,8 +94,36 @@ class OutboundBytesModel:
                 'trained_from': iso(min(r['start'] for r in rows)),
                 'trained_to': iso(max(r['end'] for r in rows))}
 
+    @staticmethod
+    def history_prefix(row):
+        # Hash structured identity: tenant delimiters and IPv6 cannot collide or
+        # inject Redis glob patterns into the cohort lookup.
+        identity = json.dumps([row['tenant'], row['cohort']], sort_keys=True)
+        return 'ob:v1:' + hashlib.sha256(identity.encode()).hexdigest() + ':'
+
+    def _stored_history(self, row):
+        prefix = self.history_prefix(row)
+        cutoff = row['start'] - self.history_windows * (row['end'] - row['start'])
+        return [r for key in self.store.keys_matching(prefix)
+                if cutoff <= float(key.rsplit(':', 1)[1]) < row['start']
+                and (r := self.store.kv_get(key)) is not None]
+
+    def _learn(self, row):
+        # History needs only these six fields; retaining per-flow evidence for four
+        # weeks would make storage proportional to traffic, not entity windows.
+        value = {k: row[k] for k in ('tenant', 'cohort', 'entity', 'start', 'end', 'bytes_out')}
+        identity = json.dumps(row['entity'])
+        key = (self.history_prefix(row) + hashlib.sha256(identity.encode()).hexdigest()
+               + ':' + str(row['start']))
+        ttl = row['end'] + self.retention_seconds - self._clock()
+        self.store.kv_set_once(key, value, ttl)
+
     def score(self, row):
-        relevant = [r for r in self.history if r['tenant'] == row['tenant']
+        history = self.history
+        if self.store is not None:
+            history = (self._stored_history(row) if self._snapshot is None
+                       else self._snapshot[self.history_prefix(row)])
+        relevant = [r for r in history if r['tenant'] == row['tenant']
                     and r['cohort'] == row['cohort'] and r['end'] <= row['start']]
         own = self.baseline([r for r in relevant if r['entity'] == row['entity']])
         peers = [r for r in relevant if r['entity'] != row['entity']]
@@ -142,6 +177,21 @@ class OutboundBytesModel:
             width = batch[0]['end'] - start
             self.history = [r for r in self.history if r['start'] >= start - self.history_windows * width]
             # Score the whole window before learning any of it: no order-dependent peer leakage.
-            findings.extend(c for row in batch if (c := self.score(row)) is not None)
-            self.history.extend(batch)
+            if self.store is not None:
+                # One cohort read per window, shared by every entity's score. The
+                # snapshot also prevents mid-batch arrivals changing peer membership.
+                self._snapshot = {}
+                for row in batch:
+                    prefix = self.history_prefix(row)
+                    if prefix not in self._snapshot:
+                        self._snapshot[prefix] = self._stored_history(row)
+            try:
+                findings.extend(c for row in batch if (c := self.score(row)) is not None)
+            finally:
+                self._snapshot = None
+            if self.store is None:
+                self.history.extend(batch)
+            else:
+                for row in batch:
+                    self._learn(row)
         return findings

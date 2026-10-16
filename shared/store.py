@@ -32,12 +32,18 @@ Design (KTD1-3 of the enterprise-hardening plan):
     a stale SET-typed key would otherwise WRONGTYPE a ZADD.
   - passive-DNS / dst-context -> key/value + TTL.
   - emit-once dedup -> set-if-absent with TTL.
+Outbound history (`ob:v1:`) is an exception to the disposable-state policy:
+its TTL spans weeks and losing it is material. Use a dedicated persistent Redis
+and never flush it as an ephemeral upgrade step (ADR 016).
 Every operation takes a TTL, so nothing lives past its window. No accumulator can
 grow unbounded (the leak the plan fixes), and a moved Kafka partition finds its
 state already in Redis (the rebalance-safety HA depends on).
 """
 from __future__ import annotations
 import hashlib
+import json
+import math
+import threading
 import os
 import time
 import zlib
@@ -73,6 +79,7 @@ class WindowStore:
     def set_members(self, key: str) -> list[str]: ...
     def set_remove(self, key: str, member: str) -> None: ...
     def kv_set(self, key: str, value, ttl: float) -> None: ...
+    def kv_set_once(self, key: str, value, ttl: float) -> bool: ...
     def kv_get(self, key: str): ...
     def kv_prune(self) -> None: ...
     def dedup_seen(self, key: str, ttl: float) -> bool: ...
@@ -84,6 +91,7 @@ class InMemoryStore(WindowStore):
     behavior to RedisStore for the contract in test_store.py."""
 
     def __init__(self, clock=time.time):
+        self._once_lock = threading.Lock()
         self._now = clock
         self._z: dict = {}          # key -> list[(score, value, expiry)]  (sorted set)
         self._zs: dict = {}         # key -> {member: score}  (first-seen ZSET, plan 007)
@@ -264,6 +272,23 @@ class InMemoryStore(WindowStore):
 
     def kv_set(self, key, value, ttl):
         self._kv[key] = (value, self._now() + ttl)
+
+    def kv_set_once(self, key, value, ttl):
+        """First writer wins; replay cannot replace a row or extend its lifetime.
+
+        Millisecond TTL, rounded up, matches Redis SET NX PX. Values cross a JSON
+        boundary on write, so mutating the input cannot change learned history.
+        The winning-write result is synchronous, outside pipeline_ops.
+        """
+        if ttl <= 0:
+            return False
+        with self._once_lock:
+            entry = self._kv.get(key)
+            if entry is not None and entry[1] > self._now():
+                return False
+            self._kv[key] = (json.loads(json.dumps(value)),
+                             self._now() + math.ceil(ttl * 1000) / 1000)
+            return True
 
     def kv_get(self, key):
         v = self._kv.get(key)
@@ -509,6 +534,12 @@ class RedisStore(WindowStore):
     def kv_set(self, key, value, ttl):
         self._r.set(key, self._json.dumps(value), ex=int(ttl) + 1)
 
+    def kv_set_once(self, key, value, ttl):
+        if ttl <= 0:
+            return False
+        return bool(self._r.set(key, self._json.dumps(value), nx=True,
+                                px=math.ceil(ttl * 1000)))
+
     def kv_get(self, key):
         v = self._r.get(key)
         return self._json.loads(v) if v is not None else None
@@ -613,6 +644,9 @@ class ShardedRedisStore(WindowStore):
 
     def kv_set(self, key, value, ttl):
         self._s(key).kv_set(key, value, ttl)
+
+    def kv_set_once(self, key, value, ttl):
+        return self._s(key).kv_set_once(key, value, ttl)
 
     def kv_get(self, key):
         return self._s(key).kv_get(key)

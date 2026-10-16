@@ -1,7 +1,10 @@
 """Protocol promotion plus U8 observation-based outbound-volume detection.
 
-Run one replica: cohort history is local and resets on restart. Event-time
+External history supports replica-shared, idempotent learning when
+OUTBOUND_HISTORY_STORE=1; the default local path resets on restart. Event-time
 windows close at wall clock minus allowed lateness after an empty poll.
+Replicas must receive complete entity windows (upstream entity partitioning);
+shared history does not merge partial feature aggregates.
 """
 import os
 import signal
@@ -34,7 +37,14 @@ def main():
         "suricata.anomaly.v1", "ndr.observation.normalized.v1",
         group_id="ndr-anomaly-detector", auto_offset_reset="latest")
     extractor = FeatureExtractor(int(os.environ.get("FEATURE_WINDOW_SECS", "300")))
-    model = anomaly.OutboundBytesModel()
+    history_store = None
+    # Flip only after enabled-path parity, restart and retention gates plus the
+    # persistent Redis rollout in ADR 016; never silently fall back on store errors.
+    if os.environ.get("OUTBOUND_HISTORY_STORE", "0") == "1":
+        from store import RedisStore
+        history_store = RedisStore(os.environ["OUTBOUND_HISTORY_REDIS_URL"])
+        history_store._r.ping()
+    model = anomaly.OutboundBytesModel(store=history_store)
     lateness = int(os.environ.get("FEATURE_LATENESS_SECS", "60"))
     if lateness < 0:
         raise ValueError("FEATURE_LATENESS_SECS must be nonnegative")

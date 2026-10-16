@@ -386,6 +386,36 @@ def test_zset_first_seen():
         print(f"  ok zset_first_seen [{name}]")
 
 
+
+def test_kv_set_once_contract():
+    # Unlike older optional contracts, an explicitly requested Redis MUST run:
+    # connection errors or assertion failures must never become a skip.
+    backends = [('memory', st.InMemoryStore())]
+    if os.environ.get('NDR_TEST_REDIS_URL'):
+        redis = st.RedisStore(os.environ['NDR_TEST_REDIS_URL'])
+        redis._r.flushdb()
+        backends.append(('redis', redis))
+    from concurrent.futures import ThreadPoolExecutor
+    for name, store in backends:
+        assert not store.kv_set_once('once:expired', {}, 0)
+        assert store.kv_get('once:expired') is None
+        assert store.kv_set_once('once:null', None, 60)
+        assert not store.kv_set_once('once:null', 'replacement', 60)
+        value = {'bytes_out': 0, 'cohort': {'subnet': '::/64'}}
+        assert store.kv_set_once('once:row', value, .2)
+        value['bytes_out'] = 99
+        assert store.kv_get('once:row')['bytes_out'] == 0
+        assert not store.kv_set_once('once:row', value, 60)
+        time.sleep(.25)
+        assert store.kv_get('once:row') is None, name
+        assert store.kv_set_once('once:row', value, 60)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            wins = list(pool.map(lambda i: store.kv_set_once('once:race', i, 60), range(32)))
+        assert sum(wins) == 1, name
+        assert store.kv_get('once:race') == wins.index(True), name
+        print('ok first-writer/expiry/concurrency', name)
+
+
 if __name__ == "__main__":
     import inspect
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

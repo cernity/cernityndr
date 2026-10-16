@@ -43,13 +43,6 @@ def test_candidate_is_schema_complete_and_deterministic():
     assert c["finding_id"] == a.to_candidate(APPLAYER)["finding_id"]
 
 
-if __name__ == "__main__":
-    for n, f in sorted(globals().items()):
-        if n.startswith("test_") and callable(f):
-            f(); print("ok", n)
-    print("all passed")
-
-
 from features import FeatureExtractor, iso
 
 
@@ -226,3 +219,153 @@ def test_single_outlier_does_not_shift_robust_center():
     run_window(ex, model, 5, {1: 1000000000, 2: 10000, 3: 10000})
     c = run_window(ex, model, 6, {1: 1000000})[0]
     assert c['summary']['anomaly']['entity_baseline']['median'] == 10000
+
+
+from store import InMemoryStore, RedisStore
+import os
+import json
+
+
+def rows_at(window, values=None, tenant='a'):
+    ex = FeatureExtractor()
+    for host, value in (values or {1: 10000, 2: 11000, 3: 9000}).items():
+        ex.add(observation(window, host, value, tenant))
+    return ex.close((window + 1) * 300)
+
+
+def test_external_parity_restart_replicas_and_isolation():
+    stores = [InMemoryStore(clock=lambda: 1800)]
+    if os.environ.get('NDR_TEST_REDIS_URL'):
+        redis = RedisStore(os.environ['NDR_TEST_REDIS_URL'])
+        redis._r.flushdb()
+        stores.append(redis)
+    for store in stores:
+        # Redis uses wall time; offset the fixture, keeping identical input on both paths.
+        base = int(a.time.time() // 300) - 10 if isinstance(store, RedisStore) else 0
+        clock = a.time.time if isinstance(store, RedisStore) else lambda: 1800
+        local = a.OutboundBytesModel()
+        model = a.OutboundBytesModel(store=store, clock=clock)
+        for w in range(base, base + 5):
+            batch = rows_at(w)
+            assert model.evaluate(batch) == local.evaluate(batch) == []
+        if isinstance(store, RedisStore):
+            store = RedisStore(os.environ['NDR_TEST_REDIS_URL'])
+        model = a.OutboundBytesModel(store=store, clock=clock)
+        spike = rows_at(base + 5, {1: 1000000, 2: 10000, 3: 10000})
+        expected = local.evaluate(spike)
+        assert expected
+        assert json.dumps(model.evaluate(spike), sort_keys=True) == json.dumps(expected, sort_keys=True)
+        replica = a.OutboundBytesModel(store=store, clock=clock)
+        # Another replica already learned this entire window; none of it may leak.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda m: m.evaluate(list(reversed(spike))),
+                                    [model, replica]))
+        assert results == [expected, expected]
+        assert len(store.keys_matching(model.history_prefix(spike[0]))) == 18
+        explanation = expected[0]['summary']['anomaly']
+        assert explanation['cohort']['peer_members'] == ['10.0.0.2', '10.0.0.3']
+        assert explanation['peer_baseline']['samples'] == 10
+        assert explanation['entity_baseline']['samples'] == 5
+        assert not replica.evaluate(rows_at(base + 5, {1: 1000000}, tenant='other'))
+        # Keep the existing 24h scoring window even though the archive is multi-week.
+        assert not replica.evaluate(rows_at(base + 500, {1: 1000000}))
+
+
+def test_service_external_history_wiring(monkeypatch):
+    import store as store_module
+    from types import SimpleNamespace
+    memory = InMemoryStore(clock=lambda: 2100)
+    pings, urls = [], []
+    memory._r = SimpleNamespace(ping=lambda: pings.append(True))
+    def connect(url):
+        urls.append(url)
+        return memory
+    original = a.OutboundBytesModel
+    monkeypatch.setattr(store_module, 'RedisStore', connect)
+    monkeypatch.setattr(a, 'OutboundBytesModel',
+                        lambda **kw: original(clock=lambda: 2100, **kw))
+    monkeypatch.setenv('OUTBOUND_HISTORY_STORE', '1')
+    monkeypatch.setenv('OUTBOUND_HISTORY_REDIS_URL', 'redis://history/0')
+    test_service_consumes_observations_and_publishes_explained_candidate(monkeypatch)
+    assert urls == ['redis://history/0'] and pings == [True]
+    assert len(memory.keys_matching('ob:v1:')) == 18
+
+
+def test_external_retention_and_replay_do_not_extend_expiry():
+    now = [300.0]
+    store = InMemoryStore(clock=lambda: now[0])
+    model = a.OutboundBytesModel(store=store, clock=lambda: now[0])
+    oldest = rows_at(0)
+    model.evaluate(oldest)
+    now[0] = 14 * 86400
+    model.evaluate(rows_at(int(now[0] // 300)))
+    prefix = model.history_prefix(oldest[0])
+    assert len(store.keys_matching(prefix)) == 6
+    model.evaluate(oldest)  # redelivery two weeks later must not reset the TTL
+    now[0] = 28 * 86400 + 299
+    assert len(store.keys_matching(prefix)) == 6
+    now[0] += 1
+    assert len(store.keys_matching(prefix)) == 3
+    store.kv_prune()
+    assert len(store._kv) == 3
+    model.evaluate(oldest)  # expired event-time rows cannot be resurrected
+    assert len(store.keys_matching(prefix)) == 3
+
+
+def test_external_degenerate_histories():
+    class EmptyStore(InMemoryStore):
+        def keys_matching(self, prefix):
+            return []
+    for store in (InMemoryStore(clock=lambda: 0), EmptyStore(clock=lambda: 0)):
+        model = a.OutboundBytesModel(store=store, clock=lambda: 0)
+        assert model.evaluate([]) == []
+        assert model.score(rows_at(0)[0]) is None
+        assert not model.evaluate(rows_at(0, {1: 0}))
+        for w in range(1, 5):
+            assert not model.evaluate(rows_at(w, {1: 1000000}))
+    model = a.OutboundBytesModel(store=InMemoryStore(clock=lambda: 0), clock=lambda: 0)
+    for w in range(5):
+        assert not model.evaluate(rows_at(w, {1: 0, 2: 0, 3: 0}))
+
+
+def test_external_row_volume_bound():
+    # Derived load: 100 active entities, one conn/s each, one row/300s/entity.
+    # Four weeks = 806,400 keys; a rolling extra day must not raise this ceiling.
+    now = [0.0]
+    store = InMemoryStore(clock=lambda: now[0])
+    horizon = 28 * 86400
+    sample = rows_at(0)[0]
+    compact = {k: sample[k] for k in ('tenant', 'cohort', 'entity', 'start', 'end', 'bytes_out')}
+    for window in range(29 * 288):
+        now[0] = (window + 1) * 300
+        for entity in range(100):
+            store.kv_set_once(f'ob:volume:{window}:{entity}', compact, horizon)
+        if window % 288 == 287:
+            store.kv_prune()
+            assert len(store._kv) <= 806400
+    assert len(store.keys_matching('ob:volume:')) == 806400
+    print('volume: 100 conn/s, 100 entities, 28 days: 806400 live row keys')
+
+
+if __name__ == '__main__':
+    # The service integration test already uses a monkeypatch-shaped argument.
+    # Keep the image gate plain Python and restore every patched value on exit.
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    class Patches:
+        def __init__(self, stack):
+            self.stack = stack
+        def setattr(self, obj, name, value):
+            self.stack.enter_context(patch.object(obj, name, value))
+        def setenv(self, name, value):
+            self.stack.enter_context(patch.dict(os.environ, {name: value}))
+    for name, fn in sorted(list(globals().items())):
+        if name.startswith('test_') and callable(fn):
+            with ExitStack() as stack:
+                if fn.__code__.co_argcount:
+                    fn(Patches(stack))
+                else:
+                    fn()
+            print('ok', name)
+    print('all anomaly tests passed')

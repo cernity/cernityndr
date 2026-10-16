@@ -17,6 +17,7 @@ does I/O, evals a string, or raises on bad input: a malformed risk is kept with 
 """
 from __future__ import annotations
 import numbers
+from itertools import islice
 
 MAX_RISKS = 64          # > the whole nDPI risk enum; a larger set is malformed/hostile input
 MAX_NAME = 200          # bound a single risk name
@@ -26,10 +27,15 @@ TIERS = ("Low", "Medium", "High", "Severe", "Critical", "Emergency")
 
 
 def _num(v):
-    """A finite, non-negative int/float, else None. bool is explicitly not a number."""
+    """A finite, non-negative int/float, else None. bool is explicitly not a number.
+    A hostile int can be too large for a float (10**400), so the conversion is the
+    test, not a precondition — it drops that component and leaves the siblings."""
     if isinstance(v, bool) or not isinstance(v, numbers.Real):
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        return None
     if f != f or f in (float("inf"), float("-inf")) or f < 0:   # NaN / +/-inf / negative
         return None
     return v
@@ -47,10 +53,11 @@ def _score(rs):
     return out
 
 
-def _entry(rid, name, severity=None, score=None, source="flow_risk", malformed=None):
+def _entry(rid, name, severity=None, score=None, source="flow_risk", malformed=None,
+           max_name=MAX_NAME):
     e = {
         "id": str(rid) if rid is not None else None,
-        "name": name[:MAX_NAME] if isinstance(name, str) else name,
+        "name": name[:max_name] if isinstance(name, str) and max_name else name,
         "severity": severity if isinstance(severity, str) else None,   # raw native tier, preserved
         "severity_known": isinstance(severity, str) and severity in TIERS,
         "score": _score(score),
@@ -64,42 +71,69 @@ def _entry(rid, name, severity=None, score=None, source="flow_risk", malformed=N
     return e
 
 
-def _from_mapping(m, source):
+# MAX_RISKS bounds the ENTRIES INSPECTED, not the result length: a hostile 10k-entry
+# risk set must not be walked at all, and entries that produce no output ({name: false}
+# membership flags, bools in a list) still cost a traversal step — so both loops slice
+# the container itself instead of stopping once the output is full.
+def _from_mapping(m, source, max_name):
     """A flow_risk/risk dict: {id: {risk,severity,risk_score}} | {id: name} | {name: true}.
     Value type disambiguates: dict -> full risk; str -> id:name; bool -> membership flag."""
     out = []
-    for k, v in m.items():
+    for k, v in islice(m.items(), MAX_RISKS):
         if isinstance(v, dict):
             name = v.get("risk")
             if not isinstance(name, str):
                 out.append(_entry(k, None, source=source, malformed="risk name missing or not a string"))
-                continue
-            out.append(_entry(k, name, v.get("severity"), v.get("risk_score"), source))
+            else:
+                out.append(_entry(k, name, v.get("severity"), v.get("risk_score"), source,
+                                  max_name=max_name))
         elif isinstance(v, bool):                     # {name: true} — false contributes no risk
             if v:
-                out.append(_entry(None, str(k), source=source))
+                out.append(_entry(None, str(k), source=source, max_name=max_name))
         elif isinstance(v, str):                       # {id: name}
-            out.append(_entry(k, v, source=source))
+            out.append(_entry(k, v, source=source, max_name=max_name))
         else:
             out.append(_entry(k, None, source=source, malformed=f"unsupported risk value {type(v).__name__}"))
     return out
 
 
-def _from_list(lst, source):
+def _from_list(lst, source, max_name):
     out = []
-    for v in lst:
+    for v in islice(lst, MAX_RISKS):
         if isinstance(v, dict):
             name = v.get("risk")
             out.append(_entry(v.get("id"), name if isinstance(name, str) else None,
                               v.get("severity"), v.get("risk_score"), source,
-                              None if isinstance(name, str) else "risk name missing or not a string"))
+                              None if isinstance(name, str) else "risk name missing or not a string",
+                              max_name=max_name))
         elif isinstance(v, bool):
             continue
         elif isinstance(v, str):                       # a legacy stringified dict stays an opaque name; never eval'd
-            out.append(_entry(None, v, source=source))
+            out.append(_entry(None, v, source=source, max_name=max_name))
         else:
             out.append(_entry(None, None, source=source, malformed=f"unsupported risk value {type(v).__name__}"))
     return out
+
+
+def parse_risk_value(raw, source, max_name=MAX_NAME):
+    """Parse one risk CONTAINER (the value of `flow_risk` or `risk`) into entries.
+
+    Split out from parse_ndpi_risks because the two consumers pick the field
+    differently: the structured classifier prefers canonical `flow_risk`, while the
+    legacy detector must keep its own historical `risk`-first precedence. The shape
+    handling itself — every variant, bounded, malformed-tolerant — stays shared.
+    `max_name=None` disables name truncation for the legacy path, whose matcher has
+    always seen the sensor's full string.
+    """
+    if isinstance(raw, dict):
+        return _from_mapping(raw, source, max_name)
+    if isinstance(raw, list):
+        return _from_list(raw, source, max_name)
+    if isinstance(raw, bool) or raw is None:
+        return []
+    if isinstance(raw, str):
+        return [_entry(None, raw, source=source, max_name=max_name)]
+    return [_entry(None, None, source=source, malformed=f"unsupported {source} container {type(raw).__name__}")]
 
 
 def parse_ndpi_risks(ndpi):
@@ -107,25 +141,14 @@ def parse_ndpi_risks(ndpi):
 
     Prefer canonical `flow_risk`; fall back to legacy `risk` only when flow_risk is
     absent (never merge both). A non-dict `ndpi`, or no risk field, yields []. The
-    result is capped at MAX_RISKS defensively; a set that large is malformed input.
+    traversal is capped at MAX_RISKS; a set that large is malformed input.
     """
     if not isinstance(ndpi, dict):
         return []
     src = "flow_risk" if "flow_risk" in ndpi else ("risk" if "risk" in ndpi else None)
     if src is None:
         return []
-    raw = ndpi.get(src)
-    if isinstance(raw, dict):
-        entries = _from_mapping(raw, src)
-    elif isinstance(raw, list):
-        entries = _from_list(raw, src)
-    elif isinstance(raw, bool) or raw is None:
-        entries = []
-    elif isinstance(raw, str):
-        entries = [_entry(None, raw, source=src)]
-    else:
-        entries = [_entry(None, None, source=src, malformed=f"unsupported {src} container {type(raw).__name__}")]
-    return entries[:MAX_RISKS]
+    return parse_risk_value(ndpi.get(src), src)
 
 
 # --- U2: versioned classification (plan 008 KTD1-KTD3) --------------------------

@@ -6,9 +6,12 @@ DNS tunneling / DGA (volume + entropy), exfiltration (outbound volume).
 Validate against RITA (ALTERNATIVES.md) as the FOSS oracle.
 """
 from __future__ import annotations
+import json
 import ipaddress
 import math
 import os
+
+import ndpi_policy as ndpi_pol          # pure nDPI risk-shape parsing (plan 008 U1)
 
 # Extra internal prefixes from env (e.g. the ISP-delegated IPv6 /prefix).
 _EXTRA = tuple(p.strip() for p in os.environ.get("NDR_INTERNAL_PREFIXES", "").split(",") if p.strip())
@@ -436,11 +439,56 @@ HIGH_NDPI_RISKS = (
 )
 
 
-def ndpi_risk_hit(risk_set: list[str]) -> tuple[bool, list[str]]:
-    """Return (hit, matched_high_risks) for a flow's nDPI risk set. (Active once
-    the sensor emits ndpi.risk; today it emits ndpi.breed — see ndpi_breed_hit.)"""
-    matched = [r for r in (risk_set or [])
-               if any(h in r.lower() for h in HIGH_NDPI_RISKS)]
+# A risk is an OBJECT, not a name: Suricata's nDPI plugin emits
+#   "flow_risk": {"<id>": {"risk": <name>, "risk_score": {client,server,total},
+#                          "severity": <tier>}}
+# so flattening a value with str() yielded a Python repr ("{'risk': 'Susp DNS
+# Traffic', ...}") that the SIEM received as one unqueryable string — and the
+# substrings above then matched that repr by accident rather than matching a name.
+# Shape handling (every variant real deployments emit, bounded, malformed-tolerant)
+# already lives in ndpi_policy.parse_risk_value, so BOTH nDPI modes read one parse:
+# `structured` consumes the full entries, `legacy` the projection below.
+def ndpi_risks(ndpi) -> list[dict]:
+    """A flow's nDPI risks as [{id, name, severity, score}, ...] — emission order,
+    bounded by ndpi_policy.MAX_RISKS. A key is omitted when the sensor did not send
+    it, so an absent severity or score degrades rather than being invented."""
+    if not isinstance(ndpi, dict):
+        return []
+    # Legacy field precedence, preserved exactly: the old code was
+    # `n.get("risk") or n.get("flow_risk")`, i.e. `risk` wins whenever it is truthy
+    # and flow_risk is the fallback — the opposite of the structured classifier,
+    # which prefers canonical flow_risk. Only the shape parsing is shared; changing
+    # which field a legacy sensor reads would silently change what it detects.
+    # Names are not truncated here for the same reason: the legacy matcher has
+    # always substring-matched the sensor's full string.
+    raw = ndpi.get("risk") or ndpi.get("flow_risk")
+    src = "risk" if ndpi.get("risk") else "flow_risk"
+    out = []
+    for e in ndpi_pol.parse_risk_value(raw, src, max_name=None):
+        r = {k: e[k] for k in ("id", "name", "severity") if e.get(k) is not None}
+        if e.get("score"):
+            r["score"] = e["score"]
+        if r:                        # a risk with no field at all carries no evidence
+            out.append(r)
+    return out
+
+
+def _risk_text(r) -> str:
+    """The fields of a risk worth substring-matching: its name and its native
+    severity tier. Flat shapes (a bare name string) match on the whole string."""
+    if isinstance(r, dict):
+        return " ".join(str(r.get(k) or "") for k in ("name", "severity")).lower()
+    return str(r).lower()
+
+
+def ndpi_risk_hit(risk_set) -> tuple[bool, list[str]]:
+    """Return (hit, matched_high_risk_names) for a flow's nDPI risk set. Accepts the
+    structured entries from ndpi_risks() and the flat name strings older/custom
+    builds emit; matched values are risk NAMES either way, never a risk's repr."""
+    matched = []
+    for r in (risk_set or []):
+        if any(h in _risk_text(r) for h in HIGH_NDPI_RISKS):
+            matched.append(str(r.get("name") or r.get("id") or "") if isinstance(r, dict) else str(r))
     return (bool(matched), matched)
 
 
@@ -537,9 +585,10 @@ _MALICIOUS_RISK_HINTS = ("malicious", "suspicious", "dga", "exploit", "obfuscate
 
 
 def _malicious_risk(risks) -> bool:
+    # ctx: now holds structured risks, so match the name/severity fields (_risk_text),
+    # not str(r) — on a flow_risk object that was a Python repr.
     for r in (risks or []):
-        s = str(r).lower()
-        if any(h in s for h in _MALICIOUS_RISK_HINTS):
+        if any(h in _risk_text(r) for h in _MALICIOUS_RISK_HINTS):
             return True
     return False
 
@@ -584,3 +633,16 @@ def gated_severity(base: int, ndpi_breed: str = "", ndpi_risks=None,
     1..10. `env_assets` is how many distinct assets have contacted the dst."""
     delta = dst_threat_score(ndpi_breed, ndpi_risks, ti_hit, dga) + env_prevalence_delta(env_assets)
     return max(1, min(10, base + delta))
+
+
+def sorted_risks(risks) -> list[dict]:
+    """Risks in a deterministic order, for anything that feeds a finding's identity.
+
+    `ndpi_risks` returns EMISSION order, which is right for reading evidence but
+    wrong for an identity: the same risk set arriving in a different order would
+    serialize differently and dedup as a second, duplicate finding. Sorting by a
+    canonical serialization of the whole record (rather than by name) is what keeps
+    that total — one flow can carry two risk IDs with the SAME name and different
+    scores, so a name key would collapse or reorder them arbitrarily.
+    """
+    return sorted(risks, key=lambda r: json.dumps(r, sort_keys=True, separators=(",", ":")))

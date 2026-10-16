@@ -124,15 +124,16 @@ def _tenant_of(e) -> str:
 
 
 def _ndpi_risks(n):
-    """Normalize the nDPI risk set to a list of risk strings. Suricata's nDPI
-    plugin emits it as `flow_risk` (older/custom builds use `risk`); accept both.
-    A dict may be {id: name} or {name: true}, so fold in keys and values."""
-    rk = n.get("risk") or n.get("flow_risk")
-    if isinstance(rk, dict):
-        return [str(k) for k in rk.keys()] + [str(v) for v in rk.values()]
-    if isinstance(rk, list):
-        return rk
-    return [rk] if rk else []
+    """The flow's nDPI risk set, STRUCTURED — [{id, name, severity, score}, ...].
+    Suricata emits `flow_risk` as {id: {risk, risk_score, severity}}, i.e. a risk is
+    an object; the previous str() flattening shipped a Python repr of it to the SIEM,
+    so severity and risk_score were unqueryable. Shape parsing lives in ndpi_policy
+    and is shared by both NDPI_MODEs: `structured` consumes ndpi_policy's full
+    entries directly, `legacy` (the default) consumes this projection — for the risk
+    match, the ctx: severity gate, and the ndpi_risk entity on the finding. Each mode
+    keeps its own field precedence (legacy: `risk` then `flow_risk`, unchanged since
+    before the fix; structured: canonical `flow_risk` first) — see detectors."""
+    return det.ndpi_risks(n)
 
 
 _TZ_OFFSET = re.compile(r'([+-]\d{2})(\d{2})$')     # +0000 -> +00:00
@@ -684,12 +685,23 @@ def _handle(e, producer, now, part=0, cfg=None):
                     producer.send(CANDIDATE_TOPIC, c)
                     log.info("NDPI %s %s->%s sev=%s rules=%s", fnd["category"], src, dst, fnd["severity"], fnd["rules"])
         else:                                                # legacy substring behavior (default; unchanged)
-            hit, matched = det.ndpi_risk_hit([str(r) for r in risks])
+            hit, matched = det.ndpi_risk_hit(risks)
             if not hit and det.ndpi_breed_hit(breed):
                 hit, matched = True, [f"breed:{breed} proto:{n.get('proto', '?')}"]
             if hit:
+                # `value` keeps the legacy sorted risk NAMES; `risks` carries the parsed
+                # objects (native severity tier + risk_score) so the SIEM can filter on
+                # severity and threshold on score.total instead of regexing a blob. The
+                # finding contract leaves entity items unconstrained objects, so the
+                # structure rides on the entity itself — nothing is re-stringified.
+                # Risk is evidence to assess, not proof: severity stays nDPI's own tier.
+                # Keyed by nothing: one flow can carry two risk IDs with the SAME name
+                # and different scores, so the matching records are filtered in emission
+                # order rather than collapsed into a name->record map, which kept the last.
                 ent = json.dumps([{"type": "ip", "role": "src", "value": src},
-                                  {"type": "ndpi_risk", "value": sorted(matched)}])
+                                  {"type": "ndpi_risk", "value": sorted(matched),
+                                   "risks": det.sorted_risks(
+                                       [r for r in risks if det.ndpi_risk_hit([r])[0]])}])
                 c = _candidate("ndpi_risk", "malware", 6, 0.6, ent, ten)
                 if c:
                     producer.send(CANDIDATE_TOPIC, c); log.info("NDPI_RISK %s %s", src, matched)

@@ -64,7 +64,11 @@ def tally_health(eve: dict, bucket: int) -> None:
 def flush_health(producer, bucket: int) -> list:
     """Assess and drop every window older than `bucket`. Separate from the
     threat path on purpose: a sensor rejecting traffic is a health problem, and
-    a window below threshold emits nothing at all."""
+    a window below threshold emits nothing at all.
+
+    The service owns the clock: the bucket index is turned back into the
+    window's wall-clock bounds here and passed in, so the assessment itself
+    stays a pure function of the counts and the window."""
     emitted = []
     for key in [k for k in _checksum if k[1] != bucket]:
         sensor, wid = key
@@ -72,7 +76,8 @@ def flush_health(producer, bucket: int) -> list:
         cand = anomaly.to_sensor_health(
             tally["checksum"], tally["anomalies"], sensor, TENANT,
             other_decode_count=tally["other_decode"], share_threshold=CHECKSUM_SHARE,
-            min_sample=CHECKSUM_MIN_SAMPLE, window=wid)
+            min_sample=CHECKSUM_MIN_SAMPLE,
+            window_start=wid * CHECKSUM_WINDOW, window_end=(wid + 1) * CHECKSUM_WINDOW)
         if cand is None:
             continue
         producer.send(CANDIDATE_TOPIC, cand)

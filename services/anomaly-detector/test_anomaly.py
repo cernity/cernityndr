@@ -53,83 +53,145 @@ MALFORMED = {"event_type": "anomaly", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9
              "anomaly": {"type": "decode", "event": "decoder.ipv4.trunc_pkt"}}
 
 
-def window(checksum=0, other_decode=0, applayer=0, flows=0, sensor="sensor-a"):
+STREAM_NOISE = {"event_type": "anomaly", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+                "host": "sensor-a",
+                "anomaly": {"type": "stream", "event": "stream.pkt_bad_wscale"}}
+# A fixed 10-minute window: the assessment takes its clock from the caller, so
+# every test states its own bounds and nothing depends on the time of the run.
+WIN = {"window_start": 1767225600.0, "window_end": 1767226200.0}
+
+
+def window(checksum=0, other_decode=0, stream=0, applayer=0, flows=0, sensor="sensor-a"):
     """One window of EVE records with a chosen anomaly mix, all one sensor's."""
-    records = ([CHECKSUM] * checksum + [MALFORMED] * other_decode
+    records = ([CHECKSUM] * checksum + [MALFORMED] * other_decode + [STREAM_NOISE] * stream
                + [APPLAYER] * applayer + [FLOW] * flows)
     return [dict(r, host=sensor) for r in records]
 
 
+def assess(events, sensor="sensor-a", tenant="homelab", **kwargs):
+    return a.assess_sensor_health(events, sensor, tenant, **WIN, **kwargs)
+
+
+def health(checksum, total, sensor="sensor-a", **kwargs):
+    return a.to_sensor_health(checksum, total, sensor, **{**WIN, **kwargs})
+
+
 def test_checksum_health_silent_below_threshold():
-    # Occasional corruption on a healthy link: present, nowhere near dominant.
-    assert a.assess_sensor_health(window(checksum=20, other_decode=30, applayer=950)) is None
+    # Occasional corruption alongside plenty of other anomalies: not dominant.
+    assert assess(window(checksum=20, other_decode=30, applayer=950)) is None
     # Exactly at the threshold fires; just under it does not.
-    assert a.to_sensor_health(500, 1000, other_decode_count=0) is not None
-    assert a.to_sensor_health(499, 1000, other_decode_count=0) is None
+    assert health(500, 1000, other_decode_count=0) is not None
+    assert health(499, 1000, other_decode_count=0) is None
 
 
 def test_checksum_health_fires_when_checksum_anomalies_dominate():
-    c = a.assess_sensor_health(window(checksum=960, applayer=40, flows=500), "sensor-a", "t1")
+    c = assess(window(checksum=960, applayer=40, flows=500), "sensor-a", "t1")
     assert c["detector_id"] == "sensor_checksum_rejection"
     assert c["category"] == "sensor_health" and c["tenant_id"] == "t1"
     assert c["sensor_ids"] == ["sensor-a"] and c["severity"] == 6
-    health = c["summary"]["sensor_health"]
-    assert health["checksum_anomaly_share"] == 0.96      # observed share
-    assert health["sample_size"] == 1000                 # anomaly events, not packets
-    assert health["checksum_anomalies"] == 960
-    # Operator-actionable remediation names both knobs and the interface condition.
-    assert "stream.checksum-validation: no" in health["remediation"]
-    assert "checksum-checks: no" in health["remediation"]
-    assert "mirror" in health["remediation"]
-    assert health["does_not_prove"] and health["proves"]
+    h = c["summary"]["sensor_health"]
+    assert h["checksum_anomaly_share"] == 0.96      # observed share
+    assert h["sample_size"] == 1000                 # anomaly events, not packets
+    assert h["checksum_anomalies"] == 960
+    assert h["window"] == {"start": c["first_seen"], "end": c["last_seen"]}
+    # Operator-actionable remediation: both knobs, conditioned on the interface
+    # actually being a mirror, and verified from the sensor rather than from this
+    # share.
+    assert "stream.checksum-validation: no" in h["remediation"]
+    assert "checksum-checks: no" in h["remediation"]
+    assert "If it is a SPAN, tap or mirror port" in h["remediation"]
+    assert "stats counters" in h["remediation"]
+    assert "not from this share" in h["remediation"]
+    assert h["does_not_prove"] and h["proves"]
 
 
 def test_checksum_health_ignores_empty_and_tiny_samples():
-    assert a.assess_sensor_health([]) is None                  # no events at all
-    assert a.assess_sensor_health(window(flows=5000)) is None   # no anomaly events
-    assert a.assess_sensor_health(window(checksum=3)) is None   # 100% share, 3 samples
-    assert a.to_sensor_health(0, 0) is None                     # explicit zero denominator
-    assert a.to_sensor_health(1, 1) is None
+    assert assess([]) is None                          # no events at all
+    assert assess(window(flows=5000)) is None          # no anomaly events
+    assert assess(window(checksum=3)) is None          # 100% share, 3 samples
+    assert health(0, 0) is None                        # explicit zero denominator
+    assert health(1, 1) is None
     # Below the floor nothing is reported however extreme the ratio.
-    assert a.to_sensor_health(199, 199) is None
-    assert a.to_sensor_health(200, 200) is not None
+    assert health(199, 199) is None
+    assert health(200, 200) is not None
 
 
-def test_checksum_health_separates_a_damaged_link_from_a_mirrored_feed():
-    # Checksums fail but every frame is otherwise intact: offload-stripped mirror.
-    only = a.assess_sensor_health(window(checksum=1000))["summary"]["sensor_health"]
+def test_checksum_health_orders_the_two_candidate_causes():
+    # Checksums fail but no other decode-layer anomaly accompanies them.
+    only = assess(window(checksum=1000))["summary"]["sensor_health"]
     assert only["verdict"] == "checksum_validation_suspected"
-    # Other decode damage alongside: frames are arriving corrupted.
-    mixed = a.assess_sensor_health(window(checksum=900, other_decode=100))["summary"]["sensor_health"]
+    # Other decode-layer anomalies alongside: the damaged-link cause leads.
+    mixed = assess(window(checksum=900, other_decode=100))["summary"]["sensor_health"]
     assert mixed["verdict"] == "link_corruption_suspected"
-    assert "fix the link" in mixed["remediation"]
-    # Counts not supplied: neither cause is asserted.
-    undet = a.to_sensor_health(900, 1000)["summary"]["sensor_health"]
+    # Neither verdict closes the other cause, and neither is more confident.
+    for h in (only, mixed):
+        assert "Both causes remain open" in h["remediation"]
+        assert "mirror" in h["remediation"] and "damaged capture path" in h["remediation"]
+        assert "does not establish it" in h["remediation"] or "can also carry" in h["remediation"]
+    assert (assess(window(checksum=1000))["confidence"]
+            == assess(window(checksum=900, other_decode=100))["confidence"])
+    # Counts not supplied: neither cause is ordered first.
+    undet = health(900, 1000)["summary"]["sensor_health"]
     assert undet["verdict"] == "undetermined" and undet["other_decode_anomalies"] is None
 
 
-def test_checksum_health_is_deterministic_and_episode_scoped():
-    first = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=7)
-    again = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=7)
-    assert first == again
-    later = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=8)
-    assert later["finding_id"] != first["finding_id"]   # a later episode is its own finding
+def test_only_decode_layer_anomalies_count_as_frame_integrity_evidence():
+    # Stream anomalies are in the denominator but say nothing about frame
+    # integrity, so they must not push the verdict towards a damaged link.
+    c = assess(window(checksum=900, stream=100))
+    assert c["summary"]["sensor_health"]["verdict"] == "checksum_validation_suspected"
+    assert c["summary"]["sensor_health"]["other_decode_anomalies"] == 0
+    assert c["summary"]["sensor_health"]["sample_size"] == 1000
+
+
+def test_checksum_health_is_pure_and_episode_scoped():
+    # Identical inputs, identical output — with the clock made unreadable, so a
+    # regression that reaches for wall time fails here rather than silently.
+    def boom(*_args, **_kwargs):
+        raise AssertionError("the assessment must not read the clock")
+
+    import time
+    saved = (time.time, time.gmtime, time.strftime, time.localtime)
+    time.time, time.gmtime, time.strftime, time.localtime = (boom,) * 4
+    try:
+        first = health(900, 1000, other_decode_count=0)
+        assert first == health(900, 1000, other_decode_count=0)
+        assert assess(window(checksum=900, applayer=100)) == assess(
+            window(checksum=900, applayer=100))
+    finally:
+        time.time, time.gmtime, time.strftime, time.localtime = saved
+    # Same hour, next window: one finding per episode. The hour after: its own.
+    same_hour = health(900, 1000, window_start=WIN["window_start"] + 600,
+                       window_end=WIN["window_end"] + 600)
+    later = health(900, 1000, window_start=WIN["window_start"] + 3600,
+                   window_end=WIN["window_end"] + 3600)
+    assert same_hour["finding_id"] == first["finding_id"]
+    assert later["finding_id"] != first["finding_id"]
+    assert later["first_seen"] != first["first_seen"]   # bounds track the window
 
 
 def test_checksum_health_rejects_invalid_configuration():
     for kwargs in ({"share_threshold": 0}, {"share_threshold": 1.5},
-                   {"min_sample": 0}, {"mixed_decode_share": -0.1}):
+                   {"min_sample": 0}, {"mixed_decode_share": -0.1}, {"episode_secs": 0},
+                   {"window_end": WIN["window_start"]}):
         try:
-            a.to_sensor_health(900, 1000, **kwargs)
+            health(900, 1000, **kwargs)
         except ValueError:
             continue
         raise AssertionError(kwargs)
+    # The window is required, not defaulted from the clock.
+    try:
+        a.to_sensor_health(900, 1000)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("window bounds must be required")
 
 
 def test_checksum_tally_accumulates_across_polls():
     tally = a.tally_checksum_anomalies(window(checksum=5, applayer=1))
-    a.tally_checksum_anomalies(window(checksum=5, other_decode=2, flows=9), tally)
-    assert tally == {"checksum": 10, "other_decode": 2, "anomalies": 13}
+    a.tally_checksum_anomalies(window(checksum=5, other_decode=2, stream=1, flows=9), tally)
+    assert tally == {"checksum": 10, "other_decode": 2, "anomalies": 14}
 
 
 def test_sensor_health_candidate_matches_finding_schema():
@@ -138,7 +200,7 @@ def test_sensor_health_candidate_matches_finding_schema():
     from pathlib import Path
     schema = json.loads((Path(__file__).resolve().parents[2]
                          / 'contracts/finding.schema.json').read_text())
-    jsonschema.validate(a.assess_sensor_health(window(checksum=900, applayer=100)), schema)
+    jsonschema.validate(assess(window(checksum=900, applayer=100)), schema)
 
 
 def test_threat_finding_behaviour_is_unchanged_by_the_health_signal():

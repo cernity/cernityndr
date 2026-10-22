@@ -43,6 +43,141 @@ def test_candidate_is_schema_complete_and_deterministic():
     assert c["finding_id"] == a.to_candidate(APPLAYER)["finding_id"]
 
 
+# --- Sensor health: decode-layer checksum rejection --------------------------
+
+CHECKSUM = {"event_type": "anomaly", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+            "host": "sensor-a",
+            "anomaly": {"type": "decode", "event": "decoder.tcpv4.invalid_checksum"}}
+MALFORMED = {"event_type": "anomaly", "src_ip": "10.0.0.5", "dest_ip": "10.0.0.9",
+             "host": "sensor-a",
+             "anomaly": {"type": "decode", "event": "decoder.ipv4.trunc_pkt"}}
+
+
+def window(checksum=0, other_decode=0, applayer=0, flows=0, sensor="sensor-a"):
+    """One window of EVE records with a chosen anomaly mix, all one sensor's."""
+    records = ([CHECKSUM] * checksum + [MALFORMED] * other_decode
+               + [APPLAYER] * applayer + [FLOW] * flows)
+    return [dict(r, host=sensor) for r in records]
+
+
+def test_checksum_health_silent_below_threshold():
+    # Occasional corruption on a healthy link: present, nowhere near dominant.
+    assert a.assess_sensor_health(window(checksum=20, other_decode=30, applayer=950)) is None
+    # Exactly at the threshold fires; just under it does not.
+    assert a.to_sensor_health(500, 1000, other_decode_count=0) is not None
+    assert a.to_sensor_health(499, 1000, other_decode_count=0) is None
+
+
+def test_checksum_health_fires_when_checksum_anomalies_dominate():
+    c = a.assess_sensor_health(window(checksum=960, applayer=40, flows=500), "sensor-a", "t1")
+    assert c["detector_id"] == "sensor_checksum_rejection"
+    assert c["category"] == "sensor_health" and c["tenant_id"] == "t1"
+    assert c["sensor_ids"] == ["sensor-a"] and c["severity"] == 6
+    health = c["summary"]["sensor_health"]
+    assert health["checksum_anomaly_share"] == 0.96      # observed share
+    assert health["sample_size"] == 1000                 # anomaly events, not packets
+    assert health["checksum_anomalies"] == 960
+    # Operator-actionable remediation names both knobs and the interface condition.
+    assert "stream.checksum-validation: no" in health["remediation"]
+    assert "checksum-checks: no" in health["remediation"]
+    assert "mirror" in health["remediation"]
+    assert health["does_not_prove"] and health["proves"]
+
+
+def test_checksum_health_ignores_empty_and_tiny_samples():
+    assert a.assess_sensor_health([]) is None                  # no events at all
+    assert a.assess_sensor_health(window(flows=5000)) is None   # no anomaly events
+    assert a.assess_sensor_health(window(checksum=3)) is None   # 100% share, 3 samples
+    assert a.to_sensor_health(0, 0) is None                     # explicit zero denominator
+    assert a.to_sensor_health(1, 1) is None
+    # Below the floor nothing is reported however extreme the ratio.
+    assert a.to_sensor_health(199, 199) is None
+    assert a.to_sensor_health(200, 200) is not None
+
+
+def test_checksum_health_separates_a_damaged_link_from_a_mirrored_feed():
+    # Checksums fail but every frame is otherwise intact: offload-stripped mirror.
+    only = a.assess_sensor_health(window(checksum=1000))["summary"]["sensor_health"]
+    assert only["verdict"] == "checksum_validation_suspected"
+    # Other decode damage alongside: frames are arriving corrupted.
+    mixed = a.assess_sensor_health(window(checksum=900, other_decode=100))["summary"]["sensor_health"]
+    assert mixed["verdict"] == "link_corruption_suspected"
+    assert "fix the link" in mixed["remediation"]
+    # Counts not supplied: neither cause is asserted.
+    undet = a.to_sensor_health(900, 1000)["summary"]["sensor_health"]
+    assert undet["verdict"] == "undetermined" and undet["other_decode_anomalies"] is None
+
+
+def test_checksum_health_is_deterministic_and_episode_scoped():
+    first = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=7)
+    again = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=7)
+    assert first == again
+    later = a.to_sensor_health(900, 1000, "sensor-a", now="2026-01-01T00:00:00Z", window=8)
+    assert later["finding_id"] != first["finding_id"]   # a later episode is its own finding
+
+
+def test_checksum_health_rejects_invalid_configuration():
+    for kwargs in ({"share_threshold": 0}, {"share_threshold": 1.5},
+                   {"min_sample": 0}, {"mixed_decode_share": -0.1}):
+        try:
+            a.to_sensor_health(900, 1000, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(kwargs)
+
+
+def test_checksum_tally_accumulates_across_polls():
+    tally = a.tally_checksum_anomalies(window(checksum=5, applayer=1))
+    a.tally_checksum_anomalies(window(checksum=5, other_decode=2, flows=9), tally)
+    assert tally == {"checksum": 10, "other_decode": 2, "anomalies": 13}
+
+
+def test_sensor_health_candidate_matches_finding_schema():
+    import json
+    import jsonschema
+    from pathlib import Path
+    schema = json.loads((Path(__file__).resolve().parents[2]
+                         / 'contracts/finding.schema.json').read_text())
+    jsonschema.validate(a.assess_sensor_health(window(checksum=900, applayer=100)), schema)
+
+
+def test_threat_finding_behaviour_is_unchanged_by_the_health_signal():
+    # The health signal reads the decode layer; it must not promote it, reclassify
+    # it, or alter what the threat path already does.
+    assert a.is_threat_anomaly(CHECKSUM["anomaly"]) is False
+    assert a.is_threat_anomaly(DECODE_NOISE["anomaly"]) is False
+    assert a.to_candidate(CHECKSUM) is None and a.to_candidate(DECODE_NOISE) is None
+    assert a.is_threat_anomaly(APPLAYER["anomaly"]) is True
+    assert a.is_threat_anomaly(STREAM_EVASION["anomaly"]) is True
+    # The two classifications are disjoint: nothing is both a threat and a
+    # checksum-health event.
+    for eve in (APPLAYER, STREAM_EVASION, CHECKSUM, DECODE_NOISE, MALFORMED):
+        anom = eve["anomaly"]
+        assert not (a.is_threat_anomaly(anom) and a.is_checksum_anomaly(anom))
+    # A blind sensor still promotes the app-layer anomalies it does see.
+    assert a.to_candidate(APPLAYER)["detector_id"] == "protocol_anomaly"
+
+
+def test_service_emits_sensor_health_on_window_close(monkeypatch):
+    import app
+    from types import SimpleNamespace
+    sent = []
+    producer = SimpleNamespace(send=lambda topic, cand: sent.append((topic, cand)))
+    monkeypatch.setattr(app, '_checksum', {})
+    monkeypatch.setattr(app, 'CHECKSUM_SHARE', a.CHECKSUM_SHARE_THRESHOLD)
+    monkeypatch.setattr(app, 'CHECKSUM_MIN_SAMPLE', a.CHECKSUM_MIN_SAMPLE)
+    for eve in window(checksum=600, applayer=400, flows=50):
+        app.tally_health(eve, 3)
+    for eve in window(checksum=1, applayer=400, sensor='sensor-b'):   # healthy sensor
+        app.tally_health(eve, 3)
+    assert not sent and not app.flush_health(producer, 3)  # window still open
+    emitted = app.flush_health(producer, 4)                # window closed
+    assert [c['sensor_ids'] for c in emitted] == [['sensor-a']]
+    assert emitted[0]['summary']['sensor_health']['checksum_anomaly_share'] == 0.6
+    assert sent == [(app.CANDIDATE_TOPIC, emitted[0])]
+    assert not app._checksum                               # closed windows released
+
+
 from features import FeatureExtractor, iso
 
 

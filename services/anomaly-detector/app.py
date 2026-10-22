@@ -5,6 +5,12 @@ OUTBOUND_HISTORY_STORE=1; the default local path resets on restart. Event-time
 windows close at wall clock minus allowed lateness after an empty poll.
 Replicas must receive complete entity windows (upstream entity partitioning);
 shared history does not merge partial feature aggregates.
+
+The decode-layer anomalies the threat path filters out are tallied per sensor
+per window and assessed for checksum rejection, which emits a sensor-health
+candidate rather than a threat finding. Each replica tallies only the partitions
+it is assigned, so the share is per-replica; it is a dominance indicator, not a
+fleet-wide rate.
 """
 import os
 import signal
@@ -20,13 +26,62 @@ BOOTSTRAP = os.environ.get("REDPANDA_BOOTSTRAP", "redpanda:9092")
 TENANT = os.environ.get("NDR_TENANT", "default")
 WINDOW = float(os.environ.get("WINDOW_SECS", "600"))
 CANDIDATE_TOPIC = "ndr.finding.candidate.v1"
+SENSOR_ID = os.environ.get("NDR_SENSOR_ID", "sensor")        # fallback when records are unstamped
+# Sensor-health window, on the wall clock like the dedup bucket above: the signal
+# is a property of the engine over an interval of reporting, not of event time.
+CHECKSUM_WINDOW = float(os.environ.get("CHECKSUM_HEALTH_WINDOW_SECS", "600"))
+CHECKSUM_SHARE = float(os.environ.get("CHECKSUM_HEALTH_SHARE", anomaly.CHECKSUM_SHARE_THRESHOLD))
+CHECKSUM_MIN_SAMPLE = int(os.environ.get("CHECKSUM_HEALTH_MIN_SAMPLE", anomaly.CHECKSUM_MIN_SAMPLE))
 _emitted: set = set()
+_checksum: dict = {}            # (sensor, window bucket) -> checksum tally
 _running = True
 
 
 def _stop(*_):
     global _running
     _running = False
+
+
+def _sensor_of(eve: dict) -> str:
+    """Prefer a sensor/host id stamped on the record (multi-sensor deploys);
+    fall back to this container's NDR_SENSOR_ID."""
+    for key in ("sensor_id", "host", "sensor", "hostname"):
+        value = eve.get(key)
+        if value:
+            return str(value)
+    return SENSOR_ID
+
+
+def tally_health(eve: dict, bucket: int) -> None:
+    """Accumulate one record into its sensor's current health window. Counts
+    every anomaly event, including the threat-relevant ones: they are the
+    denominator the checksum share is measured against."""
+    key = (_sensor_of(eve), bucket)
+    anomaly.tally_checksum_anomalies(
+        [eve], _checksum.setdefault(key, {"checksum": 0, "other_decode": 0, "anomalies": 0}))
+
+
+def flush_health(producer, bucket: int) -> list:
+    """Assess and drop every window older than `bucket`. Separate from the
+    threat path on purpose: a sensor rejecting traffic is a health problem, and
+    a window below threshold emits nothing at all."""
+    emitted = []
+    for key in [k for k in _checksum if k[1] != bucket]:
+        sensor, wid = key
+        tally = _checksum.pop(key)
+        cand = anomaly.to_sensor_health(
+            tally["checksum"], tally["anomalies"], sensor, TENANT,
+            other_decode_count=tally["other_decode"], share_threshold=CHECKSUM_SHARE,
+            min_sample=CHECKSUM_MIN_SAMPLE, window=wid)
+        if cand is None:
+            continue
+        producer.send(CANDIDATE_TOPIC, cand)
+        health = cand["summary"]["sensor_health"]
+        log.warning("SENSOR_CHECKSUM_REJECTION sensor=%s share=%s sample=%s verdict=%s",
+                    sensor, health["checksum_anomaly_share"], health["sample_size"],
+                    health["verdict"])
+        emitted.append(cand)
+    return emitted
 
 
 def main():
@@ -64,6 +119,7 @@ def main():
                     except (KeyError, TypeError, ValueError):
                         pass
                     continue
+                tally_health(rec.value, int(time.time() // CHECKSUM_WINDOW))
                 cand = anomaly.to_candidate(rec.value, TENANT)
                 if cand is None:
                     continue
@@ -73,6 +129,7 @@ def main():
                 _emitted.add(key)
                 producer.send(CANDIDATE_TOPIC, cand)
                 log.info("PROTOCOL_ANOMALY %s", cand["entities"][:140])
+        flush_health(producer, int(time.time() // CHECKSUM_WINDOW))
         # Event-time progress closes windows even under continuous traffic. An idle
         # poll advances to wall time; lateness bounds cross-partition reordering.
         watermark = event_watermark if any(consumer_records.values()) else time.time()

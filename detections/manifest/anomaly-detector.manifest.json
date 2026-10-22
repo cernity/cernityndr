@@ -15,7 +15,10 @@
     "fields.src_ip",
     "fields.flow.bytes_toserver",
     "obs_id",
-    "sensor_id"
+    "sensor_id",
+    "anomaly.type",
+    "anomaly.event",
+    "host"
   ],
   "config_params": [
     {
@@ -27,6 +30,21 @@
       "name": "FEATURE_LATENESS_SECS",
       "type": "integer",
       "default": 60
+    },
+    {
+      "name": "CHECKSUM_HEALTH_SHARE",
+      "type": "number",
+      "default": 0.5
+    },
+    {
+      "name": "CHECKSUM_HEALTH_MIN_SAMPLE",
+      "type": "integer",
+      "default": 200
+    },
+    {
+      "name": "CHECKSUM_HEALTH_WINDOW_SECS",
+      "type": "integer",
+      "default": 600
     }
   ],
   "evidence_produced": {
@@ -43,7 +61,9 @@
       "last_seen",
       "entities",
       "state",
-      "evidence_refs"
+      "evidence_refs",
+      "sensor_ids",
+      "summary"
     ]
   },
   "known_limitations": [
@@ -55,6 +75,9 @@
     },
     {
       "description": "Measured quality is computed by services/feedback-service/quality.py (KTD2); static confidence weights are not measured precision or false-positive rates."
+    },
+    {
+      "description": "sensor_checksum_rejection is a sensor-health signal, not a detection: it proves only that invalid-checksum anomalies dominate one sensor's anomaly stream over a window. It does not measure the share of traffic rejected (the anomaly stream is not a packet census and the engine throttles events), cannot read the sensor's configuration, and cannot prove traffic went uninspected; confirmation needs the sensor's config or stats counters. Shares are per-replica because each replica tallies only its assigned partitions. The checksum_validation_suspected vs link_corruption_suspected verdict is a heuristic on accompanying decode anomalies, not a measured cause. Operator guidance: services/anomaly-detector/README.md"
     }
   ],
   "backing_tests": {

@@ -4,6 +4,12 @@
 anomalies (protocol violations, unexpected events) are evasion/exploit tells;
 decode-layer anomalies (bad checksums, malformed L2/L3) are engine noise. This
 filters to the threat-relevant ones and emits finding candidates. Pure + testable.
+
+Discarding the decode layer entirely would throw away the only evidence that the
+upstream sensor is rejecting traffic rather than inspecting it, so those events
+feed a separate sensor-health assessment instead (see the sensor-health section
+below). Health results carry their own detector_id and category and never enter
+the threat path.
 """
 from __future__ import annotations
 
@@ -53,6 +59,212 @@ def to_candidate(eve: dict, tenant: str = "homelab") -> dict | None:
             "category": "anomaly", "severity": 5, "confidence": 0.5,
             "first_seen": ts, "last_seen": ts,
             "entities": entities, "state": "CANDIDATE"}
+
+
+# --- Sensor health: decode-layer checksum rejection ---------------------------
+#
+# `is_threat_anomaly` drops decode-layer anomalies because, as threat evidence,
+# they are engine noise. They are also the only evidence of one specific way a
+# sensor goes blind, so they are assessed here instead of being discarded.
+#
+# Cause. Suricata's `stream.checksum-validation: yes` means "reject packets
+# whose checksum is incorrect". On a SPAN, tap or mirror port the capturing NIC
+# never recomputes the checksums of mirrored packets, so the engine sees an
+# entire interface of apparently-corrupt traffic and refuses it for stream
+# reassembly and inspection.
+#
+# Symptom. The engine stays up, keeps logging flows and reports no alerts while
+# inspecting only the fraction of traffic whose checksums happen to validate.
+# "No findings" then means "almost nothing was inspected", which is the one
+# failure a detection platform must never report as quiet. In one field case
+# 96% of a sensor's alerts were invalid-checksum events and a multi-day
+# exploitation campaign against an exposed service produced no alerts at all.
+#
+# What this signal proves, and what it does not. It proves that over the window
+# invalid-checksum anomalies dominate the engine's own anomaly stream, which no
+# healthy capture path produces. It does NOT measure the share of *traffic*
+# rejected: the anomaly stream is not a packet census, and Suricata's own event
+# throttling makes the ratio an indicator, not a rate. It cannot read the
+# sensor's configuration, so it reports a suspicion plus the remediation to
+# check, never a confirmed misconfiguration. It also cannot prove the engine
+# dropped anything at all: with validation disabled, the same offload-stripped
+# packets produce the same anomalies and are still inspected. Confirming the
+# blindness needs the sensor's config or its stats counters, not this ratio.
+
+# Share of the window's anomaly events that must be checksum failures.
+# A working capture path produces them as a trickle: corruption that survives to
+# the engine is a small fraction of a percent of packets, and a link mangling
+# enough frames to dominate an anomaly stream would not carry usable traffic at
+# all. When validation is rejecting offload-stripped mirror traffic essentially
+# every TCP/UDP packet fails, driving the share towards 1. Half sits in the wide
+# empty space between those two regimes rather than near either one, so it is
+# insensitive to the exact event mix a given ruleset and protocol spread
+# produce.
+CHECKSUM_SHARE_THRESHOLD = 0.5
+
+# Anomaly events required in the window before any share is reported. Guards the
+# ratio against small samples — a near-idle sensor with three anomalies, two of
+# them checksum failures, is evidence of nothing — and makes the empty window a
+# no-signal case rather than a division by zero.
+CHECKSUM_MIN_SAMPLE = 200
+
+# The one discriminator the data supports. Real corruption damages whole frames,
+# so it also trips length, header and truncation decode events; stripped
+# checksum offload leaves the packet structurally intact with only the checksum
+# field disagreeing. More than a few percent of other non-threat anomalies
+# alongside the checksum ones therefore points at the link rather than the
+# configuration. Spatial spread (how many endpoint pairs are affected) is
+# deliberately not used: a faulty uplink or transceiver affects every pair
+# crossing it, so it does not separate the two cases.
+CHECKSUM_MIXED_DECODE_SHARE = 0.05
+
+# Episode bucket for the finding id, matching the coverage detector's default:
+# a persistent condition is one finding per hour, and a recovery followed by a
+# relapse is a distinct finding rather than one permanent record.
+SENSOR_HEALTH_EPISODE_SECS = 3600
+
+_CHECKSUM_FIX = (
+    "Set stream.checksum-validation: no in suricata.yaml and checksum-checks: no on the "
+    "capture method (af-packet, pcap or dpdk) for this interface, then confirm the share "
+    "falls back to a trickle."
+)
+_CHECKSUM_LINK = (
+    "On a physical capture of live traffic a sustained share is cabling, transceiver or NIC "
+    "damage: fix the link rather than disabling validation, which would only hide it."
+)
+_CHECKSUM_REMEDIATION = {
+    # Checksum failures alone: the packets are structurally intact, so the most
+    # likely cause is a mirrored feed whose checksums were never recomputed.
+    "checksum_validation_suspected": (
+        "Checksum failures dominate with no other decode damage, which is what an offload-"
+        "stripped SPAN, tap or mirror feed looks like. " + _CHECKSUM_FIX + " " + _CHECKSUM_LINK),
+    # Mixed decode damage: corruption is plausible, so lead with the link.
+    "link_corruption_suspected": (
+        "Checksum failures dominate but other decode anomalies accompany them, so frames are "
+        "arriving damaged rather than merely unchecksummed. " + _CHECKSUM_LINK + " "
+        "If the interface is a SPAN, tap or mirror port, also " + _CHECKSUM_FIX[0].lower()
+        + _CHECKSUM_FIX[1:]),
+    # Counts of other anomalies were not supplied, so neither cause is ruled out.
+    "undetermined": (
+        "Checksum failures dominate the anomaly stream. Other decode anomalies were not "
+        "counted, so a mirrored feed and a damaged link are equally consistent with this "
+        "sample. " + _CHECKSUM_FIX + " " + _CHECKSUM_LINK),
+}
+_CHECKSUM_WHY = ("invalid-checksum anomalies dominate this sensor's anomaly stream; with "
+                 "stream.checksum-validation enabled the engine rejects that traffic from "
+                 "reassembly and inspection, so an absence of findings proves nothing")
+
+
+def is_checksum_anomaly(anom: dict) -> bool:
+    """A decode/stream-layer invalid-checksum anomaly.
+
+    Disjoint from `is_threat_anomaly` by construction, so the health signal can
+    never reclassify an anomaly the threat path promotes. Matches on the event
+    name rather than an enumerated list because the engine names these per
+    protocol layer (decoder.ipv4/tcp/udp/icmpv4.invalid_checksum and the stream
+    equivalents) and the set grows between releases.
+    """
+    if not anom or is_threat_anomaly(anom):
+        return False
+    return "checksum" in str(anom.get("event", "")).lower()
+
+
+def tally_checksum_anomalies(events, tally: dict | None = None) -> dict:
+    """Fold a window of EVE records into checksum counts.
+
+    `anomalies` counts every anomaly event examined (the share's denominator),
+    `checksum` the invalid-checksum ones, and `other_decode` the remaining
+    non-threat anomalies — the structural-damage evidence that separates a bad
+    link from a mirrored feed. Pass a previous tally to accumulate across
+    several polls of the same window; non-anomaly records are ignored, so the
+    full EVE stream can be fed in directly.
+    """
+    t = tally if tally is not None else {"checksum": 0, "other_decode": 0, "anomalies": 0}
+    for eve in events:
+        if not isinstance(eve, dict) or eve.get("event_type") != "anomaly":
+            continue
+        anom = eve.get("anomaly") or {}
+        t["anomalies"] += 1
+        if is_checksum_anomaly(anom):
+            t["checksum"] += 1
+        elif not is_threat_anomaly(anom):
+            t["other_decode"] += 1
+    return t
+
+
+def to_sensor_health(checksum_count: int, total_count: int, sensor: str = "sensor",
+                     tenant: str = "homelab", *, other_decode_count: int | None = None,
+                     share_threshold: float = CHECKSUM_SHARE_THRESHOLD,
+                     min_sample: int = CHECKSUM_MIN_SAMPLE,
+                     mixed_decode_share: float = CHECKSUM_MIXED_DECODE_SHARE,
+                     now: str | None = None, window: int | None = None) -> dict | None:
+    """Sensor-health candidate when checksum anomalies dominate, else None.
+
+    `total_count` is the number of anomaly events examined in the window, not a
+    packet count. A caller that instead passes a count of all EVE events has a
+    much larger denominator and must lower `share_threshold` to match.
+
+    This is a sensor-health result, not a threat finding: its own detector_id
+    and `sensor_health` category keep it off the threat path, and severity sits
+    above the delivery-suppression floor because its entire job is to stop "no
+    findings" being read as "no threat".
+    """
+    if not 0 < share_threshold <= 1:
+        raise ValueError("share_threshold must be in (0, 1]")
+    if min_sample < 1 or not 0 <= mixed_decode_share <= 1:
+        raise ValueError("invalid checksum-health configuration")
+    if total_count < min_sample or checksum_count < 0:
+        return None                      # too small to divide, let alone conclude
+    share = checksum_count / total_count
+    if share < share_threshold:
+        return None
+    if other_decode_count is None:
+        verdict, confidence = "undetermined", 0.6
+    elif other_decode_count / (checksum_count + other_decode_count) > mixed_decode_share:
+        verdict, confidence = "link_corruption_suspected", 0.6
+    else:
+        verdict, confidence = "checksum_validation_suspected", 0.8
+    now = now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    wid = window if window is not None else int(time.time() // SENSOR_HEALTH_EPISODE_SECS)
+    entities = json.dumps([
+        {"type": "sensor", "value": sensor},
+        {"type": "sensor_health", "value": "decode_checksum_rejection"},
+        {"type": "metric", "value": round(share, 4)},
+        {"type": "why", "value": _CHECKSUM_WHY},
+    ])
+    return {"finding_id": f"chksum-{_stable(sensor)}-{wid}",
+            "tenant_id": tenant, "sensor_ids": [sensor],
+            "detector_id": "sensor_checksum_rejection", "detector_version": "1.0",
+            "category": "sensor_health", "severity": 6, "confidence": confidence,
+            "first_seen": now, "last_seen": now, "entities": entities,
+            "summary": {"sensor_health": {
+                "schema": "cernity.sensor_health.v1",
+                "signal": "decode_checksum_rejection",
+                "sensor_id": sensor,
+                "verdict": verdict,
+                "checksum_anomaly_share": round(share, 4),
+                "checksum_anomalies": checksum_count,
+                "other_decode_anomalies": other_decode_count,
+                "sample_size": total_count,
+                "sample": "anomaly events examined in the window; not a packet census",
+                "share_threshold": share_threshold,
+                "min_sample": min_sample,
+                "remediation": _CHECKSUM_REMEDIATION[verdict],
+                "proves": ("invalid-checksum anomalies dominate this sensor's anomaly "
+                           "stream over the window"),
+                "does_not_prove": ("the share of traffic rejected, the sensor's "
+                                   "configuration, or that any traffic went uninspected; "
+                                   "confirm against the sensor's config and stats counters"),
+            }},
+            "state": "CANDIDATE"}
+
+
+def assess_sensor_health(events, sensor: str = "sensor", tenant: str = "homelab",
+                         **kwargs) -> dict | None:
+    """`tally_checksum_anomalies` + `to_sensor_health` over one window of events."""
+    t = tally_checksum_anomalies(events)
+    return to_sensor_health(t["checksum"], t["anomalies"], sensor, tenant,
+                            other_decode_count=t["other_decode"], **kwargs)
 
 
 # U8: deterministic statistical model; independent of asset-service/U7.

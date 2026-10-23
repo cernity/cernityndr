@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.14.7"
       - name: Install test dependencies
-        run: pip install kafka-python-ng jsonschema prometheus_client lz4 redis
+        run: pip install kafka-python-ng jsonschema referencing prometheus_client lz4 redis pytest pyyaml yara-python
       - name: Run unit test gate
         run: ./run-tests.sh
 
